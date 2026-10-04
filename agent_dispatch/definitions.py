@@ -399,6 +399,8 @@ def _require_role(project, role_id):
 
 
 def _check_field_values(project, fields):
+    if not isinstance(fields, dict):
+        raise DispatchError("字段表必须是「字段名: 值」的对象")
     unknown = [k for k in fields if k not in EDITABLE_ROLE_FIELDS]
     if unknown:
         raise DispatchError(f"不允许修改字段：{'、'.join(unknown)}。可修改：{'、'.join(sorted(EDITABLE_ROLE_FIELDS))}")
@@ -429,11 +431,6 @@ def _layer_json_path(project, role_id):
     return os.path.join(_layer_dir(project), f"{role_id}.json")
 
 
-def _layer_brief_path(project, role_id):
-    store.check_name(role_id)
-    return os.path.join(_layer_dir(project), f"{role_id}.brief.md")
-
-
 def role_detail(project, role_id):
     """角色的完整视图：合并后的值、每个字段的来源层、派工单模板及其来源和路径。"""
     layers = _layers(project, role_id)
@@ -461,7 +458,9 @@ def role_detail(project, role_id):
 
 
 def set_role_fields(project, role_id, fields):
-    """把字段写到这一层（有项目写项目角色，否则写本机全局）；永远不改随工具发布的 roles/。"""
+    """把字段写到这一层（有项目写项目角色，否则写本机全局）；永远不改随工具发布的 roles/。
+    各层都不存在的角色不能在这里凭空新建（新建走 add_role）。"""
+    _require_role(project, role_id)
     _check_field_values(project, fields)
     path = _layer_json_path(project, role_id)
     data = _read_json(path) or {}
@@ -483,44 +482,68 @@ def reset_role_fields(project, role_id, keys):
     return path
 
 
+def _layer_brief_dirs(project):
+    """模板从上层往下找：项目角色 → 本机全局 → 随工具发布。"""
+    dirs = [("项目", _project_role_dirs(project)[0])] if project else []
+    return dirs + [("本机全局", LOCAL_ROLE_DIR), ("随工具发布", SHIPPED_ROLE_DIR)]
+
+
+def _brief_file(directory, data, role_id):
+    """某一层 json 决定的模板文件名（与 _find_role 同一规则）。"""
+    return os.path.join(directory, data.get("brief_template") or f"{role_id}.brief.md")
+
+
 def get_brief(project, role_id):
-    """从最上层往下找第一个存在的派工单模板，带来源层和路径。"""
+    """与派工（_merged_role 的 _brief_path）同一套规则：从上层往下，第一个有角色 json 且
+    模板文件存在的层胜出；某一层有 json 但模板文件不在时落到下一层（与 _find_role 的回落一致）。"""
     _require_role(project, role_id)
-    for label, directory, data in reversed(_layers(project, role_id)):
-        if not directory:
+    for label, directory in _layer_brief_dirs(project):
+        data = _read_json(os.path.join(directory, f"{role_id}.json"))
+        if data is None:
             continue
-        name = (data or {}).get("brief_template") or f"{role_id}.brief.md"
-        path = os.path.join(directory, name)
+        path = _brief_file(directory, data, role_id)
         if os.path.isfile(path):
             return {"text": store.read_text(path, ""), "source": label, "path": path}
     return {"text": None, "source": None, "path": None}
 
 
 def set_brief(project, role_id, text):
+    """写这一层的模板。这一层还没有角色 json 时先建一个空定义（{}），否则按 _find_role 的规则
+    这一层不参与模板选择，会出现界面显示已保存、派工却不生效。"""
     _require_role(project, role_id)
-    path = _layer_brief_path(project, role_id)
-    store.write_text(path, text)
-    return path
+    path = _layer_json_path(project, role_id)
+    data = _read_json(path)
+    if data is None:
+        data = {}
+        _write_json(path, data)
+    brief = _brief_file(_layer_dir(project), data, role_id)
+    store.write_text(brief, text)
+    return brief
 
 
 def reset_brief(project, role_id):
     """删掉这一层的模板，回落到上一层的模板。"""
-    path = _layer_brief_path(project, role_id)
-    if not os.path.isfile(path):
-        layer = f"项目 {project['id']}" if project else "本机全局"
-        raise DispatchError(f"{layer}这一层没有 {role_id}.brief.md，不需要恢复继承")
-    os.remove(path)
-    return path
+    path = _layer_json_path(project, role_id)
+    data = _read_json(path)
+    layer = f"项目 {project['id']}" if project else "本机全局"
+    if data is None:
+        raise DispatchError(f"{layer}这一层没有 {role_id} 的定义文件，无从读模板")
+    brief = _brief_file(_layer_dir(project), data, role_id)
+    if not os.path.isfile(brief):
+        raise DispatchError(f"{layer}这一层没有模板文件 {os.path.basename(brief)}，不需要恢复继承")
+    os.remove(brief)
+    return brief
 
 
 def delete_role_layer(project, role_id):
     """删除这一层的角色定义和模板（项目层或本机全局层）；随工具发布的角色不能删。"""
     path = _layer_json_path(project, role_id)
-    if not os.path.isfile(path):
+    data = _read_json(path)
+    if data is None:
         layer = f"项目 {project['id']}" if project else "本机全局"
         raise DispatchError(f"{layer}这一层没有角色 {role_id} 的定义；随工具发布的角色不能删除，只能在本机全局或项目层覆盖")
     os.remove(path)
-    brief = _layer_brief_path(project, role_id)
+    brief = _brief_file(_layer_dir(project), data, role_id)
     if os.path.isfile(brief):
         os.remove(brief)
     return path

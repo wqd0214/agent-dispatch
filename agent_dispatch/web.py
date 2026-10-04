@@ -443,8 +443,12 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:3] == ["api", "config", "roles"]:
                 role_id, project = parts[3], config_project(data)
                 if "fields" in data:
+                    if not isinstance(data["fields"], dict):
+                        raise store.DispatchError("fields 必须是「字段名: 值」的对象")
                     definitions.set_role_fields(project, role_id, data["fields"])
                 elif "reset" in data:
+                    if not isinstance(data["reset"], list) or not all(isinstance(k, str) for k in data["reset"]):
+                        raise store.DispatchError("reset 必须是字段名的数组")
                     definitions.reset_role_fields(project, role_id, data["reset"])
                 else:
                     raise store.DispatchError("请求体里要有 fields（写字段）或 reset（恢复继承）")

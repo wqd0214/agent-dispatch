@@ -903,6 +903,56 @@ class ConfigApiTest(DispatchTest):
         """)
         self.assertEqual(out, "先问再清库")
 
+    def test_brief_matches_dispatch(self):
+        """配置中心看到的模板必须与派工实际用的模板是同一个文件，写入/恢复继承两边一致。"""
+        self.make_project()
+        out = self.py("""
+            project = definitions.load_project("p1")
+            # 项目层给全局角色 qa 单独改模板（这一层原本没有 qa.json）
+            definitions.set_brief(project, "qa", "项目模板 v2")
+            set_path = definitions.get_brief(project, "qa")
+            set_resolved = definitions.resolve(project, "qa", "app")["_brief_path"]
+            definitions.reset_brief(project, "qa")
+            reset_path = definitions.get_brief(project, "qa")
+            reset_resolved = definitions.resolve(project, "qa", "app")["_brief_path"]
+            # 本机全局层覆盖随工具发布的 tester
+            definitions.set_brief(None, "tester", "tester 本机模板")
+            g_set = definitions.get_brief(None, "tester")
+            g_set_resolved = definitions.resolve(None, "tester")["_brief_path"]
+            definitions.reset_brief(None, "tester")
+            g_reset = definitions.get_brief(None, "tester")
+            g_reset_resolved = definitions.resolve(None, "tester")["_brief_path"]
+            # 层 json 里指定了 brief_template 时，写入/读取也用它定位
+            import json as _json
+            definitions.set_role_fields(project, "dev", {"timeout_min": 5})
+            dev_json = os.path.join(definitions.project_dir("p1"), "roles", "dev.json")
+            dev = _json.load(open(dev_json)); dev["brief_template"] = "dev.custom.md"; _json.dump(dev, open(dev_json, "w"))
+            definitions.set_brief(project, "dev", "dev 自定义模板")
+            custom = definitions.get_brief(project, "dev")
+            custom_resolved = definitions.resolve(project, "dev")["_brief_path"]
+            definitions.delete_role_layer(project, "dev")
+            result = {"set_path": set_path, "set_resolved": set_resolved, "reset_path": reset_path,
+                      "reset_resolved": reset_resolved, "g_set": g_set, "g_set_resolved": g_set_resolved,
+                      "g_reset": g_reset, "g_reset_resolved": g_reset_resolved,
+                      "custom": custom, "custom_resolved": custom_resolved}
+        """)
+        self.assertEqual(out["set_path"]["path"], out["set_resolved"])
+        self.assertEqual((out["set_path"]["text"], out["set_path"]["source"]), ("项目模板 v2", "项目"))
+        self.assertEqual(out["reset_path"]["path"], out["reset_resolved"])
+        self.assertEqual(out["reset_path"]["source"], "本机全局")
+        self.assertEqual(out["g_set"]["path"], out["g_set_resolved"])
+        self.assertEqual(out["g_set"]["text"], "tester 本机模板")
+        self.assertEqual(out["g_reset"]["path"], out["g_reset_resolved"])
+        self.assertEqual(out["g_reset"]["source"], "随工具发布")
+        self.assertEqual(out["custom"]["path"], out["custom_resolved"])
+        self.assertTrue(out["custom"]["path"].endswith("dev.custom.md"))
+        self.assertEqual(out["custom"]["text"], "dev 自定义模板")
+
+    def test_set_role_fields_unknown_role(self):
+        self.make_project()
+        err = self.raises("definitions.set_role_fields(definitions.load_project('p1'), 'nobody', {'timeout_min': 5})")
+        self.assertIn("没有角色", err)
+
     def test_web_config_api(self):
         import socket, urllib.error, urllib.request
         self.make_project()
@@ -952,6 +1002,18 @@ class ConfigApiTest(DispatchTest):
                                                 "fields": {"timeout_min": 20, "repos": ["app"]}})[0], 200)
             self.assertEqual(call("POST", "/api/config/roles/ops", {"project": "p1",
                                                 "fields": {"repos": ["nope"]}})[0], 400)
+            # 参数类型不对给 400 加中文说明，而不是 500
+            status, error = call("POST", "/api/config/roles/ops", {"project": "p1", "fields": "oops"})
+            self.assertEqual(status, 400)
+            self.assertIn("fields", error["error"])
+            status, error = call("POST", "/api/config/roles/ops", {"project": "p1", "reset": "timeout_min"})
+            self.assertEqual(status, 400)
+            self.assertIn("reset", error["error"])
+            # 各层都不存在的角色不能凭空写字段
+            status, error = call("POST", "/api/config/roles/nobody", {"project": "p1",
+                                                "fields": {"timeout_min": 5}})
+            self.assertEqual(status, 400)
+            self.assertIn("没有角色", error["error"])
             status, detail = call("GET", "/api/config/roles/ops?project=p1")
             self.assertEqual(detail["fields"]["timeout_min"], {"value": 20, "source": "项目"})
             self.assertEqual(call("POST", "/api/config/roles/ops", {"project": "p1", "reset": ["timeout_min"]})[0], 200)
