@@ -187,3 +187,6 @@ agent-dispatch take <作业>            # 人工接手：主管不再往里派�
 ```bash
 python3 -m unittest discover -s tests     # 用假智能体跑端到端流程，tmux 方式的用例需要本机有 tmux
 ```
+
+另有一个 Tauri 2 桌面客户端（网页外壳 + 系统通知），见 [`client/README.md`](./client/README.md)。
+
