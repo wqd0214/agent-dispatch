@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>派工总览</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font: 15px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #222;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #1e1f22; color: #e6e6e6; } }
+  .card {
+    max-width: 520px; padding: 32px 36px; border-radius: 12px;
+    background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.08);
+  }
+  @media (prefers-color-scheme: dark) { .card { background: #2b2d30; } }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  p { margin: 6px 0; }
+  small { color: #888; }
+  code { background: rgba(127,127,127,.15); padding: 1px 6px; border-radius: 4px; }
+  button {
+    margin-top: 16px; padding: 8px 22px; font-size: 15px; border: none; border-radius: 8px;
+    background: #2563eb; color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <div class="card" id="connecting">
+    <h1>正在连接派工服务…</h1>
+    <p id="status-line">尝试 <code id="url-text"></code></p>
+  </div>
+  <div class="card hidden" id="failed">
+    <h1>连不上派工服务</h1>
+    <p>客户端是一个外壳，需要本机的派工网页服务：</p>
+    <p><code id="url-text2"></code><br><code>/api/overview</code></p>
+    <p>客户端已经尝试自动执行 <code>agent-dispatch web start</code> 拉起服务，但没有成功。</p>
+    <p><small>可以在终端里手动运行上面的命令，或在「设置…」里检查服务地址。Windows 上服务需要在 WSL 里运行。</small></p>
+    <button id="retry">重试</button>
+  </div>
+<script>
+  // 本地加载页：服务可达就直接跳过去；连不上则说明原因并允许重试。
+  const invoke = window.__TAURI__?.core?.invoke;
+  const params = new URLSearchParams(location.search);
+  const base = (params.get("url") || "").replace(/\/+$/, "");
+
+  async function reachable(url) {
+    try {
+      const resp = await fetch(url + "/api/overview", { signal: AbortSignal.timeout(4000) });
+      return resp.ok;
+    } catch { return false; }
+  }
+
+  async function connect() {
+    document.getElementById("failed").classList.add("hidden");
+    document.getElementById("connecting").classList.remove("hidden");
+    const url = base || (invoke ? await invoke("get_server_url") : "");
+    document.getElementById("url-text").textContent = url;
+    document.getElementById("url-text2").textContent = url;
+    // 最长等 40 秒：后台可能正在拉起服务。期间提示 Rust 侧再试一次启动命令。
+    let started = false;
+    for (let i = 0; i < 27; i++) {
+      if (await reachable(url)) { location.replace(url + "/"); return; }
+      if (!started && invoke && i === 3) { started = true; invoke("try_start_service").catch(() => {}); }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    document.getElementById("connecting").classList.add("hidden");
+    document.getElementById("failed").classList.remove("hidden");
+  }
+
+  document.getElementById("retry").addEventListener("click", connect);
+  connect();
+</script>
+</body>
+</html>

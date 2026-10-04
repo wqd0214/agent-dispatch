@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>设置 · 派工总览</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 24px 28px; font: 14px/1.7 -apple-system, "PingFang SC", sans-serif; background: #f5f6f8; color: #222; }
+  @media (prefers-color-scheme: dark) { body { background: #1e1f22; color: #e6e6e6; } }
+  label { display: block; margin: 14px 0 4px; font-weight: 600; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 7px 10px; font-size: 14px; border: 1px solid #bbb; border-radius: 6px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  button { margin-top: 20px; padding: 7px 24px; font-size: 14px; border: none; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+  button + button { background: #6b7280; margin-left: 8px; }
+  small { color: #888; }
+</style>
+</head>
+<body>
+  <h3 style="margin-top:0">设置</h3>
+  <label for="url">服务地址</label>
+  <input type="text" id="url" placeholder="http://127.0.0.1:8765">
+  <label class="row" style="font-weight:400"><input type="checkbox" id="notify"> 作业变化时发系统通知</label>
+  <p><small>保存后主窗口会重新连接。通知在后台每 5 秒对比一次总览数据，仅提示运行中 → 待审查 / 运行失败 / 意外中断 / 已叫停，以及出现「待你决定」标记。</small></p>
+  <button id="save">保存</button><button id="cancel">取消</button>
+<script>
+  const invoke = window.__TAURI__.core.invoke;
+  invoke("get_settings").then(s => {
+    document.getElementById("url").value = s.server_url;
+    document.getElementById("notify").checked = s.notify;
+  });
+  document.getElementById("save").addEventListener("click", async () => {
+    await invoke("save_settings", { url: document.getElementById("url").value.trim(), notify: document.getElementById("notify").checked });
+    window.close();
+  });
+  document.getElementById("cancel").addEventListener("click", () => window.close());
+</script>
+</body>
+</html>
