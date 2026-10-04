@@ -497,11 +497,229 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("不能启停用户的网页服务", result.stderr)
 
+    def test_web_dispatches_jobs(self):
+        """网页的操作接口：派工、续派、叫停、裁决都走子进程命令行。"""
+        import socket, urllib.error, urllib.request
+        self.make_project()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None, header=True):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            if header:
+                request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=70) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, json.load(exc)
+                finally:
+                    exc.close()
+
+        try:
+            self.ok("web", "start", "--port", str(port))
+            # 没有请求头的写操作被拒
+            self.assertEqual(call("POST", "/api/jobs", {"project": "p1", "role": "dev", "task": "x"}, header=False)[0], 403)
+            # 派工选项里能看到项目 p1 和它的角色
+            options = call("GET", "/api/dispatch-options")[1]
+            p1 = next(p for p in options["projects"] if p["id"] == "p1")
+            self.assertEqual(p1["name"], "产品线A")
+            self.assertTrue({"dev", "qa"} <= {r["id"] for r in p1["roles"]})
+            dev = next(r for r in p1["roles"] if r["id"] == "dev")
+            self.assertEqual(dev["repos"], ["app"])
+            # 派一个角色不存在的作业：400 且错误信息里含「没有角色」
+            status, error = call("POST", "/api/jobs", {"job": "w-nope", "project": "p1", "role": "nope", "task": "x"})
+            self.assertEqual(status, 400)
+            self.assertIn("没有角色", error["error"])
+            # 派工并等它跑完
+            self.assertEqual(call("POST", "/api/jobs", {"job": "w2", "project": "p1", "role": "dev",
+                                                          "task": "STATUS: PASS"})[0], 200)
+            self.ok("wait", "w2", "--timeout", "20")
+            self.assertEqual(self.job("w2")["state"], "done")
+            # 不填作业名：自动生成，以角色 ID 开头
+            status, started = call("POST", "/api/jobs", {"project": "p1", "role": "dev", "task": "STATUS: PASS"})
+            self.assertEqual(status, 200)
+            self.assertTrue(started["job"].startswith("dev-"))
+            self.ok("wait", started["job"], "--timeout", "20")
+            # 待你决定在总览里给问题原文（不是 {question: …} 对象），新界面的工作台直接显示它
+            self.ok("escalate", "w2", "要不要清库")
+            overview = call("GET", "/api/overview")[1]
+            w2 = next(j for j in overview["jobs"] if j["name"] == "w2")
+            self.assertEqual(w2["needs_user"], "要不要清库")
+            self.assertEqual(call("POST", "/api/jobs/w2/reply", {"text": "不清库，继续\nSTATUS: PASS"})[0], 200)
+            self.ok("wait", "w2", "--timeout", "20")
+            self.assertIsNone(self.job("w2")["needs_user"])
+            # 依次闸门、验收；驳回不带 reason 返回 400
+            self.assertEqual(call("POST", "/api/jobs/w2/gate")[1]["passed"], True)
+            self.assertEqual(call("POST", "/api/jobs/w2/accept")[0], 200)
+            self.assertEqual(call("POST", "/api/jobs/w2/reject", {"reason": ""})[0], 400)
+            # 长任务可以叫停
+            self.assertEqual(call("POST", "/api/jobs", {"job": "w3", "project": "p1", "role": "dev",
+                                                          "task": "SLEEP 30"})[0], 200)
+            status, stopped = call("POST", "/api/jobs/w3/stop", {"reason": "测试叫停"})
+            self.assertEqual(status, 200)
+            self.assertEqual(self.job("w3")["state"], "stopped")
+            # 续派和清除待决标记
+            self.assertEqual(call("POST", "/api/jobs/w3/reply", {"text": "STATUS: PASS"})[0], 200)
+            self.ok("wait", "w3", "--timeout", "20")
+            self.assertEqual(call("POST", "/api/jobs/w3/clear-escalation")[0], 200)
+        finally:
+            self.ok("web", "stop")
+
     def test_dry_run_prints_brief(self):
         out = self.ok("start", "j15", "-p", "t", "--dry-run", "跑场景A").stdout
         self.assertIn("派工单 j15 通道 a、b", out)
         self.assertIn("跑场景A", out)
         self.assertEqual(self.jobs(), [])
+
+    def test_dry_run_json_preview(self):
+        """start --dry-run --json：不派出，给出模型池选中的模型和通道占用情况。"""
+        self.make_project()
+        self.make_pool("dev", "fa=2", "fb=1")
+        # 通道被 r4 占着：预览要列出占用者，且自己不创建作业
+        self.ok("start", "r4", "-P", "p1", "-r", "qa", "--repo", "web", "SLEEP 30")
+        try:
+            result = self.ok("start", "r7", "-P", "p1", "-r", "qa", "--repo", "web",
+                             "--dry-run", "--json", "跑一下")
+            data = json.loads(result.stdout)
+            self.assertEqual(data["job"], "r7")
+            self.assertEqual(data["role"], "qa")
+            self.assertEqual(data["role_title"], "测试工程师")
+            self.assertEqual(data["backend"], "fakepi")
+            self.assertIn("你是测试工程师", data["brief"])
+            self.assertEqual(set(data["channels"]), {"c1", "c2"})
+            self.assertEqual(data["channels_busy"], {"c1": "r4", "c2": "r4"})
+            self.assertNotIn("r7", self.jobs())
+            # 模型池角色给出这次会选中的模型
+            pooled = json.loads(self.ok("start", "r8", "-P", "p1", "-r", "dev",
+                                         "--dry-run", "--json", "跑一下").stdout)
+            self.assertEqual(pooled["model_alias"], "fa")
+            self.assertIn("m-a", pooled["model"])
+            self.assertNotIn("r8", self.jobs())
+            # 不带 --json 的行为不变
+            plain = self.ok("start", "r9", "-P", "p1", "-r", "dev", "--dry-run", "跑一下").stdout
+            self.assertIn("你是", plain)
+        finally:
+            self.ok("stop", "r4")
+
+    def start_web(self):
+        """起一个临时网页服务，返回 (port, 关闭函数)。"""
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        self.ok("web", "start", "--port", port)
+        return port
+
+    def test_web_serves_ui_dist(self):
+        """有 ui_dist 时托管前端页面：前端路由回退到 index.html，静态文件给对 Content-Type，穿越被拒。"""
+        import socket, urllib.error, urllib.request
+        ui = os.path.join(self.tmp, "ui-dist")
+        os.makedirs(os.path.join(ui, "assets"))
+        with open(os.path.join(ui, "index.html"), "w") as f:
+            f.write("<!doctype html><title>新界面</title>")
+        with open(os.path.join(ui, "assets", "app.js"), "w") as f:
+            f.write("console.log(1)")
+        old_env = os.environ.get("AGENT_DISPATCH_UI_DIST")
+        os.environ["AGENT_DISPATCH_UI_DIST"] = ui
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        base = f"http://127.0.0.1:{port}"
+
+        def get(path):
+            request = urllib.request.Request(base + path)
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status, dict(response.headers), response.read()
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, dict(exc.headers), exc.read()
+                finally:
+                    exc.close()
+
+        try:
+            self.ok("web", "start", "--port", port)
+            for path in ("/", "/jobs/abc"):
+                status, headers, body = get(path)
+                self.assertEqual(status, 200, path)
+                self.assertIn("新界面", body.decode())
+                self.assertIn("text/html", headers["Content-Type"])
+                self.assertEqual(headers["Cache-Control"], "no-store")
+            status, headers, body = get("/assets/app.js")
+            self.assertEqual(status, 200)
+            self.assertIn("javascript", headers["Content-Type"])
+            self.assertIn("max-age", headers["Cache-Control"])
+            for path in ("/assets/../../etc/passwd", "/assets/..%2f..%2fetc%2fpasswd"):
+                self.assertEqual(get(path)[0], 404, path)
+            status, headers, body = get("/legacy")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers["Content-Type"])
+            with open(os.path.join(ROOT, "agent_dispatch", "web.html"), "rb") as f:
+                self.assertEqual(body, f.read())
+            with urllib.request.urlopen(base + "/api/overview", timeout=5) as response:
+                self.assertIn("jobs", json.load(response))
+        finally:
+            self.ok("web", "stop")
+            if old_env is None:
+                del os.environ["AGENT_DISPATCH_UI_DIST"]
+            else:
+                os.environ["AGENT_DISPATCH_UI_DIST"] = old_env
+
+    def test_ui_dist_is_built_and_committed(self):
+        """新界面的构建产物随仓库提交：用户运行时不需要 Node，ui_dist 必须在包里。"""
+        dist = os.path.join(ROOT, "agent_dispatch", "ui_dist")
+        self.assertTrue(os.path.isfile(os.path.join(dist, "index.html")),
+                        "缺少 ui_dist/index.html：在 ui/ 下执行 pnpm build 并提交产物")
+        self.assertTrue(os.path.isdir(os.path.join(dist, "assets")), "缺少 ui_dist/assets")
+
+    def test_web_preview_and_overview_fields(self):
+        """POST /api/jobs/preview 走子进程 dry-run；总览作业带 updated / ended 字段。"""
+        import socket, urllib.error, urllib.request
+        self.make_project()
+        port = self.start_web()
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None, header=True):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            if header:
+                request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=70) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, json.load(exc)
+                finally:
+                    exc.close()
+
+        try:
+            # 预览接口也要写请求头
+            self.assertEqual(call("POST", "/api/jobs/preview", {"project": "p1", "role": "dev", "task": "x"},
+                                  header=False)[0], 403)
+            status, preview = call("POST", "/api/jobs/preview", {"project": "p1", "role": "dev", "task": "跑一下"})
+            self.assertEqual(status, 200)
+            self.assertIn("后端开发工程师", preview["brief"])
+            self.assertEqual(preview["role"], "dev")
+            self.assertNotIn("preview", self.jobs())
+            status, error = call("POST", "/api/jobs/preview", {"project": "p1", "role": "nope", "task": "x"})
+            self.assertEqual(status, 400)
+            self.assertIn("没有角色", error["error"])
+            # 总览作业补 updated / ended
+            self.ok("start", "ov1", "-P", "p1", "-r", "dev", "STATUS: PASS")
+            self.ok("wait", "ov1", "--timeout", "20")
+            with urllib.request.urlopen(base + "/api/overview", timeout=5) as response:
+                overview = json.load(response)
+            job = next(j for j in overview["jobs"] if j["name"] == "ov1")
+            self.assertTrue(job["updated"])
+            self.assertTrue(job["ended"])
+        finally:
+            self.ok("web", "stop")
 
 
 class OpencodeReaderTest(unittest.TestCase):
@@ -552,6 +770,31 @@ class OpencodeReaderTest(unittest.TestCase):
         items, idle = self.read(script)
         self.assertFalse(idle)
         self.assertEqual([item["kind"] for item in items], ["user"])
+
+
+class RunCliStdoutTest(unittest.TestCase):
+    """run_cli 要把标准输出单独交回：预览解析 JSON 不能被 stderr 里的提示污染。"""
+
+    def test_stdout_is_returned_separately(self):
+        sys.path.insert(0, ROOT)
+        import agent_dispatch.web as web
+        payload = json.dumps({"brief": "你是测试工程师", "job": "j9"}, ensure_ascii=False)
+
+        class Proc:
+            returncode = 0
+            stdout = payload
+            stderr = "[agent-dispatch] 提示：stderr 里有些无关输出\n"
+
+        original = web.subprocess.run
+        web.subprocess.run = lambda *a, **k: Proc()
+        try:
+            code, text, error, out = web.run_cli(["start", "j9", "--dry-run", "--json", "-"], "跑一下")
+        finally:
+            web.subprocess.run = original
+        self.assertEqual(code, 0)
+        data = json.loads(out)  # 只解析标准输出，stderr 的提示不混进来
+        self.assertEqual(data["job"], "j9")
+        self.assertIn("无关输出", text)  # 提示文字仍然能看到
 
 
 if __name__ == "__main__":

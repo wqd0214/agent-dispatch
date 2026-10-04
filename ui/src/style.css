@@ -1,0 +1,10 @@
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font: 14px/1.6 -apple-system, 'PingFang SC', 'Segoe UI', sans-serif;
+  background: var(--el-bg-color-page);
+  color: var(--el-text-color-primary);
+}
+a { color: var(--el-color-primary); text-decoration: none; }
+.mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.sub { color: var(--el-text-color-secondary); font-size: 12px; }

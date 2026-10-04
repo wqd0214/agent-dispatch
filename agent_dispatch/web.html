@@ -73,7 +73,11 @@ button.btn:hover { border-color: var(--blue); }
 button.btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
 button.btn.danger { color: var(--red); }
 button.btn.small { padding: 1px 8px; font-size: 12px; }
-input.field, select.field { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 13px; }
+input.field, select.field, textarea.field { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 13px; }
+dialog.dlg { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; padding: 18px 20px; width: min(560px, 92vw); }
+dialog.dlg::backdrop { background: rgba(0, 0, 0, .4); }
+dialog.dlg h3 { margin: 0 0 4px; font-size: 15px; }
+dialog.dlg .foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
 input.field.num { width: 72px; }
 .toast { position: fixed; right: 20px; bottom: 20px; padding: 10px 16px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0,0,0,.15); z-index: 9; }
 .toast.err { border-color: var(--red); color: var(--red); }
@@ -113,6 +117,7 @@ code { background: var(--code); padding: 1px 5px; border-radius: 4px; font: 12px
 <header>
   <h1><a href="#/" style="color:inherit">派工总览</a></h1>
   <nav class="nav"><a href="#/" id="nav-jobs">作业</a><a href="#/models" id="nav-models">模型与角色</a></nav>
+  <button class="btn primary" id="dispatch-btn">派工</button>
   <span class="meta" id="home"></span>
   <span class="theme" id="theme">
     <button data-theme-choice="auto">跟随系统</button><button data-theme-choice="light">亮色</button><button data-theme-choice="dark">暗色</button>
@@ -408,13 +413,65 @@ function roleCard(role, enabledModels, allModels) {
 
 // ---------- 作业详情 ----------
 function buildJobView(name) {
-  const v = {name, tab: 'log', offset: -1, head: h('div'), body: h('div', {class: 'panel'}), log: h('pre', {class: 'log'}), viewer: h('pre', {class: 'log'}, '点左侧文件查看内容'), detail: null};
+  const v = {name, tab: 'log', offset: -1, head: h('div'), actions: h('div'), actionSig: null, body: h('div', {class: 'panel'}), log: h('pre', {class: 'log'}), viewer: h('pre', {class: 'log'}, '点左侧文件查看内容'), detail: null};
   v.crumb = h('p', {}, h('a', {href: '#/'}, '← 总览'));
-  main.replaceChildren(v.crumb, v.head, h('div', {style: 'height:14px'}), v.body);
+  main.replaceChildren(v.crumb, v.head, v.actions, h('div', {style: 'height:14px'}), v.body);
   return v;
+}
+// 操作区：放在独立的容器里，自动刷新时只要有人在输入或已写了字就整段跳过重绘
+function renderActions(v, d, force) {
+  const box = v.actions;
+  if (!force && [...box.querySelectorAll('textarea')].some(t => t.value.trim() !== '' || t === document.activeElement)) return;
+  const sig = d.state + '|' + JSON.stringify(d.needs_user || null);
+  if (!force && sig === v.actionSig) return;
+  v.actionSig = sig;
+  const post = (action, body) => send('POST', `/api/jobs/${encodeURIComponent(v.name)}/${action}`, body);
+  const jobAct = async fn => {
+    try { const r = await fn(); toast(r.passed === undefined ? (r.message || '已完成') : (r.passed ? '闸门通过' : '闸门未通过：' + (r.message || '')), !r || r.passed === false); }
+    catch (e) { toast(e.message, true); }
+    v.detail = null; tick();  // 置空 detail 强制重绘详情
+  };
+  const ta = ph => h('textarea', {class: 'field', rows: '3', placeholder: ph, style: 'width:100%;resize:vertical;margin:8px 0 0'});
+  const nodes = [];
+  if (d.needs_user) {
+    const answer = ta('回答执行者的问题；发送即续派，续派会自动清除这个标记');
+    nodes.push(h('div', {class: 'panel pad', style: 'margin:10px 0'},
+      h('b', {}, '等你决定'), ' ', h('span', {class: 'muted small'}, d.needs_user.at || ''),
+      h('div', {style: 'margin:6px 0'}, d.needs_user.question), answer,
+      h('div', {class: 'toolbar', style: 'margin:8px 0 0'},
+        h('button', {class: 'btn small primary', onclick: () => {
+          if (!answer.value.trim()) return toast('回答为空', true);
+          jobAct(() => post('reply', {text: answer.value.trim()}));
+        }}, '回答并续派'),
+        h('button', {class: 'btn small', onclick: () => confirm(`只清除 ${v.name} 的待决标记？`) && jobAct(() => post('clear-escalation', {}))}, '只清除标记'))));
+  }
+  if (d.state === 'held') {
+    nodes.push(h('div', {class: 'panel pad muted', style: 'margin:10px 0'}, '人工持有中，主管不会往里派工。'));
+  } else if (d.state === 'running') {
+    const reason = ta('叫停原因（可选）');
+    nodes.push(h('div', {class: 'panel pad', style: 'margin:10px 0'}, h('b', {}, '操作'), ' ', h('span', {class: 'muted small'}, '运行中'), reason,
+      h('div', {class: 'toolbar', style: 'margin:8px 0 0'},
+        h('button', {class: 'btn small danger', onclick: () => confirm(`叫停 ${v.name}？`) && jobAct(() => post('stop', {reason: reason.value.trim()}))}, '叫停'))));
+  } else if (['done', 'failed', 'interrupted', 'stopped', 'rejected'].includes(d.state)) {
+    const text = ta('续派内容（发送续派必填）；驳回时作为原因（必填）；验收时作为备注（可选）');
+    nodes.push(h('div', {class: 'panel pad', style: 'margin:10px 0'}, h('b', {}, '操作'), ' ', h('span', {class: 'muted small'}, d.state_label), text,
+      h('div', {class: 'toolbar', style: 'margin:8px 0 0'},
+        h('button', {class: 'btn small primary', onclick: () => {
+          if (!text.value.trim()) return toast('续派内容为空', true);
+          jobAct(() => post('reply', {text: text.value.trim()}));
+        }}, '发送续派'),
+        h('button', {class: 'btn small', onclick: () => jobAct(() => post('gate', {}))}, '跑闸门'),
+        h('button', {class: 'btn small', onclick: () => jobAct(() => post('accept', {note: text.value.trim()}))}, '验收'),
+        h('button', {class: 'btn small danger', onclick: () => {
+          if (!text.value.trim()) return toast('驳回必须写原因', true);
+          confirm(`驳回 ${v.name}？`) && jobAct(() => post('reject', {reason: text.value.trim()}));
+        }}, '驳回'))));
+  }
+  box.replaceChildren(...nodes);
 }
 function renderJob(v, d) {
   v.detail = d;
+  renderActions(v, d);
   v.crumb.replaceChildren(h('a', {href: '#/'}, '← 总览'), ' / ', h('a', {href: scopeHref(d.group)}, groupLabel(d.group)), ' / ', h('a', {href: scopeHref(d.group, d.project)}, d.project));
   v.head.replaceChildren(h('div', {class: 'panel pad'},
     h('div', {style: 'display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap'}, h('b', {style: 'font-size:16px'}, d.name), stateChip(d), d.status ? statusChip(d) : null,
@@ -483,6 +540,83 @@ async function pollLog(v) {
   v.offset = data.offset;
 }
 
+// ---------- 派工对话框 ----------
+let dispatchDlg = null;
+function ensureDispatchDialog() {
+  if (dispatchDlg) return dispatchDlg;
+  const f = {
+    project: h('select', {class: 'field', style: 'width:100%'}),
+    role: h('select', {class: 'field', style: 'width:100%'}),
+    repoRow: h('div', {}),
+    task: h('textarea', {class: 'field', rows: '6', placeholder: '要执行者做什么（必填）', style: 'width:100%;resize:vertical'}),
+    batch: h('input', {class: 'field', placeholder: '批次（可选）', style: 'width:100%'}),
+    job: h('input', {class: 'field', placeholder: '作业名（可选，留空自动生成）', style: 'width:100%'}),
+    err: h('div', {class: 'small', style: 'display:none;color:var(--red);margin-top:8px'})
+  };
+  const row = (label, el) => h('label', {style: 'display:block;margin:10px 0'}, h('div', {class: 'small muted', style: 'margin-bottom:4px'}, label), el);
+  dispatchDlg = h('dialog', {class: 'dlg'},
+    h('h3', {}, '派工'),
+    row('项目', f.project), row('角色', f.role), f.repoRow,
+    row('任务', f.task), row('批次', f.batch), row('作业名', f.job), f.err,
+    h('div', {class: 'foot'},
+      h('button', {class: 'btn', onclick: () => dispatchDlg.close()}, '取消'),
+      h('button', {class: 'btn primary', onclick: submitDispatch}, '派出')));
+  dispatchDlg.f = f;
+  document.body.append(dispatchDlg);
+  return dispatchDlg;
+}
+async function openDispatchDialog() {
+  let options;
+  try { options = await api('/api/dispatch-options'); } catch (e) { return toast(e.message, true); }
+  const projects = options.projects;
+  if (!projects.length) return toast('还没有定义项目，先用命令行 projects add 定义', true);
+  const dlg = ensureDispatchDialog(), f = dlg.f;
+  f.err.style.display = 'none';
+  for (const [k, el] of Object.entries({task: f.task, batch: f.batch, job: f.job})) el.value = '';
+  // 项目 → 角色 → 工程 三级联动；工程只在角色负责多个工程时出现
+  f.project.replaceChildren(...projects.map(p => h('option', {value: p.id}, p.name)));
+  const scope = currentScope();
+  const scoped = projects.find(p => p.name === scope.group);
+  if (scoped) f.project.value = scoped.id;
+  function drawRoles() {
+    const p = projects.find(x => x.id === f.project.value) || projects[0];
+    f.role.replaceChildren(...p.roles.map(r => h('option', {value: r.id}, `${r.title}（${r.id}）${r.description ? ' — ' + r.description : ''}`)));
+    drawRepos();
+  }
+  function drawRepos() {
+    const p = projects.find(x => x.id === f.project.value);
+    const r = p && p.roles.find(x => x.id === f.role.value);
+    if (r && r.repos.length > 1) {
+      const sel = h('select', {class: 'field', style: 'width:100%'}, r.repos.map(id => {
+        const repo = (p.repos || []).find(x => x.id === id) || {id, name: id};
+        return h('option', {value: id}, repo.name || id);
+      }));
+      if (scope.project) {
+        const hit = (p.repos || []).find(x => x.name === scope.project);
+        if (hit && r.repos.includes(hit.id)) sel.value = hit.id;
+      }
+      f.repoSel = sel;
+      f.repoRow.replaceChildren(h('label', {style: 'display:block;margin:10px 0'}, h('div', {class: 'small muted', style: 'margin-bottom:4px'}, '工程'), sel));
+    } else { f.repoSel = null; f.repoRow.replaceChildren(); }
+  }
+  f.project.onchange = drawRoles;
+  f.role.onchange = drawRepos;
+  drawRoles();
+  dlg.showModal();
+}
+async function submitDispatch() {
+  const dlg = ensureDispatchDialog(), f = dlg.f;
+  const body = {project: f.project.value, role: f.role.value, repo: f.repoSel ? f.repoSel.value : '',
+    task: f.task.value, batch: f.batch.value.trim(), job: f.job.value.trim()};
+  if (!body.task.trim()) { f.err.textContent = '任务为空'; f.err.style.display = ''; return; }
+  try {
+    const r = await send('POST', '/api/jobs', body);
+    toast('已派出 ' + r.job);
+    dlg.close();
+    location.hash = '#/job/' + encodeURIComponent(r.job);
+  } catch (e) { f.err.textContent = e.message; f.err.style.display = ''; }  // 失败留在对话框里显示原因
+}
+
 // ---------- 路由与轮询 ----------
 async function tick() {
   for (const [id, on] of [['nav-jobs', !location.hash.startsWith('#/models')], ['nav-models', location.hash.startsWith('#/models')]])
@@ -499,7 +633,8 @@ async function tick() {
       const detail = await api('/api/job/' + encodeURIComponent(name));
       if (current !== view) return;
       // 时间线和文件页在读内容时不重绘，避免滚动位置被打断
-      if (!current.detail || ['log', 'result'].includes(current.tab) || detail.state !== current.detail.state) renderJob(current, detail);
+      if (!current.detail || ['log', 'result'].includes(current.tab) || detail.state !== current.detail.state
+        || JSON.stringify(detail.needs_user) !== JSON.stringify(current.detail.needs_user)) renderJob(current, detail);
       else current.detail = detail;
       await pollLog(current);
     } else {
@@ -513,6 +648,7 @@ async function tick() {
 }
 function start() { clearInterval(timer); if (view === 'models') view = null; tick(); timer = setInterval(tick, 3000); }
 window.addEventListener('hashchange', start);
+document.getElementById('dispatch-btn').addEventListener('click', openDispatchDialog);
 start();
 </script>
 </body>

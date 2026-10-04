@@ -245,7 +245,19 @@ def cmd_start(a):
                                                   "session_id": session_id}, task)
     brief = render_brief(profile, task, a.job, channels, cwd)
     if a.dry_run:
-        print(brief)
+        if a.json:
+            namespace = profile.get("channel_ns") or profile["name"]
+            busy = {ch: holder for ch in channels
+                    if (holder := store.channel_holder(namespace, ch))}
+            print(json.dumps({
+                "brief": brief, "job": a.job, "project": profile.get("group") or "",
+                "repo": profile.get("project") or "", "role": profile.get("role"),
+                "role_title": profile.get("title"), "backend": backend_name, "model": model,
+                "model_alias": model_alias, "mode": mode, "cwd": cwd,
+                "channels": channels, "channels_busy": busy,
+            }, ensure_ascii=False))
+        else:
+            print(brief)
         return 0
 
     now_ts = time.time()
@@ -939,6 +951,7 @@ def build_parser():
                    help="运行方式：headless 无头；tmux 交互界面跑在 tmux 里，可接入、两轮之间不退出（默认取 profile）")
     p.add_argument("--timeout", type=float, help="单轮最长分钟数，超时终止（默认取 profile）")
     p.add_argument("--dry-run", action="store_true", help="只打印派工单，不派出")
+    p.add_argument("--json", action="store_true", help="配合 --dry-run：输出结构化的预览 JSON")
 
     p = add("wait", cmd_wait, "限时等待作业落定；超时返回码 3，只表示还在跑")
     p.add_argument("jobs", nargs="*")
