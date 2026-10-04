@@ -1,1 +1,0 @@
-import{d as o,f as n,i as c,o as p}from"./index-CeMyNEE-.js";const a=o({__name:"Placeholder",props:{title:{}},setup(e){return(r,s)=>{const t=c("el-empty");return p(),n(t,{description:`${e.title}：即将提供`},null,8,["description"])}}});export{a as default};
