@@ -128,12 +128,12 @@ function gotoRole(project: string, role: string) {
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="用在哪些角色" min-width="220">
+      <el-table-column label="用在哪些角色" min-width="150">
         <template #default="{ row }">
           <template v-if="row.used_by.length">
-            <el-button v-for="u in row.used_by" :key="u.project + u.role" link size="small" class="mono"
+            <el-button v-for="u in row.used_by" :key="u.project + u.role" link size="small"
               @click="gotoRole(u.project, u.role)">
-              {{ u.project || '全局' }}:{{ u.role }}={{ u.weight }}
+              {{ u.project ? `${u.project_name || u.project} · ${u.role_title} ×${u.weight}` : `${u.role_title} ×${u.weight}` }}
             </el-button>
           </template>
           <span v-else class="sub">-</span>
@@ -152,7 +152,7 @@ function gotoRole(project: string, role: string) {
           <span v-else class="sub">0</span>
         </template>
       </el-table-column>
-      <el-table-column label="备注" width="160">
+      <el-table-column label="备注" min-width="200">
         <template #default="{ row }">
           <el-input :model-value="row.note" size="small" placeholder="备注"
             @change="(v: string) => act(async () => { await modelApi.update(row.alias, { note: v }) }, '备注已保存')" />

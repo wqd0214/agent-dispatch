@@ -1,5 +1,5 @@
 // 带类型的接口封装。写请求统一带 X-Agent-Dispatch: 1（服务端用它挡跨站请求）。
-import type { DispatchOptions, JobActionBody, JobDetail, LogChunk, Overview } from './types'
+import type { BatchesData, DispatchOptions, JobActionBody, JobDetail, LogChunk, Overview } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -45,6 +45,12 @@ export const api = {
   dispatch: (body: JobActionBody) => post<{ ok: boolean; job?: string; message?: string }>('/api/jobs', body),
   jobAction: (name: string, action: 'reply' | 'stop' | 'gate' | 'accept' | 'reject' | 'clear-escalation', body: unknown = {}) =>
     post<{ ok: boolean; passed?: boolean; message?: string }>(`/api/jobs/${encodeURIComponent(name)}/${action}`, body),
+}
+
+export const batchApi = {
+  list: () => getJson<BatchesData>('/api/batches'),
+  update: (id: string, body: { title?: string; reason?: string }) =>
+    post(`/api/batches/${encodeURIComponent(id)}`, body),
 }
 
 // ---------- 配置中心与模型登记 ----------

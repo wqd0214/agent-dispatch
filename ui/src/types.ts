@@ -27,6 +27,10 @@ export interface JobSummary {
   updated: string
   ended: string | null
   activity: string
+  batch_title?: string
+  batch_reason?: string
+  follows?: string[]
+  dispatcher?: { kind: string; session_id: string; title: string | null } | null
 }
 
 export interface RoleDef {
@@ -51,7 +55,7 @@ export interface Overview {
   home: string
   jobs: JobSummary[]
   cases: { tc: string; verdict: string; evidence: string; note: string; job: string; batch: string; group: string; project: string; run: string }[]
-  channels: { group: string; project: string; profile: string; table: unknown }[]
+  channels: { group: string; project: string; profile: string; table: Record<string, string | null> }[]
   definitions: ProjectDef[]
 }
 
@@ -84,6 +88,19 @@ export interface Gate {
 
 export interface RunFile { path: string; size: number }
 
+export interface BatchSummary {
+  id: string
+  title: string
+  reason: string
+  created: string | null
+  dispatcher: { kind: string; session_id: string; title: string }
+  counts: { total: number; running: number; review: number; done: number; failed: number }
+  activity: string
+  jobs: string[]
+}
+
+export interface BatchesData { now: string; batches: BatchSummary[] }
+
 export interface JobDetail extends JobSummary {
   cwd: string
   session_id: string | null
@@ -99,6 +116,7 @@ export interface JobDetail extends JobSummary {
   run_dir: string | null
   run_files: RunFile[]
   job_dir: string
+  followed_by?: string[]
 }
 
 export interface LogChunk { offset: number; text: string }
@@ -117,6 +135,9 @@ export interface JobActionBody {
   role?: string
   repo?: string
   batch?: string
+  batch_title?: string
+  batch_reason?: string
+  follows?: string[]
   job?: string
   task?: string
 }
@@ -161,7 +182,7 @@ export interface RegisteredModel {
   enabled: boolean
   note: string
   paused: { reason: string; until: number } | null
-  used_by: { project: string; role: string; weight: number }[]
+  used_by: { project: string; project_name: string; role: string; role_title: string; weight: number }[]
   jobs: number
   settled: number
   pass: number

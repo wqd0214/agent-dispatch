@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, toRef, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../api'
 import { useJobDetail, useJobLog } from '../composables/useJob'
+import { useSharedOverview } from '../composables/usePolling'
 import EscalationBox from './EscalationBox.vue'
 import JobActions from './JobActions.vue'
 import { stateTag, statusTag } from '../lib/jobs'
@@ -56,6 +58,13 @@ async function openFile(path: string) {
 }
 const TEXT_RE = /\.(md|json|jsonl|txt|log|sql|csv)$/i
 
+const router = useRouter()
+const sharedOverview = useSharedOverview()
+// 用例判定：数据在总览接口里，按作业名过滤（有判定数据才显示）
+const cases = computed(() => (sharedOverview.data.value?.cases ?? []).filter(c => c.job === props.name))
+function gotoJob(name: string) { void router.push(`/jobs/${name}`) }
+function gotoBatch(batch: string) { void router.push({ path: '/batches', query: { batch } }) }
+
 const gate = computed(() => job.value?.gate ?? null)
 const st = computed(() => (job.value ? stateTag(job.value) : null))
 const sp = computed(() => statusTag(job.value?.status ?? null))
@@ -76,6 +85,13 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
       {{ relativeTime(job.updated || job.created) }}
     </div>
 
+    <div class="sub meta">
+      <template v-if="job.batch">所属事项：<a @click.prevent="gotoBatch(job.batch)" href="#">{{ job.batch_title || `（未命名）${job.batch}` }}</a> · </template>
+      <template v-if="job.dispatcher">派工者：{{ job.dispatcher.kind }}{{ job.dispatcher.title ? ` · ${job.dispatcher.title}` : '' }} · </template>
+      <template v-if="job.follows?.length">因 <a v-for="f in job.follows" :key="f" @click.prevent="gotoJob(f)" href="#">{{ f }}</a> 而派 · </template>
+      <template v-if="job.followed_by?.length">后续：<a v-for="f in job.followed_by" :key="f" class="sub" @click.prevent="gotoJob(f)" href="#">{{ f }}</a> </template>
+    </div>
+
     <EscalationBox v-if="job.needs_user" :job="job" @done="refresh" />
 
     <div class="box">
@@ -93,6 +109,16 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
           <span :class="c.ok ? 'g-ok' : 'g-bad'">{{ c.ok ? '✓' : '✗' }}</span>
           <span>{{ c.gate }}</span><span class="sub">{{ c.detail }}</span>
         </div>
+      </div>
+    </div>
+
+    <div v-if="cases.length" class="box">
+      <div class="h">用例判定 <span class="sub">PASS {{ cases.filter(c => c.verdict === 'PASS').length }} · FAIL {{ cases.filter(c => c.verdict === 'FAIL').length }} · BLOCKED {{ cases.filter(c => c.verdict === 'BLOCKED').length }}</span></div>
+      <div v-for="(c, i) in cases" :key="i" class="case">
+        <el-tag size="small" :type="({ PASS: 'success', FAIL: 'danger', BLOCKED: 'warning' } as Record<string, any>)[c.verdict] ?? 'info'">{{ c.verdict }}</el-tag>
+        <b class="mono">{{ c.tc }}</b>
+        <span class="sub">{{ c.evidence || '-' }}</span>
+        <span v-if="c.note" class="sub">（{{ c.note }}）</span>
       </div>
     </div>
 
@@ -194,4 +220,7 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
 .file { display: flex; justify-content: space-between; gap: 10px; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
 .file:hover { background: var(--el-fill-color-light); }
 .decision { border-bottom: 1px dashed var(--el-border-color-lighter); padding: 6px 2px; }
+.meta a { color: var(--el-color-primary); cursor: pointer; }
+.case { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 13px; flex-wrap: wrap; }
+.h .sub { font-weight: 400; margin-left: 8px; }
 </style>

@@ -64,7 +64,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <router-link v-for="item in [
           { key: '/dashboard', label: '工作台' },
           { key: '/jobs', label: '作业' },
-          { key: '/batches', label: '批次' },
+          { key: '/batches', label: '事项' },
           { key: '/stats', label: '统计' },
         ]" :key="item.key" :to="item.key" class="nav-item" :class="{ on: activeNav === item.key }">
           <span>{{ item.label }}</span>

@@ -11,7 +11,7 @@ export const router = createRouter({
       name: 'jobs',
       component: () => import('./views/JobsView.vue'),
     },
-    { path: '/batches', component: () => import('./views/Placeholder.vue'), props: { title: '批次' } },
+    { path: '/batches', name: 'batches', component: () => import('./views/BatchesView.vue') },
     { path: '/stats', component: () => import('./views/Placeholder.vue'), props: { title: '统计' } },
     { path: '/settings/roles', component: RolesView },
     { path: '/global/models', component: () => import('./views/GlobalModelsView.vue') },
