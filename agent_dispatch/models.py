@@ -1,8 +1,9 @@
 """模型登记与按比例选择。
 
 模型登记表：~/.agent-dispatch/models.json
-  {"cooldown_min": 30,
-   "models": {"<短名>": {"backend": "pi", "id": "<provider>/<model>", "enabled": true, "note": ""}}}
+  {"cooldown_min": 30, "default_max_concurrent": 5,
+   "models": {"<短名>": {"backend": "pi", "id": "<provider>/<model>", "enabled": true, "note": "",
+                "max_concurrent": 3}}}   # max_concurrent 可缺省 = 用全局默认；同一个 (工具, 模型ID) 共用一份并发名额}
 暂停记录：  ~/.agent-dispatch/model-health.json   {"<短名>": {"until": 时间戳, "reason": "...", "at": "..."}}
 
 角色里写模型池：
@@ -24,6 +25,7 @@ from .store import DispatchError
 REGISTRY = os.path.join(store.HOME, "models.json")
 HEALTH = os.path.join(store.HOME, "model-health.json")
 DEFAULT_COOLDOWN_MIN = 30
+DEFAULT_MAX_CONCURRENT = 5   # 同一个模型（按 工具+模型ID 计）同时最多承接几张派工单
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]*$")
 
 # 模型服务商这一类错误（额度、限流、鉴权、计费），才触发暂停与换模型；任务本身的失败不算
@@ -58,6 +60,7 @@ def _write(path, data):
 def load_registry():
     data = _read(REGISTRY, {})
     data.setdefault("cooldown_min", DEFAULT_COOLDOWN_MIN)
+    data.setdefault("default_max_concurrent", DEFAULT_MAX_CONCURRENT)
     data.setdefault("models", {})
     return data
 
@@ -104,6 +107,76 @@ def remove(alias):
         _write(REGISTRY, data)
 
 
+# ---------- 并发上限 ----------
+
+class ModelBusy(DispatchError):
+    """模型池里可用的模型都达到了并发上限：调用方应把作业排队而不是报错。"""
+
+    def __init__(self, waiting):
+        self.waiting = waiting  # [(backend, 模型ID)]：在等哪些模型空出来
+        super().__init__("模型池里的模型并发都已满")
+
+
+def check_limit(value):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise DispatchError("并发上限必须是 ≥1 的整数")
+    return value
+
+
+def set_limit(alias, value):
+    """设置单个模型的并发上限；value 为 None 表示恢复用全局默认值。"""
+    with _locked():
+        data = load_registry()
+        if alias not in data["models"]:
+            raise DispatchError(f"模型登记表里没有 {alias!r}")
+        if value is None:
+            data["models"][alias].pop("max_concurrent", None)
+        else:
+            data["models"][alias]["max_concurrent"] = check_limit(value)
+        _write(REGISTRY, data)
+
+
+def set_default_limit(value):
+    with _locked():
+        data = load_registry()
+        data["default_max_concurrent"] = check_limit(value)
+        _write(REGISTRY, data)
+
+
+def occupancy():
+    """每个 (工具, 模型ID) 当前被多少个运行中的作业占用（多个短名指向同一模型时共用一份）。"""
+    counts = {}
+    for job in store.all_jobs():
+        if store.effective_state(job) != "running":
+            continue
+        key = (job.get("backend"), job.get("model"))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def limit_for(key, registry=None):
+    """某个 (工具, 模型ID) 的并发上限：任一指向它的短名单独设了上限就用它，否则用全局默认值。"""
+    registry = registry or load_registry()
+    for model in registry["models"].values():
+        if (model["backend"], model["id"]) == key and model.get("max_concurrent"):
+            return model["max_concurrent"]
+    return registry.get("default_max_concurrent", DEFAULT_MAX_CONCURRENT)
+
+
+def full_keys(registry=None):
+    """已达到并发上限的 (工具, 模型ID) 集合。"""
+    registry = registry or load_registry()
+    counts = occupancy()
+    keys = set(counts) | {(m["backend"], m["id"]) for m in registry["models"].values()}
+    return {key for key in keys if counts.get(key, 0) >= limit_for(key, registry)}
+
+
+def busy(backend, model_id):
+    """指定的模型现在是否已满（固定模型的派工 / 续派用）。"""
+    key = (backend, model_id)
+    return occupancy().get(key, 0) >= limit_for(key)
+
+
 def discover():
     """问各后端现在有哪些模型：[(backend, provider/model)]。"""
     found = []
@@ -123,29 +196,59 @@ def discover():
     return found
 
 
+def _import_plan(found, data):
+    """把发现的模型变成待登记的 (短名, 后端, 模型ID)：已登记的跳过，同名模型带上服务商。"""
+    known = {(m["backend"], m["id"]) for m in data["models"].values()}
+    names = {}
+    for backend, model_id in found:  # 同名模型出现在多个服务商下时，短名带上服务商
+        names.setdefault((backend, model_id.rpartition("/")[2]), []).append(model_id)
+    plan = []
+    for backend, model_id in found:
+        if (backend, model_id) in known:
+            continue
+        prefix = "oc" if backend == "opencode" else backend
+        provider, _, name = model_id.rpartition("/")
+        alias = f"{prefix}:{name}" if len(names[(backend, name)]) == 1 else f"{prefix}:{name}@{provider}"
+        if alias in data["models"]:
+            alias = f"{prefix}:{name}@{provider}"
+        data["models"][alias] = {"backend": backend, "id": model_id, "enabled": True, "note": ""}
+        known.add((backend, model_id))
+        plan.append(alias)
+    return plan
+
+
 def import_all(backend=None):
     """把某个后端（不指定则全部）现有的模型登记进来（已登记的不动），返回新增的短名。"""
-    added = []
     with _locked():
         data = load_registry()
-        known = {(m["backend"], m["id"]) for m in data["models"].values()}
         found = [item for item in discover() if backend is None or item[0] == backend]
-        names = {}
-        for backend, model_id in found:  # 同名模型出现在多个服务商下时，短名带上服务商
-            names.setdefault((backend, model_id.rpartition("/")[2]), []).append(model_id)
-        for backend, model_id in found:
-            if (backend, model_id) in known:
-                continue
-            prefix = "oc" if backend == "opencode" else backend
-            provider, _, name = model_id.rpartition("/")
-            alias = f"{prefix}:{name}" if len(names[(backend, name)]) == 1 else f"{prefix}:{name}@{provider}"
-            if alias in data["models"]:
-                alias = f"{prefix}:{name}@{provider}"
-            data["models"][alias] = {"backend": backend, "id": model_id, "enabled": True, "note": ""}
-            known.add((backend, model_id))
-            added.append(alias)
-        _write(REGISTRY, data)
+        added = _import_plan(found, data)
+        if added:
+            _write(REGISTRY, data)
     return added
+
+
+def import_named(names, backend=None):
+    """只登记指名时模型 ID 的候选（找不到的报错），返回新增的短名。"""
+    want = set(names)
+    found = [item for item in discover() if item[1] in want and (backend is None or item[0] == backend)]
+    missing = want - {item[1] for item in found}
+    if missing:
+        raise DispatchError(f"工具里没有这些模型：{'、'.join(sorted(missing))}。先看候选：agent-dispatch models import --list")
+    with _locked():
+        data = load_registry()
+        added = _import_plan(found, data)
+        if added:
+            _write(REGISTRY, data)
+    return added
+
+
+def discover_candidates(backend=None):
+    """先看再选：各工具现在有哪些模型、哪些已登记。[(backend, 模型ID, 已登记短名或None)]。"""
+    registry = load_registry()["models"]
+    known = {(m["backend"], m["id"]): alias for alias, m in registry.items()}
+    return [{"backend": b, "id": model_id, "registered": (b, model_id) in known, "alias": known.get((b, model_id))}
+            for b, model_id in discover() if backend is None or b == backend]
 
 
 # ---------- 暂停（服务商出错后一段时间内不再选它） ----------
@@ -228,12 +331,13 @@ def usage(project_id, role_id, any_project=False):
 
 
 def candidates(pool, exclude=()):
-    """池子里现在能用的模型，以及不能用的原因。"""
-    registry, paused = load_registry()["models"], health()
+    """池子里现在能用的模型，以及不能用的原因（含并发已满）。"""
+    registry, paused = load_registry(), health()
+    full = full_keys(registry)
     usable, skipped = [], {}
     for entry in pool:
         alias = entry["model"]
-        model = registry.get(alias)
+        model = registry["models"].get(alias)
         if alias in exclude:
             skipped[alias] = "本作业已试过"
         elif not model:
@@ -244,15 +348,21 @@ def candidates(pool, exclude=()):
             skipped[alias] = f"派工工具 {model['backend']} 已停用"
         elif alias in paused:
             skipped[alias] = f"暂停中（{paused[alias]['reason'][:60]}）"
+        elif (model["backend"], model["id"]) in full:
+            skipped[alias] = "并发已满"
         else:
             usable.append(entry)
     return usable, skipped
 
 
 def pick(pool, project_id, role_id, exclude=()):
-    """按历史严格配比选一个模型，返回 (短名, 登记信息)。"""
+    """按历史严格配比选一个模型，返回 (短名, 登记信息)。可用的都达到了并发上限时抛 ModelBusy。"""
     usable, skipped = candidates(pool, exclude)
     if not usable:
+        waiting = [(load_registry()["models"][a]["backend"], load_registry()["models"][a]["id"])
+                   for a in skipped if skipped[a] == "并发已满"]
+        if waiting and all(why == "并发已满" for why in skipped.values()):
+            raise ModelBusy(waiting)
         detail = "；".join(f"{alias}：{why}" for alias, why in skipped.items())
         raise DispatchError(f"角色 {role_id} 的模型池里现在没有可用的模型（{detail}）。请到网页或用 agent-dispatch models 处理")
     counts = usage(project_id, role_id)

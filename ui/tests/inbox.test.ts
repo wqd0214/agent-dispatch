@@ -62,3 +62,23 @@ describe('gateState', () => {
     expect(gateState({ gate_ok: null })).toBe('none')
   })
 })
+
+describe('排队中的作业归入正在执行组', () => {
+  it('queued 属于 running 分组，且排在正在执行组的末尾', () => {
+    const groups = inboxGroups([
+      job({ name: 'run-a', state: 'running' }),
+      job({ name: 'q-a', state: 'queued', updated: '2026-10-05 10:00:00' }),
+      job({ name: 'q-b', state: 'queued', updated: '2026-10-04 10:00:00' }),
+      job({ name: 'run-b', state: 'running', updated: '2026-10-01 10:00:00' }),
+    ])
+    const running = groups.find(g => g.key === 'running')!
+    expect(running.jobs.map(j => j.name)).toEqual(['run-b', 'run-a', 'q-a', 'q-b'])
+  })
+  it('排队组内仍按最近活动在前', () => {
+    const groups = inboxGroups([
+      job({ name: 'q-old', state: 'queued', updated: '2026-10-01 10:00:00' }),
+      job({ name: 'q-new', state: 'queued', updated: '2026-10-02 10:00:00' }),
+    ])
+    expect(groups.find(g => g.key === 'running')!.jobs.map(j => j.name)).toEqual(['q-new', 'q-old'])
+  })
+})

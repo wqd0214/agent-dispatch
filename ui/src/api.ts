@@ -54,7 +54,7 @@ export const batchApi = {
 }
 
 // ---------- 配置中心与模型登记 ----------
-import type { ConfigOverview, ModelPage, PoolEntry, RoleDetail } from './types'
+import type { ConfigOverview, ModelCandidate, ModelPage, PoolEntry, RoleDetail } from './types'
 
 type PostResult = { ok: boolean; message?: string; error?: string }
 
@@ -120,9 +120,13 @@ export const projectApi = {
 export const modelApi = {
   page: () => getJson<ModelPage>('/api/models'),
   importFrom: (backend: string) => post<{ added: string[] }>('/api/models/import', { backend }),
+  importNames: (names: string[], backend?: string) => post<{ added: string[] }>('/api/models/import', { names, backend }),
+  candidates: (backend?: string) =>
+    getJson<{ candidates: ModelCandidate[] }>(`/api/models/candidates${backend ? `?backend=${encodeURIComponent(backend)}` : ''}`),
   add: (body: { alias: string; backend: string; id: string; note: string }) => post('/api/models', body),
-  update: (alias: string, body: { enabled?: boolean; note?: string }) =>
+  update: (alias: string, body: { enabled?: boolean; note?: string; max_concurrent?: number | null }) =>
     post(`/api/models/${encodeURIComponent(alias)}`, body),
+  setDefaultLimit: (value: number) => post('/api/models/settings', { default_max_concurrent: value }),
   resume: (alias: string) => post(`/api/models/${encodeURIComponent(alias)}/resume`),
   remove: (alias: string) => del(`/api/models/${encodeURIComponent(alias)}`),
   setBackendEnabled: (name: string, enabled: boolean) => post(`/api/backends/${encodeURIComponent(name)}`, { enabled }),

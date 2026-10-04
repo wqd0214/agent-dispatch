@@ -17,7 +17,7 @@ import webbrowser
 from . import backends, definitions, gates, inject, models, runner, store, tmux
 from .store import DispatchError, identify_dispatcher, touch_session, who_dispatches
 
-STATE_LABEL = {"running": "运行中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
+STATE_LABEL = {"running": "运行中", "queued": "排队中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
                "interrupted": "意外中断", "held": "人工持有", "accepted": "已验收", "rejected": "已驳回"}
 REPLYABLE = {"done", "failed", "stopped", "interrupted", "rejected"}
 EXIT_TIMEOUT = 3
@@ -233,12 +233,16 @@ def cmd_start(a):
     if not os.path.isdir(cwd):
         raise DispatchError(f"工作目录不存在：{cwd}")
     model_alias = None
-    if profile.get("model_pool"):  # 模型由角色的模型池按比例决定，主管不能指定
+    pooled = bool(profile.get("model_pool"))
+    if pooled:  # 模型由角色的模型池按比例决定，主管不能指定
         if a.model or a.backend:
             raise DispatchError(f"角色 {profile.get('title') or profile.get('role')} 的模型由它的模型池按比例决定，"
                                 "不能用 --model / --backend 指定。要调整请改模型池（网页「模型与角色」或 agent-dispatch roles pool）")
-        model_alias, picked = models.pick(profile["model_pool"], profile.get("project_id"), profile.get("role"))
-        backend_name, model = picked["backend"], picked["id"]
+        try:
+            model_alias, picked = models.pick(profile["model_pool"], profile.get("project_id"), profile.get("role"))
+            backend_name, model = picked["backend"], picked["id"]
+        except models.ModelBusy as busy:  # 预览用：先拿一个在等的模型顶着，真正排不排队由锁里的复查决定
+            backend_name, model = busy.waiting[0]
     else:
         backend_name = a.backend or profile.get("backend")
         if not backend_name:
@@ -310,16 +314,46 @@ def cmd_start(a):
         "runner_pid": os.getpid(),  # 运行器接管前先用本进程占位，避免被判成意外中断
         "turns": [], "decisions": [],
     }
-    store.save(job)
+    # 占用检查与占位（写台账）在同一把锁里完成，并发派工时不会超发
+    queued_waiting = None
+    with models._locked():
+        if pooled:  # 锁里重新选：早先的结果在并发下可能已失效
+            try:
+                model_alias, picked = models.pick(profile["model_pool"], profile.get("project_id"), profile.get("role"))
+            except models.ModelBusy as busy:
+                queued_waiting = busy.waiting
+                backend_name, model = busy.waiting[0]
+                model_alias = None
+            else:
+                backend_name, model = picked["backend"], picked["id"]
+                session_id = backends.initial_session(backends.get(backend_name), a.job)
+                if mode == "tmux":
+                    backends.build_interactive_argv(backends.get(backend_name),
+                                                    {"name": a.job, "backend": backend_name, "model": model,
+                                                     "session_id": session_id}, task)
+        elif models.busy(backend_name, model):
+            queued_waiting = [(backend_name, model)]
+        job.update(backend=backend_name, model=model, model_alias=model_alias,
+                   backend_args=backend_args(profile, backend_name))
+        if queued_waiting:
+            job.update(state="queued", runner_pid=None,
+                       waiting_models=[{"backend": b, "id": mid, "alias": models.alias_of(b, mid)} for b, mid in queued_waiting])
+        store.save(job)
     store.write_text(store.job_path(a.job, "brief.md"), brief)
-    try:
-        launch(job, brief)
-    except DispatchError:
-        shutil.rmtree(store.job_dir(a.job), ignore_errors=True)
-        raise
-    who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
-    picked_note = f"（按模型池选中 {model_alias}）" if model_alias else ""
-    store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model}{picked_note} 通道={','.join(channels) or '无'}")
+    if queued_waiting:
+        store.write_text(store.job_path(a.job, "turns", f"{job['turn']}.task.md"), brief)
+        who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
+        store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model} 通道={','.join(channels) or '无'}")
+        store.info(f"模型并发已满，作业进入排队：等 {waiting_text(job)}。有模型空出来会自动开始，不需要重派")
+    else:
+        try:
+            launch(job, brief)
+        except DispatchError:
+            shutil.rmtree(store.job_dir(a.job), ignore_errors=True)
+            raise
+        who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
+        picked_note = f"（按模型池选中 {model_alias}）" if model_alias else ""
+        store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model}{picked_note} 通道={','.join(channels) or '无'}")
     if a.batch:
         meta = store.register_batch(a.batch, a.batch_title, a.batch_reason, job["dispatcher"])
         if not (meta or {}).get("title"):
@@ -334,23 +368,40 @@ def cmd_reply(a):
     task = read_task(a)
     if not task:
         raise DispatchError("内容为空")
-    with store.locked(a.job):
-        job = reconcile_locked(a.job)
-        state = job["state"]
-        if state == "running":
-            raise DispatchError(f"作业 {a.job} 还在运行：先 wait 等它结束，或 stop 叫停")
-        if state == "held":
-            raise DispatchError(f"作业 {a.job} 正被人工持有：先 release 交还")
-        if state == "accepted" and not a.force:
-            raise DispatchError(f"作业 {a.job} 已验收；确实要继续派请加 --force")
-        if state not in REPLYABLE and not a.force:
-            raise DispatchError(f"作业 {a.job} 当前状态 {state} 不能续派")
-        profile = load_profile(job["profile"])
-        now_ts = time.time()
-        job.update(state="running", status=None, reason=None, turn=job["turn"] + 1, gate=None, needs_user=None,
-                   follow=False, turn_started=store.now(), turn_started_ts=now_ts, runner_pid=os.getpid())
-        decide(job, "reply", task[:300])
-        store.save(job)
+    queued = False
+    with models._locked():  # 锁序与排队启动一致（先模型锁再作业锁），避免死锁
+        with store.locked(a.job):
+            job = reconcile_locked(a.job)
+            state = job["state"]
+            if state == "running":
+                raise DispatchError(f"作业 {a.job} 还在运行：先 wait 等它结束，或 stop 叫停")
+            if state == "held":
+                raise DispatchError(f"作业 {a.job} 正被人工持有：先 release 交还")
+            if state == "accepted" and not a.force:
+                raise DispatchError(f"作业 {a.job} 已验收；确实要继续派请加 --force")
+            if state not in REPLYABLE and not a.force:
+                raise DispatchError(f"作业 {a.job} 当前状态 {state} 不能续派")
+            profile = load_profile(job["profile"])
+            now_ts = time.time()
+            full_text = task + (profile.get("reply_suffix") or "")
+            if models.busy(job["backend"], job["model"]):
+                # 会话在那个模型上，满了就排队等，不换模型
+                queued = True
+                key = (job["backend"], job["model"])
+                job.update(state="queued", status=None, reason=None, turn=job["turn"] + 1, gate=None, needs_user=None,
+                           follow=False, turn_started=store.now(), turn_started_ts=now_ts, runner_pid=None,
+                           waiting_models=[{"backend": key[0], "id": key[1], "alias": models.alias_of(*key)}])
+                decide(job, "reply", task[:300])
+                store.save(job)
+                store.write_text(store.job_path(a.job, "turns", f"{job['turn']}.task.md"), full_text)
+            else:
+                job.update(state="running", status=None, reason=None, turn=job["turn"] + 1, gate=None, needs_user=None,
+                           follow=False, turn_started=store.now(), turn_started_ts=now_ts, runner_pid=os.getpid())
+                decide(job, "reply", task[:300])
+                store.save(job)
+    if queued:
+        store.info(f"已续派 {a.job} 第 {job['turn']} 轮，但模型并发已满，排队中：等 {waiting_text(job)}。空出来会自动开始")
+        return 0
     if not backends.enabled(job["backend"]):
         store.info(f"注意：派工工具 {job['backend']} 已停用。续派仍在原会话里进行；新派工不会再用它")
     try:
@@ -405,9 +456,16 @@ def resolve_targets(a):
 def summary_line(job):
     parts = [job["name"], STATE_LABEL.get(job["state"], job["state"]), f"STATUS={job.get('status') or '-'}",
              f"第{job['turn']}轮", elapsed(job)]
+    if job.get("state") == "queued":
+        parts[1] += f"（等 {waiting_text(job)}）"
     if job.get("reason"):
         parts.append(job["reason"])
     return "  ".join(parts)
+
+
+def waiting_text(job):
+    """排队中的作业在等哪些模型空出来，如「pi:glm-flash、opencode:glm-5」。"""
+    return "、".join(f"{w.get('backend')}:{w.get('alias') or w.get('id')}" for w in job.get("waiting_models") or []) or "模型空位"
 
 
 def cmd_wait(a):
@@ -415,14 +473,14 @@ def cmd_wait(a):
     deadline = time.time() + a.timeout
     while True:
         jobs = [get_job(n) for n in names]
-        pending = [j for j in jobs if j["state"] == "running"]
+        pending = [j for j in jobs if j["state"] in ("running", "queued")]
         if not pending or time.time() >= deadline:
             break
         time.sleep(min(2, max(0.1, deadline - time.time())))
     for job in jobs:
         print(summary_line(job))
     if pending:
-        store.info(f"{len(pending)} 个作业仍在运行。这只是检查点，不是失败：继续 wait，或用 log 看进展")
+        store.info(f"{len(pending)} 个作业还在运行或排队。这只是检查点，不是失败：继续 wait，或用 log 看进展")
         return EXIT_TIMEOUT
     return 0
 
@@ -496,9 +554,12 @@ def print_status_table(batch=None, group=None, project=None):
     for job in jobs:
         flag = " ⚑待你决定" if job.get("needs_user") else ""
         channels = job.get("channels") or []
+        state = STATE_LABEL.get(job["state"], job["state"]) + flag
+        if job.get("state") == "queued":
+            state += f" · 等 {waiting_text(job)}"
         rows.append(("/".join(part for part in store.project_of(job) if part) or "-", job["name"], job.get("role_title") or "-",
                      job.get("batch") or "-", job["backend"],
-                     STATE_LABEL.get(job["state"], job["state"]) + flag, job.get("status") or "-", job["turn"],
+                     state, job.get("status") or "-", job["turn"],
                      elapsed(job), (f"{len(channels)}个" if len(channels) > 3 else ",".join(channels)) or "-",
                      runner.clip(job.get("task", ""), 30)))
     table(rows)
@@ -517,6 +578,8 @@ def print_job_detail(job):
     print(f"项目      {' / '.join(part for part in store.project_of(job) if part) or '-'}"
           + (f"   角色 {job['role_title']}（{job['role']}）" if job.get("role") else ""))
     print(f"状态      {STATE_LABEL.get(job['state'], job['state'])}   STATUS={job.get('status') or '-'}   第 {job['turn']} 轮   耗时 {elapsed(job)}")
+    if job.get("state") == "queued":
+        print(f"排队      在等 {waiting_text(job)} 空出来；空出后自动开始，不需要重派")
     if job.get("reason"):
         print(f"原因      {job['reason']}")
     print(f"后端      {job['backend']}  {job['model']}" + (f"（{job['model_alias']}，按模型池选中）" if job.get("model_alias") else "")
@@ -625,6 +688,14 @@ def cmd_history(a):
 
 def stop_job(name):
     job = get_job(name)
+    if job["state"] == "queued":  # 还没启动运行器，直接落定即可
+        with store.locked(name):
+            job = store.load(name)
+            if job.get("state") == "queued":
+                job.update(state="stopped", reason="被叫停（排队中，尚未开始）", ended=store.now(),
+                           ended_ts=time.time(), waiting_models=None, runner_pid=None)
+                store.save(job)
+        return job, True
     if job["state"] != "running":
         return job, False
     runner_pid = job.get("runner_pid")
@@ -843,7 +914,8 @@ def parse_pool(pairs):
 
 def model_table():
     registry, paused = models.load_registry(), models.health()
-    rows = [("短名", "后端", "模型", "状态", "用在哪些角色", "备注")]
+    counts = models.occupancy()
+    rows = [("短名", "后端", "模型", "并发", "状态", "用在哪些角色", "备注")]
     users = {}
     for project_id, role_id, pool in models.all_pools():
         for entry in pool:
@@ -851,7 +923,10 @@ def model_table():
     for alias, model in sorted(registry["models"].items()):
         state = ("停用" if not model.get("enabled", True) else f"{model['backend']} 已停用" if not backends.enabled(model["backend"])
                  else f"暂停至 {time.strftime('%H:%M', time.localtime(paused[alias]['until']))}" if alias in paused else "可用")
-        rows.append((alias, model["backend"], model["id"], state, "、".join(users.get(alias, [])) or "-", model.get("note") or ""))
+        key = (model["backend"], model["id"])
+        concurrency = f"{counts.get(key, 0)}/{models.limit_for(key, registry)}"
+        rows.append((alias, model["backend"], model["id"], concurrency, state,
+                     "、".join(users.get(alias, [])) or "-", model.get("note") or ""))
     return rows
 
 
@@ -859,15 +934,50 @@ def cmd_models(a):
     action = a.action or "list"
     if action == "list":
         if not models.load_registry()["models"]:
-            print("（模型登记表是空的。导入：agent-dispatch models import --backend pi）")
+            print("（模型登记表是空的。导入：agent-dispatch models import --list）")
             return 0
         table(model_table())
         return 0
     if action == "import":
         if a.backend:
             backends.get(a.backend)
-        added = models.import_all(a.backend)
+        if a.list_candidates:  # 先看再选：列出工具里现有的模型及登记情况
+            candidates = models.discover_candidates(a.backend)
+            if not candidates:
+                print("（没有从工具里发现模型）")
+                return 0
+            rows = [("后端", "模型 ID", "登记情况")]
+            rows += [(c["backend"], c["id"], f"已登记（{c['alias']}）" if c["registered"] else "未登记") for c in candidates]
+            table(rows)
+            print("\n按名导入：agent-dispatch models import <模型ID …> [--backend …]；全部导入：agent-dispatch models import [--backend …]")
+            return 0
+        names = a.names + ([a.alias] if a.alias else [])  # 单个名字会落在 alias 位上
+        if names:
+            added = models.import_named(names, a.backend)
+        else:
+            added = models.import_all(a.backend)
         store.info(f"新登记 {len(added)} 个模型" + (f"：{'、'.join(added)}" if added else "（都已登记过）"))
+        return 0
+    if action == "limit":
+        from . import runner
+        if a.default_limit is not None:
+            models.set_default_limit(a.default_limit)
+            runner.promote_queued()  # 调大上限后，排队中的作业可能马上能言
+            store.info(f"全局默认并发上限已设为 {a.default_limit}（没单独设置的模型用它）")
+            return 0
+        if not a.alias or not a.value:
+            raise DispatchError("用法：agent-dispatch models limit <短名> <N|default>，或 models limit --default <N>")
+        if a.value == "default":
+            value = None
+        else:
+            try:
+                number = int(a.value)
+            except ValueError:
+                raise DispatchError(f"并发上限必须是 ≥1 的整数或 default：{a.value!r}")
+            value = models.check_limit(number)
+        models.set_limit(a.alias, value)
+        runner.promote_queued()
+        store.info(f"模型 {a.alias} 的并发上限已" + ("恢复为全局默认值" if value is None else f"设为 {value}"))
         return 0
     if not a.alias:
         raise DispatchError(f"models {action} 需要模型短名")
@@ -1286,12 +1396,16 @@ def build_parser():
     p.add_argument("action", nargs="?", choices=["list", "enable", "disable"])
     p.add_argument("name", nargs="?")
 
-    p = add("models", cmd_models, "模型登记：列表 / import / add / enable / disable / note / resume / remove")
-    p.add_argument("action", nargs="?", choices=["list", "import", "add", "enable", "disable", "note", "resume", "remove"])
+    p = add("models", cmd_models, "模型登记：列表 / import / limit / add / enable / disable / note / resume / remove")
+    p.add_argument("action", nargs="?", choices=["list", "import", "limit", "add", "enable", "disable", "note", "resume", "remove"])
     p.add_argument("alias", nargs="?", help="模型短名，如 pi:glm-5.3-flash")
-    p.add_argument("--backend", help="add：后端；import：只导入这个后端的模型（不给则全部）")
+    p.add_argument("value", nargs="?", help="limit：N 或 default（恢复用全局默认值）")
+    p.add_argument("names", nargs="*", help="import：要导入的模型 ID 列表")
+    p.add_argument("--backend", help="add：后端；import：只看 / 只导入这个后端的模型（不给则全部）")
     p.add_argument("--id", help="add：后端里的模型 ID，如 cc-switch-zhipu-glm/glm-5.3-flash")
     p.add_argument("--note", help="add / note：备注")
+    p.add_argument("--list", dest="list_candidates", action="store_true", help="import：先列出工具里的候选模型及登记情况，不导入")
+    p.add_argument("--default", dest="default_limit", type=int, metavar="N", help="limit：设置全局默认并发上限")
 
     p = add("projects", cmd_projects, "项目定义：列表 / show <ID> / add <ID> / add-repo <ID> <工程名>=<目录>")
     p.add_argument("action", nargs="?", choices=["list", "show", "add", "add-repo"])

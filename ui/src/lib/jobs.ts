@@ -52,10 +52,17 @@ export interface TagStyle { label: string; type: 'primary' | 'success' | 'warnin
 export function stateTag(job: Pick<JobSummary, 'state' | 'state_label' | 'needs_user'>): TagStyle {
   if (job.needs_user) return { label: '待你决定', type: 'warning' }
   const map: Record<string, TagStyle['type']> = {
-    running: 'primary', done: 'warning', failed: 'danger', interrupted: 'danger',
+    running: 'primary', queued: 'info', done: 'warning', failed: 'danger', interrupted: 'danger',
     stopped: 'info', held: 'info', accepted: 'success', rejected: 'info',
   }
-  return { label: job.state_label || job.state, type: map[job.state] ?? 'info' }
+  return { label: queueText(job) ?? job.state_label ?? job.state, type: map[job.state] ?? 'info' }
+}
+
+/** 排队中的作业显示「排队中 · 等 <模型>」；非排队返回 null */
+export function queueText(job: Pick<JobSummary, 'state' | 'waiting_models'>): string | null {
+  if (job.state !== 'queued') return null
+  const names = (job.waiting_models ?? []).map(w => `${w.backend}:${w.alias || w.id}`)
+  return names.length ? `排队中 · 等 ${names.join('、')}` : '排队中'
 }
 
 /** 报告 STATUS → 标签 */

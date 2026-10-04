@@ -60,7 +60,7 @@ async function save() {
     edit.saving = false
   }
 }
-function tagOf(j: { state: string; state_label: string; needs_user: string | null }) { return stateTag(j) }
+function tagOf(j: { state: string; state_label: string; needs_user: string | null; waiting_models?: { backend: string; id: string; alias: string | null }[] }) { return stateTag(j) }
 </script>
 
 <template>

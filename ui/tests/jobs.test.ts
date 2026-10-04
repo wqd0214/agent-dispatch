@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EMPTY_FILTERS, filterJobs, needsAttention, projectEntries, sortJobs, stateTag, statusTag } from '../src/lib/jobs'
+import { EMPTY_FILTERS, filterJobs, needsAttention, projectEntries, queueText, sortJobs, stateTag, statusTag } from '../src/lib/jobs'
 import type { JobSummary, ProjectDef } from '../src/types'
 
 function job(partial: Partial<JobSummary>): JobSummary {
@@ -89,5 +89,23 @@ describe('projectEntries', () => {
     const entries = projectEntries(jobs, defs)
     expect(entries.map(e => e.label)).toEqual(['全部项目', 'WMS_ZC_C2', 'WMS_ZC_A04', '别的项目'])
     expect(entries.map(e => e.pending)).toEqual([3, 1, 1, 1])
+  })
+})
+
+describe('queueText（排队中 · 等 <模型>）', () => {
+  it('排队中的作业列出在等的模型', () => {
+    expect(queueText(job({
+      state: 'queued', state_label: '排队中',
+      waiting_models: [{ backend: 'pi', id: 'p/m', alias: 'm' }, { backend: 'opencode', id: 'o/m', alias: null }],
+    }))).toBe('排队中 · 等 pi:m、opencode:o/m')
+  })
+  it('没有在等清单时只显示「排队中」；非排队返回 null', () => {
+    expect(queueText(job({ state: 'queued', state_label: '排队中' }))).toBe('排队中')
+    expect(queueText(job({ state: 'running' }))).toBeNull()
+  })
+  it('stateTag 对排队作业给出排队文案', () => {
+    const tag = stateTag(job({ state: 'queued', state_label: '排队中', waiting_models: [{ backend: 'pi', id: 'p/m', alias: 'm' }] }))
+    expect(tag.label).toBe('排队中 · 等 pi:m')
+    expect(tag.type).toBe('info')
   })
 })

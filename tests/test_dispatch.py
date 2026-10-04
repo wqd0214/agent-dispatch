@@ -1902,3 +1902,247 @@ class InjectTest(DispatchBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelLimitTest(DispatchBase):
+    """模型并发上限：默认值、单独覆盖、满员排队与自动开始、并发不超发、接口与命令行读写。"""
+
+    def start_async(self, *args):
+        """并发派工用：不等命令结束，返回子进程。"""
+        env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT)
+        for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
+                    "CLAUDE_CODE_SESSION_ID", "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
+            env.pop(key, None)
+        return subprocess.Popen([sys.executable, "-m", "agent_dispatch", *args], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def test_default_limit_queues_and_auto_starts(self):
+        self.ok("models", "limit", "--default", "1")
+        self.ok("start", "j1", "-p", "t", "SLEEP 3\nSTATUS: PASS")
+        result = self.ok("start", "j2", "-p", "t", "STATUS: PASS")
+        self.assertIn("排队", result.stderr + result.stdout)
+        job = self.job("j2")
+        self.assertEqual(job["state"], "queued")
+        self.assertTrue(job["waiting_models"])
+        self.assertEqual(job["waiting_models"][0]["backend"], "fakepi")
+        out = self.ok("status").stdout
+        self.assertIn("排队中", out)
+        self.assertIn("等 fakepi:", out)  # 总览里写明在等哪些模型
+        detail = self.ok("status", "j2").stdout
+        self.assertIn("排队", detail)
+        waiting = self.cli("wait", "j2", "--timeout", "1")
+        self.assertEqual(waiting.returncode, 3)  # 排队中的作业 wait 行为与运行中一致
+        self.ok("wait", "j2", "--timeout", "40")
+        self.assertEqual(self.job("j2")["status"], "PASS")
+        self.assertEqual(self.job("j2")["state"], "done")
+
+    def test_per_model_limit_overrides_default(self):
+        self.make_project()
+        self.make_pool("qa", "fa=50", "fb=50")
+        self.ok("models", "limit", "--default", "10")
+        self.ok("models", "limit", "fa", "1")
+        self.ok("start", "j1", "-P", "p1", "-r", "qa", "--repo", "app", "SLEEP 3\nSTATUS: PASS")
+        self.assertEqual(self.job("j1")["model_alias"], "fa")
+        self.ok("start", "j2", "-P", "p1", "-r", "qa", "--repo", "app", "STATUS: PASS")  # fa 满了，按比例换 fb
+        self.assertEqual(self.job("j2")["model_alias"], "fb")
+        self.ok("wait", "j1", "--timeout", "30")
+        self.ok("wait", "j2", "--timeout", "30")
+
+    def test_pool_all_full_queues(self):
+        self.make_project()
+        self.make_pool("qa", "fa=50", "fb=50")
+        self.ok("models", "limit", "--default", "1")  # fa、fb 都限 1
+        self.ok("start", "j1", "-P", "p1", "-r", "qa", "--repo", "app", "SLEEP 3\nSTATUS: PASS")
+        self.ok("start", "j2", "-P", "p1", "-r", "qa", "--repo", "app", "SLEEP 2\nSTATUS: PASS")
+        self.ok("start", "j3", "-P", "p1", "-r", "qa", "--repo", "app", "STATUS: PASS")
+        self.assertEqual(self.job("j3")["state"], "queued")
+        self.ok("wait", "j1", "--timeout", "40")
+        self.ok("wait", "j2", "--timeout", "40")
+        self.ok("wait", "j3", "--timeout", "40")
+        # 先排先得：j3 开始时 j2 已经结束
+        self.assertLessEqual(self.job("j2")["turns"][-1]["ended"], self.job("j3")["turns"][0]["started"])
+
+    def test_two_aliases_same_model_share_limit(self):
+        self.make_project()
+        for alias, model_id in (("fa", "m-a"), ("fa2", "m-a"), ("fb", "m-b")):
+            self.ok("models", "add", alias, "--backend", "fakepi", "--id", model_id)
+        self.ok("roles", "pool", "qa", "-P", "p1", "fa=1", "fa2=1")
+        self.ok("models", "limit", "--default", "10")
+        self.ok("models", "limit", "fa", "1")
+        self.ok("start", "j1", "-P", "p1", "-r", "qa", "--repo", "app", "SLEEP 3\nSTATUS: PASS")
+        self.ok("start", "j2", "-P", "p1", "-r", "qa", "--repo", "app", "STATUS: PASS")
+        # fa2 虽是另一个短名，但指向同一个模型 ID，上限共用：j2 只能排队
+        self.assertEqual(self.job("j2")["state"], "queued")
+        self.ok("stop", "j1")
+        self.ok("stop", "j2")
+
+    def test_concurrent_starts_do_not_oversubscribe(self):
+        self.ok("models", "limit", "--default", "2")
+        procs = [self.start_async("start", f"c{i}", "-p", "t", "--channels", "none", "SLEEP 4\nSTATUS: PASS") for i in range(6)]
+        for proc in procs:
+            proc.wait(timeout=60)
+        jobs = {j["name"]: j for j in json.loads(self.ok("status", "--json").stdout)}
+        running = [j for j in jobs.values() if j["state"] == "running"]
+        queued = [j for j in jobs.values() if j["state"] == "queued"]
+        self.assertEqual(len(running), 2)
+        self.assertEqual(len(queued), 4)
+        for name in jobs:
+            self.ok("wait", name, "--timeout", "90")
+
+    def test_stop_queued_job(self):
+        self.ok("models", "limit", "--default", "1")
+        self.ok("start", "j1", "-p", "t", "SLEEP 6\nSTATUS: PASS")
+        self.ok("start", "j2", "-p", "t", "STATUS: PASS")
+        self.assertEqual(self.job("j2")["state"], "queued")
+        self.ok("stop", "j2")
+        self.assertEqual(self.job("j2")["state"], "stopped")
+        self.ok("wait", "j1", "--timeout", "40")
+        self.assertEqual(self.job("j2")["state"], "stopped")  # 不会被误启动
+
+    def test_reply_queues_when_model_full(self):
+        self.ok("models", "limit", "--default", "2")
+        self.ok("start", "j1", "-p", "t", "--channels", "none", "SLEEP 12\nSTATUS: PASS")
+        self.ok("start", "j2", "-p", "t", "--channels", "none", "STATUS: PASS")
+        self.ok("wait", "j2", "--timeout", "20")  # j2 先占第二个名额跑完
+        self.ok("start", "j3", "-p", "t", "--channels", "none", "SLEEP 12\nSTATUS: PASS")  # 再把名额占满
+        result = self.ok("reply", "j2", "再干一轮\nSTATUS: PASS")
+        self.assertIn("排队", result.stderr + result.stdout)
+        job = self.job("j2")
+        self.assertEqual(job["state"], "queued")
+        self.assertEqual(job["turn"], 2)
+        self.assertEqual(job["model"], "m")  # 续派不换模型
+        self.ok("wait", "j1", "--timeout", "60")
+        self.ok("wait", "j3", "--timeout", "60")
+        self.ok("wait", "j2", "--timeout", "60")
+        job = self.job("j2")
+        self.assertEqual(job["state"], "done")
+        self.assertEqual(job["turn"], 2)
+        self.assertEqual(job["status"], "PASS")
+
+    def test_cli_limit_io(self):
+        self.ok("models", "add", "fa", "--backend", "fakepi", "--id", "m-a")
+        self.ok("models", "limit", "fa", "3")
+        self.assertIn("0/3", self.ok("models").stdout)
+        self.ok("models", "limit", "--default", "2")
+        self.ok("models", "limit", "fa", "default")
+        self.assertIn("0/2", self.ok("models").stdout)  # 恢复默认后用全局默认值
+        self.assertNotEqual(self.cli("models", "limit", "fa", "0").returncode, 0)
+        self.assertNotEqual(self.cli("models", "limit", "fa", "abc").returncode, 0)
+        self.assertNotEqual(self.cli("models", "limit", "nope", "2").returncode, 0)
+        self.assertNotEqual(self.cli("models", "limit", "--default", "0").returncode, 0)
+        # 占用数会出现在并发列里
+        self.ok("models", "limit", "--default", "5")
+        self.ok("start", "j1", "-p", "t", "-m", "m-a", "SLEEP 2\nSTATUS: PASS")
+        self.assertIn("1/5", self.ok("models").stdout)
+        self.ok("wait", "j1", "--timeout", "30")
+
+    def test_web_limit_api(self):
+        import socket, urllib.error, urllib.request
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.load(exc)
+
+        try:
+            self.ok("web", "start", "--port", str(port))
+            self.assertEqual(call("POST", "/api/models", {"alias": "fa", "backend": "fakepi", "id": "m-a"})[0], 200)
+            _, page = call("GET", "/api/models")
+            self.assertEqual(page["default_max_concurrent"], 5)
+            fa = next(m for m in page["models"] if m["alias"] == "fa")
+            self.assertEqual(fa["limit"], 5)
+            self.assertEqual(fa["limit_source"], "default")
+            self.assertEqual(fa["running"], 0)
+            self.assertEqual(call("POST", "/api/models/fa", {"max_concurrent": 2})[0], 200)
+            _, page = call("GET", "/api/models")
+            fa = next(m for m in page["models"] if m["alias"] == "fa")
+            self.assertEqual(fa["limit"], 2)
+            self.assertEqual(fa["limit_source"], "model")
+            self.assertEqual(call("POST", "/api/models/fa", {"max_concurrent": None})[0], 200)
+            self.assertEqual(call("POST", "/api/models/fa", {"max_concurrent": 0})[0], 400)
+            self.assertEqual(call("POST", "/api/models/settings", {"default_max_concurrent": 3})[0], 200)
+            _, page = call("GET", "/api/models")
+            self.assertEqual(page["default_max_concurrent"], 3)
+            fa = next(m for m in page["models"] if m["alias"] == "fa")
+            self.assertEqual(fa["limit"], 3)  # 恢复默认后跟着默认值走
+            # 排队中的作业在总览接口里带着在等的模型
+            self.ok("models", "limit", "--default", "1")
+            self.ok("start", "j1", "-p", "t", "SLEEP 3\nSTATUS: PASS")
+            self.ok("start", "j2", "-p", "t", "STATUS: PASS")
+            _, overview = call("GET", "/api/overview")
+            j2 = next(j for j in overview["jobs"] if j["name"] == "j2")
+            self.assertEqual(j2["state"], "queued")
+            self.assertEqual(j2["waiting_models"][0]["backend"], "fakepi")
+            self.ok("stop", "j1")
+            self.ok("stop", "j2")
+        finally:
+            self.ok("web", "stop")
+
+    def fake_pi_on_path(self):
+        """放一个假的 pi 可执行文件到 PATH：models discover 只认 PATH 上的 pi。"""
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        path = os.path.join(bindir, "pi")
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\necho 'PROVIDER MODEL'\necho 'provA modelX'\necho 'provB modelY'\necho 'provA modelZ'\n")
+        os.chmod(path, 0o755)
+        return {"PATH": bindir + os.pathsep + os.environ["PATH"]}
+
+    def test_models_import_list_and_named(self):
+        env = self.fake_pi_on_path()
+        out = self.ok("models", "import", "--list", env_extra=env).stdout
+        self.assertIn("provA/modelX", out)
+        self.assertIn("未登记", out)
+        result = self.ok("models", "import", "provA/modelX", env_extra=env)
+        self.assertIn("pi:modelX", result.stderr + result.stdout)
+        out = self.ok("models", "import", "--list", env_extra=env).stdout
+        self.assertIn("已登记（pi:modelX）", out)
+        self.assertIn("未登记", out)  # 其余候选仍未登记
+        again = self.ok("models", "import", "provA/modelX", env_extra=env)
+        self.assertIn("（都已登记过）", again.stderr + again.stdout)
+        self.assertIn("pi:modelX", self.ok("models").stdout)
+        self.assertNotEqual(self.cli("models", "import", "no/such", env_extra=env).returncode, 0)
+        # 原有的全量导入行为保留（限定后端）
+        self.ok("models", "import", env_extra=env)
+        self.assertIn("pi:modelY", self.ok("models").stdout)
+
+    def test_web_models_import_candidates(self):
+        import socket, urllib.error, urllib.request
+        env = self.fake_pi_on_path()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.load(exc)
+
+        try:
+            self.ok("web", "start", "--port", str(port), env_extra=env)
+            _, page = call("GET", "/api/models/candidates?backend=pi")
+            ids = {c["id"] for c in page["candidates"]}
+            self.assertIn("provA/modelX", ids)
+            self.assertTrue(all(not c["registered"] for c in page["candidates"] if c["backend"] == "pi"))
+            status, result = call("POST", "/api/models/import", {"names": ["provA/modelX"], "backend": "pi"})
+            self.assertEqual(status, 200)
+            self.assertEqual(result["added"], ["pi:modelX"])
+            _, page = call("GET", "/api/models/candidates?backend=pi")
+            self.assertTrue(next(c["registered"] for c in page["candidates"] if c["backend"] == "pi" and c["id"] == "provA/modelX"))
+        finally:
+            self.ok("web", "stop")

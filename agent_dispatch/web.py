@@ -50,7 +50,7 @@ def last_log_line(name):
 def summarize(job, batch_titles=None, session_titles=None, batch_reasons=None):
     state = store.effective_state(job)
     start = job.get("turn_started_ts")
-    end = time.time() if state == "running" else job.get("ended_ts") or start
+    end = time.time() if state in ("running", "queued") else job.get("ended_ts") or start
     group, project = store.project_of(job)
     escalated = job.get("needs_user")
     dispatcher = job.get("dispatcher") or None
@@ -68,7 +68,7 @@ def summarize(job, batch_titles=None, session_titles=None, batch_reasons=None):
         "dispatcher": dispatcher, "follows": job.get("follows") or [],
         "task": job.get("task", ""), "needs_user": escalated.get("question") if isinstance(escalated, dict) else escalated, "reason": job.get("reason"),
         "gate_ok": (job.get("gate") or {}).get("ok"), "created": job.get("created"), "mode": job.get("mode", "headless"),
-        "updated": job.get("updated"), "ended": job.get("ended"),
+        "updated": job.get("updated"), "ended": job.get("ended"), "waiting_models": job.get("waiting_models") or [],
         "activity": last_log_line(job["name"]) if state == "running" else "",
     }
 
@@ -155,13 +155,22 @@ def model_page():
                 "role": role_id, "role_title": role_titles.get((role_id, project_id)) or role_titles.get((role_id, None)) or role_id,
                 "weight": entry["weight"]})
     model_rows = []
+    counts = models.occupancy()
+    discovered = {(b, mid) for b, mid in models.discover()}
+    discover_backends = {b for b, _ in discovered}
     for alias, model in registry["models"].items():
         st = stats.get(alias, {"jobs": 0, "pass": 0, "settled": 0, "failed": 0, "seconds": 0})
+        key = (model["backend"], model["id"])
         model_rows.append({"alias": alias, "backend": model["backend"], "id": model["id"], "enabled": model.get("enabled", True),
                            "note": model.get("note", ""), "paused": paused.get(alias), "used_by": used.get(alias, []),
                            "jobs": st["jobs"], "settled": st["settled"], "pass": st["pass"], "failed": st["failed"],
                            "avg_seconds": int(st["seconds"] / st["settled"]) if st["settled"] else None,
-                           "provider_failures": provider_failures.get(alias, 0)})
+                           "provider_failures": provider_failures.get(alias, 0),
+                           "running": counts.get(key, 0),
+                           "limit": model.get("max_concurrent") or registry.get("default_max_concurrent", 5),
+                           "limit_source": "model" if model.get("max_concurrent") else "default",
+                           # 只在工具还能列出模型时才标缺失，避免把没装的工具里的模型误标
+                           "missing": model["backend"] in discover_backends and key not in discovered})
     model_rows.sort(key=lambda m: (not m["used_by"], not m["enabled"], m["backend"], m["alias"]))
     def role_row(project, role, counts):
         return {"project": project["id"] if project else "", "project_name": project["name"] if project else "全局角色",
@@ -178,7 +187,8 @@ def model_page():
              for name, backend in sorted(backends.load_all().items())]
     for row in model_rows:
         row["backend_enabled"] = backends.enabled(row["backend"])
-    return {"cooldown_min": registry["cooldown_min"], "models": model_rows, "roles": roles,
+    return {"cooldown_min": registry["cooldown_min"], "default_max_concurrent": registry.get("default_max_concurrent", 5),
+            "models": model_rows, "roles": roles,
             "backends": [t["name"] for t in tools], "tools": tools}
 
 
@@ -398,6 +408,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(dispatch_options())
             if parts == ["api", "models"]:
                 return self.send_json(model_page())
+            if parts == ["api", "models", "candidates"]:  # 先看再选：工具里现有的模型及登记情况
+                backend = query["backend"][0] if query.get("backend") else None
+                return self.send_json({"candidates": models.discover_candidates(backend)})
             if len(parts) >= 3 and parts[:2] == ["api", "job"]:
                 name = parts[2]
                 store.check_name(name)
@@ -469,7 +482,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = self.body()
             if parts == ["api", "models", "import"]:
-                return self.send_json({"added": models.import_all(data.get("backend") or None)})
+                names = data.get("names")
+                if names is not None and (not isinstance(names, list) or not all(isinstance(n, str) for n in names)):
+                    raise store.DispatchError("names 必须是模型 ID 的数组")
+                added = (models.import_named(names, data.get("backend") or None) if names
+                         else models.import_all(data.get("backend") or None))
+                return self.send_json({"added": added})
+            if parts == ["api", "models", "settings"]:  # 全局默认并发上限
+                from . import runner
+                value = data.get("default_max_concurrent")
+                if value is None:
+                    raise store.DispatchError("要有 default_max_concurrent（≥1 的整数）")
+                models.set_default_limit(models.check_limit(value))
+                runner.promote_queued()
+                return self.send_json({"ok": True})
             if parts == ["api", "models"]:
                 models.add(data.get("alias", "").strip(), data.get("backend", ""), data.get("id", "").strip(), data.get("note", ""))
                 return self.send_json({"ok": True})
@@ -477,6 +503,11 @@ class Handler(BaseHTTPRequestHandler):
                 models.resume(parts[2])
                 return self.send_json({"ok": True})
             if len(parts) == 3 and parts[:2] == ["api", "models"]:
+                if "max_concurrent" in data:  # null 表示恢复用全局默认值
+                    value = data["max_concurrent"]
+                    models.set_limit(parts[2], models.check_limit(value) if value is not None else None)
+                    from . import runner
+                    runner.promote_queued()
                 models.update(parts[2], enabled=data.get("enabled"), note=data.get("note"))
                 return self.send_json({"ok": True})
             if len(parts) == 3 and parts[:2] == ["api", "backends"]:

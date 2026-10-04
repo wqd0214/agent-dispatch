@@ -1,11 +1,11 @@
 <script setup lang="ts">
-// 全局「工具与模型」页：派工工具启停、模型登记表（导入 / 手工登记 / 启停 / 备注 / 删除）。
+// 全局「工具与模型」页：派工工具启停、模型登记表（导入 / 手工登记 / 启停 / 备注 / 并发上限 / 删除）。
 // 各角色的模型池在角色页里编辑，这里只展示「用在哪些角色」并可点过去。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { modelApi } from '../api'
-import type { ModelPage } from '../types'
+import type { ModelCandidate, ModelPage } from '../types'
 import { useCurrentProject } from '../composables/useProject'
 
 const router = useRouter()
@@ -14,11 +14,17 @@ const page = ref<ModelPage | null>(null)
 const loading = ref(false)
 const filters = reactive({ text: '', backend: '', used: false })
 const addForm = reactive({ alias: '', backend: '', id: '', note: '' })
+const defaultLimit = ref<number>(5)
+// 导入对话框：先看候选（已登记 / 未登记），可搜索勾选，确认后只导入勾选的
+const importDlg = reactive({ open: false, backend: '', loading: false, query: '', checked: [] as string[], candidates: [] as ModelCandidate[] })
 
 function msg(e: unknown): string { return e instanceof Error ? e.message : String(e) }
 async function reload() {
   loading.value = true
-  try { page.value = await modelApi.page() } catch (e) { ElMessage.error(msg(e)) } finally { loading.value = false }
+  try {
+    page.value = await modelApi.page()
+    defaultLimit.value = page.value.default_max_concurrent ?? 5
+  } catch (e) { ElMessage.error(msg(e)) } finally { loading.value = false }
 }
 onMounted(reload)
 
@@ -51,12 +57,47 @@ async function del(m: ModelPage['models'][number]) {
   try { await ElMessageBox.confirm(`从登记表删除 ${m.alias}？`, '二次确认', { type: 'warning' }) } catch { return }
   await act(async () => { await modelApi.remove(m.alias) }, '已删除')
 }
-async function importFrom(backend: string) {
+const importCandidates = computed(() => {
+  const q = importDlg.query.trim().toLowerCase()
+  return importDlg.candidates.filter(c => !q || `${c.backend} ${c.id} ${c.alias ?? ''}`.toLowerCase().includes(q))
+})
+const importSelectable = computed(() => importCandidates.value.filter(c => !c.registered).map(c => c.id))
+async function openImport(backend: string) {
+  importDlg.open = true
+  importDlg.backend = backend
+  importDlg.loading = true
+  importDlg.query = ''
+  importDlg.checked = []
+  importDlg.candidates = []
+  try { importDlg.candidates = (await modelApi.candidates(backend)).candidates } catch (e) { ElMessage.error(msg(e)) } finally { importDlg.loading = false }
+}
+function toggleAllImport() {
+  const all = importSelectable.value
+  importDlg.checked = all.every(id => importDlg.checked.includes(id)) ? [] : all
+}
+async function doImport() {
+  const names = [...importDlg.checked]
+  importDlg.open = false
+  if (!names.length) return
   try {
-    const r = await modelApi.importFrom(backend)
-    ElMessage.success(r.added.length ? `从 ${backend} 新登记 ${r.added.length} 个模型` : `${backend} 没有新模型`)
+    const r = await modelApi.importNames(names, importDlg.backend || undefined)
+    ElMessage.success(`新登记 ${r.added.length} 个模型` + (r.added.length ? `：${r.added.join('、')}` : ''))
     await reload()
   } catch (e) { ElMessage.error(msg(e)) }
+}
+async function saveDefaultLimit(value: number | undefined) {
+  if (!value || value < 1) { defaultLimit.value = page.value?.default_max_concurrent ?? 5; return }
+  await act(async () => { await modelApi.setDefaultLimit(value) }, `全局默认并发上限已设为 ${value}`)
+}
+async function saveLimit(alias: string, value: string) {
+  const text = value.trim()
+  if (!text) {  // 留空恢复默认
+    await act(async () => { await modelApi.update(alias, { max_concurrent: null }) }, '已恢复默认上限')
+    return
+  }
+  const n = Number(text)
+  if (!Number.isInteger(n) || n < 1) { ElMessage.error('上限必须是 ≥1 的整数'); await reload(); return }
+  await act(async () => { await modelApi.update(alias, { max_concurrent: n }) }, '上限已保存')
 }
 async function add() {
   await act(async () => { await modelApi.add({ ...addForm }) }, '已添加')
@@ -94,7 +135,12 @@ function gotoRole(project: string, role: string) {
     <h2>模型登记表</h2>
     <div class="sub">{{ page?.models.length ?? 0 }} 个模型 · 服务商报错后暂停 {{ page?.cooldown_min }} 分钟</div>
     <div class="toolbar">
-      <el-button v-for="b in page?.backends ?? []" :key="b" size="small" @click="importFrom(b)">从 {{ b }} 导入</el-button>
+      <span>全局默认并发上限</span>
+      <el-input-number v-model="defaultLimit" :min="1" size="small" style="width: 110px" @change="saveDefaultLimit" />
+      <span class="sub">同一个模型同时最多承接这么多张派工单，超出的会排队</span>
+    </div>
+    <div class="toolbar">
+      <el-button v-for="b in page?.backends ?? []" :key="b" size="small" @click="openImport(b)">从 {{ b }} 导入</el-button>
       <span class="sub">或手动登记：</span>
       <el-input v-model="addForm.alias" placeholder="短名，如 pi:glm-flash" size="small" style="width: 170px" />
       <el-select v-model="addForm.backend" size="small" style="width: 110px" placeholder="工具">
@@ -120,12 +166,28 @@ function gotoRole(project: string, role: string) {
         </template>
       </el-table-column>
       <el-table-column prop="backend" label="工具" width="100" />
-      <el-table-column label="状态" width="130">
+      <el-table-column label="状态" width="150">
         <template #default="{ row }">
           <el-tag :type="stateText(row).tone" size="small">{{ stateText(row).text }}</el-tag>
+          <el-tooltip v-if="row.missing"
+            :content="`工具里已经列不出这个模型${row.used_by.length ? '，但仍被 ' + row.used_by.map((u: ModelPage['models'][number]['used_by'][number]) => u.role_title).join('、') + ' 的模型池使用' : ''}`">
+            <el-tag type="danger" size="small">工具里已不存在</el-tag>
+          </el-tooltip>
           <div v-if="row.paused" class="sub" :title="row.paused.reason">
             至 {{ new Date(row.paused.until * 1000).toLocaleTimeString() }}
           </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="并发（占用 / 上限）" width="160">
+        <template #default="{ row }">
+          <span :class="{ full: row.running >= row.limit }">{{ row.running }}</span>
+          <span v-if="row.running >= row.limit" class="full-tag">/{{ row.limit }} 满</span>
+          <span v-else>/{{ row.limit }}</span>
+          <el-tooltip content="留空恢复全局默认值">
+            <el-input class="limit-input" :model-value="row.limit_source === 'model' ? String(row.limit) : ''"
+              :placeholder="`默认 ${page?.default_max_concurrent ?? 5}`" size="small"
+              @change="(v: string) => saveLimit(row.alias, v)" />
+          </el-tooltip>
         </template>
       </el-table-column>
       <el-table-column label="用在哪些角色" min-width="150">
@@ -172,6 +234,28 @@ function gotoRole(project: string, role: string) {
     </el-table>
     <el-empty v-if="page && !page.models.length"
       description="还没有登记模型。点上面的「从 pi 导入」等按钮，把这个工具里配置的模型登记进来。" />
+
+    <el-dialog v-model="importDlg.open" :title="`从 ${importDlg.backend} 导入模型`" width="640px" v-loading="importDlg.loading">
+      <div class="toolbar">
+        <el-input v-model="importDlg.query" placeholder="搜索模型" clearable size="small" style="width: 240px" />
+        <el-button size="small" @click="toggleAllImport">全选未登记</el-button>
+        <span class="sub">已选 {{ importDlg.checked.length }} · 未登记 {{ importDlg.candidates.filter(c => !c.registered).length }} 个</span>
+      </div>
+      <el-checkbox-group v-model="importDlg.checked" class="cand-list">
+        <div v-for="c in importCandidates" :key="c.backend + c.id" class="cand" :class="{ off: c.registered }">
+          <el-checkbox :value="c.id" :disabled="c.registered">
+            <span class="mono">{{ c.id }}</span>
+          </el-checkbox>
+          <el-tag v-if="c.registered" type="info" size="small">已登记（{{ c.alias }}）</el-tag>
+          <el-tag v-else size="small">未登记</el-tag>
+        </div>
+      </el-checkbox-group>
+      <div class="sub" style="margin-top: 8px">只导入勾选的；已登记的不会重复导入</div>
+      <template #footer>
+        <el-button @click="importDlg.open = false">取消</el-button>
+        <el-button type="primary" :disabled="!importDlg.checked.length" @click="doImport">导入 {{ importDlg.checked.length }} 个</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -181,4 +265,10 @@ h2 { font-size: 15px; margin: 14px 0 4px; }
 .toolbar { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .sub { color: var(--el-text-color-secondary); font-size: 12px; }
 .mono { font-family: var(--el-font-family-mono, monospace); font-size: 12px; }
+.full { color: var(--el-color-danger); font-weight: 600; }
+.full-tag { color: var(--el-color-danger); }
+.limit-input { width: 90px; display: inline-block; margin-left: 6px; }
+.cand-list { max-height: 380px; overflow: auto; }
+.cand { display: flex; align-items: center; gap: 8px; padding: 1px 0; }
+.cand.off { opacity: 0.6; }
 </style>

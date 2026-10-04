@@ -60,6 +60,8 @@ describe('usedByLabel', () => {
   })
 })
 
-it('顶部说明是一个可删的常量', () => {
-  expect(DISPATCH_PENDING_NOTE).toContain('后续版本生效')
+it('顶部说明如实描述下发行为与局限', () => {
+  expect(DISPATCH_PENDING_NOTE).toContain('只带勾选')
+  expect(DISPATCH_PENDING_NOTE).toContain('扩展包')
+  expect(DISPATCH_PENDING_NOTE).toContain('只能追加')
 })

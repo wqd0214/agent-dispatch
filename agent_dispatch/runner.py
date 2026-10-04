@@ -140,7 +140,41 @@ def settle(name, turn, recorder, result_state, reason, rc, final=None):
         else:
             job["state"] = result_state
         store.save(job)
+    promote_queued()
     return job
+
+
+def promote_queued():
+    """有模型空出来后，把排队中的作业按排队先后自动启动（先排先得）。"""
+    queued = [j for j in store.all_jobs() if j.get("state") == "queued"]
+    queued.sort(key=lambda j: (j.get("created") or "", j["name"]))
+    for meta in queued:
+        name = meta["name"]
+        old_waiting = meta.get("waiting_models")
+        with models._locked():
+            with store.locked(name):
+                job = store.load(name)
+                if job.get("state") != "queued":
+                    continue
+                if job.get("model_pool"):
+                    try:  # 排队期间比例可能已变，重新按比例选一个现在有空位的模型
+                        alias, picked = models.pick(job["model_pool"], job.get("project_id"), job.get("role"))
+                    except DispatchError:
+                        continue
+                    job.update(model_alias=alias, backend=picked["backend"], model=picked["id"], model_actual=None,
+                               session_id=backends.initial_session(backends.get(picked["backend"]), name))
+                elif models.busy(job["backend"], job["model"]):
+                    continue
+                job.update(state="running", status=None, waiting_models=None, reason=None, gate=None,
+                           turn_started=store.now(), turn_started_ts=time.time())
+                store.save(job)
+        try:
+            store.acquire_channels(store.channel_ns(job), job.get("channels"), name)
+            pid = spawn(name)
+            store.update(name, runner_pid=pid)
+        except DispatchError:  # 通道波化不到就继续排队，等下一次空位或下一个作业结束
+            store.update(name, state="queued", waiting_models=old_waiting, runner_pid=None,
+                         reason=None)
 
 
 def try_failover(name, recorder, reason):
@@ -163,25 +197,26 @@ def try_failover(name, recorder, reason):
         recorder.say("   本轮" + ("已执行过操作" if recorder.tools else "是续派轮次") + "，不自动换模型重派，以免重复执行；交给主管决定")
         return False
     tried = [a["model"] for a in job.get("model_attempts") or []] + [alias]
-    try:
-        new_alias, picked = models.pick(job["model_pool"], job.get("project_id"), job.get("role"), exclude=tried)
-    except DispatchError as exc:
-        recorder.say(f"   池内没有其它可用模型，不再重派：{exc}")
-        return False
-    backend = backends.get(picked["backend"])
-    from . import definitions
-    extra = (definitions.load(job["profile"]) if ":" in (job.get("profile") or "") else {}).get("backend_args") or []
-    recorder.say(f"⟳ 自动换成模型 {new_alias}（{picked['backend']} · {picked['id']}）重新派出")
-    recorder.close()
-    tmux.kill(job.get("tmux"))
-    with store.locked(name):
-        job = store.load(name)
-        job.setdefault("model_attempts", []).append({"model": alias, "reason": cause[:300], "at": store.now()})
-        job.update(model_alias=new_alias, backend=picked["backend"], model=picked["id"], model_actual=None,
-                   session_id=backends.initial_session(backend, name), child_pid=None,
-                   backend_args=list(extra.get(picked["backend"]) or []) if isinstance(extra, dict) else list(extra))
-        store.save(job)
-    store.update(name, runner_pid=spawn(name))
+    with models._locked():  # 选模型与落座在同一把锁里，避免和并发派工超发
+        try:
+            new_alias, picked = models.pick(job["model_pool"], job.get("project_id"), job.get("role"), exclude=tried)
+        except DispatchError as exc:
+            recorder.say(f"   池内没有其它可用模型，不再重派：{exc}")
+            return False
+        backend = backends.get(picked["backend"])
+        from . import definitions
+        extra = (definitions.load(job["profile"]) if ":" in (job.get("profile") or "") else {}).get("backend_args") or []
+        recorder.say(f"⟳ 自动换成模型 {new_alias}（{picked['backend']} · {picked['id']}）重新派出")
+        recorder.close()
+        tmux.kill(job.get("tmux"))
+        with store.locked(name):
+            job = store.load(name)
+            job.setdefault("model_attempts", []).append({"model": alias, "reason": cause[:300], "at": store.now()})
+            job.update(model_alias=new_alias, backend=picked["backend"], model=picked["id"], model_actual=None,
+                       session_id=backends.initial_session(backend, name), child_pid=None,
+                       backend_args=list(extra.get(picked["backend"]) or []) if isinstance(extra, dict) else list(extra))
+            store.save(job)
+        store.update(name, runner_pid=spawn(name))
     return True
 
 
@@ -364,4 +399,5 @@ def run(name):
             store.save(job)
         if not tmux.alive(job.get("tmux")):
             store.release_channels(store.channel_ns(job), job.get("channels"), name)
+        promote_queued()
         raise

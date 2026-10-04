@@ -60,13 +60,17 @@ agent-dispatch roles -P c2         # 这个项目可派的角色；roles show te
 派工只认角色，模型由角色的**模型池**按比例自动选择，主管不用也不能指定。
 
 ```bash
-agent-dispatch models import --backend pi       # 把 pi 里配置的模型登记进来（短名如 pi:glm-5.3）；不带 --backend 则导入全部工具的
-agent-dispatch models                           # 登记表：状态、用在哪些角色
+agent-dispatch models import --list        # 先看工具里有哪些模型、哪些已登记；按名导入：models import <模型ID …>，全量：models import [--backend pi]
+agent-dispatch models                           # 登记表：状态、并发（占用 / 上限）、用在哪些角色
+agent-dispatch models limit pi:glm-5.3 3       # 单个模型的并发上限；default 恢复默认；--default N 改全局默认值
 agent-dispatch roles pool tester -P c2 pi:glm-5.3=70 oc:glm-5=30   # 项目角色的模型池：按 7:3
 agent-dispatch roles pool tester --global pi:glm-5.3=1             # 全局角色的模型池：项目里没单独配置的都沿用它
 agent-dispatch models disable oc:glm-5          # 停用某个模型：所有模型池自动跳过它
 agent-dispatch backends disable opencode        # 停用某个派工工具：新派工不再用它
 ```
+
+同一个模型（按 工具+模型ID 计）同时最多承接的派工单数有并发上限（全局默认 5，可按模型覆盖）；满了不报错，
+新单进入「排队中」，有空位后按排队先后自动开始。
 
 - **配比**按「项目 + 角色」的派工历史严格执行：每次选「目标占比 × (已派数 + 1) − 已派数」最大的那个，长期严格贴合比例。
 - **配置了模型池的角色**，派工时传 `--model` 或 `--backend` 会被拒绝；没配模型池的角色仍按角色里写的模型或后端默认模型。

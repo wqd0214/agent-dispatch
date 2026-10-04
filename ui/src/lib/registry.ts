@@ -1,7 +1,7 @@
 // MCP / 技能登记页的纯逻辑：候选分组的展示数据、对照表的勾选计算（纯函数，可单测）
 
-// 下发实现后删除这句话（连同各处引用）：见派工下发那张单
-export const DISPATCH_PENDING_NOTE = '目前这里只做登记和配置，派工时的实际下发将在后续版本生效'
+// MCP / 技能页顶部的说明：下发已实现，写明实际行为与两条局限
+export const DISPATCH_PENDING_NOTE = '角色「开始管理」后，派工时只带勾选的下发。两条局限：pi 在管理 MCP 时不加载 ~/.pi/agent/settings.json 里的扩展包；OpenCode 无法排除全局技能，只能追加。'
 
 export interface CandidateVariant {
   id: string

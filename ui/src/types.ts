@@ -27,6 +27,7 @@ export interface JobSummary {
   updated: string
   ended: string | null
   activity: string
+  waiting_models?: { backend: string; id: string; alias: string | null }[]
   batch_title?: string
   batch_reason?: string
   follows?: string[]
@@ -190,6 +191,10 @@ export interface RegisteredModel {
   avg_seconds: number | null
   provider_failures: number
   backend_enabled: boolean
+  running: number
+  limit: number
+  limit_source: 'default' | 'model'
+  missing?: boolean
 }
 
 export interface ToolInfo {
@@ -201,9 +206,18 @@ export interface ToolInfo {
 
 export interface ModelPage {
   cooldown_min: number
+  default_max_concurrent: number
   models: RegisteredModel[]
   backends: string[]
   tools: ToolInfo[]
+}
+
+/** 工具里现有的模型（导入前先看再选用） */
+export interface ModelCandidate {
+  backend: string
+  id: string
+  registered: boolean
+  alias: string | null
 }
 
 // ---------- MCP 与技能登记表（/api/mcp、/api/skills）----------

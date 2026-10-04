@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useSharedOverview } from '../composables/usePolling'
 import { useProjectScope } from '../composables/useProject'
 import { gateState, inboxGroups } from '../lib/inbox'
+import { queueText } from '../lib/jobs'
 import { busyChannels, topicGroups } from '../lib/topics'
 import { relativeTime } from '../lib/time'
 import JobDetailPane from '../components/JobDetailPane.vue'
@@ -95,7 +96,7 @@ function dispatcherText(d: { kind: string; title: string | null; session_id: str
               <b class="name">{{ job.name }}</b>
               <span v-if="job.needs_user" class="q-tag">待你决定</span>
               <span v-else-if="job.state === 'done'" class="gate" :class="gateState(job)">{{ gateText(job) }}</span>
-              <span v-else-if="job.state === 'running'" class="run">{{ job.state_label }}</span>
+              <span v-else-if="job.state === 'running' || job.state === 'queued'" class="run">{{ queueText(job) ?? job.state_label }}</span>
               <span v-else class="bad">{{ job.state_label }}</span>
             </div>
             <div class="sub">{{ job.role_title || job.role || '-' }} · {{ job.project || '-' }} · {{ relativeTime(job.updated || job.created) }}</div>
@@ -122,7 +123,7 @@ function dispatcherText(d: { kind: string; title: string | null; session_id: str
               <b class="name">{{ job.name }}</b>
               <span v-if="g.key === 'review'" class="gate" :class="gateState(job)">{{ gateText(job) }}</span>
               <span v-else-if="g.key === 'broken'" class="bad">{{ job.state_label }}</span>
-              <span v-else-if="g.key === 'running'" class="run">{{ job.state_label }}</span>
+              <span v-else-if="g.key === 'running'" class="run">{{ queueText(job) ?? job.state_label }}</span>
             </div>
             <div class="sub">{{ job.role_title || job.role || '-' }} · {{ job.project || '-' }} · {{ relativeTime(job.updated || job.created) }}</div>
             <div v-if="job.needs_user" class="q">{{ job.needs_user }}</div>

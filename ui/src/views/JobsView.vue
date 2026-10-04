@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSharedOverview } from '../composables/usePolling'
 import { useProjectScope } from '../composables/useProject'
-import { EMPTY_FILTERS, filterJobs, filterOptions, sortJobs, type JobFilters } from '../lib/jobs'
+import { EMPTY_FILTERS, filterJobs, filterOptions, queueText, sortJobs, type JobFilters } from '../lib/jobs'
 import { relativeTime } from '../lib/time'
 import JobDetailPane from '../components/JobDetailPane.vue'
 
@@ -16,7 +16,7 @@ const filters = ref<JobFilters>({ ...EMPTY_FILTERS })
 const options = computed(() => filterOptions(scope.jobs.value))
 const stateOptions = computed(() => {
   // 从接口数据里取已知状态；接口没给全量映射时用固定表兜底
-  const fixed = [['running', '运行中'], ['done', '待审查'], ['failed', '运行失败'], ['interrupted', '意外中断'], ['stopped', '已叫停'], ['held', '人工持有'], ['accepted', '已验收'], ['rejected', '已驳回']]
+  const fixed = [['running', '运行中'], ['queued', '排队中'], ['done', '待审查'], ['failed', '运行失败'], ['interrupted', '意外中断'], ['stopped', '已叫停'], ['held', '人工持有'], ['accepted', '已验收'], ['rejected', '已驳回']]
   const seen = new Map(scope.jobs.value.map(j => [j.state, j.state_label]))
   const all = new Map<string, string>()
   for (const [id, label] of fixed) if (!seen.size || seen.has(id)) all.set(id, label)
@@ -63,8 +63,8 @@ watch(() => scope.jobs.value, jobs => {
         >
           <div class="row">
             <b class="name">{{ job.name }}</b>
-            <el-tag size="small" :type="(job.needs_user ? 'warning' : { running: 'primary', done: 'warning', failed: 'danger', interrupted: 'danger', accepted: 'success' }[job.state] ?? 'info') as any" effect="light">
-              {{ job.needs_user ? '待你决定' : job.state_label }}
+            <el-tag size="small" :type="(job.needs_user ? 'warning' : { running: 'primary', queued: 'info', done: 'warning', failed: 'danger', interrupted: 'danger', accepted: 'success' }[job.state] ?? 'info') as any" effect="light">
+              {{ job.needs_user ? '待你决定' : (queueText(job) ?? job.state_label) }}
             </el-tag>
           </div>
           <div class="sub">{{ job.role_title || job.role || '-' }} · {{ job.batch || job.status || '—' }} ·

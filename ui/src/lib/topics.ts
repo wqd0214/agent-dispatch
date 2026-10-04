@@ -55,6 +55,7 @@ export function topicGroups(jobs: JobSummary[]): TopicGroup[] {
   const groups = [...byBatch.values()].filter(g => g.running.length || g.pending.length)
   for (const g of groups) {
     g.dispatcher = dispatcherOf([...g.running, ...g.pending])
+    g.running.sort((a, b) => (a.state === 'queued' ? 1 : 0) - (b.state === 'queued' ? 1 : 0))  // 排队中的排在末尾
   }
   // 有正在执行的事项排前面；其后按最近活动（组内最大 updated）
   const activity = (g: TopicGroup) => [...g.running, ...g.pending].reduce((m, j) => {

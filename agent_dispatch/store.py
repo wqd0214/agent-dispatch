@@ -173,7 +173,7 @@ def register_batch(batch, title=None, reason=None, dispatcher=None):
 
 
 def _count_bucket(state):
-    if state in ("running", "held"):
+    if state in ("running", "held", "queued"):
         return "running"
     if state == "done":
         return "review"
@@ -303,7 +303,7 @@ def session_rows():
         projects, batches = set(), []
         for job in jobs:
             state = effective_state(job)
-            if state in ("running", "held"):
+            if state in ("running", "held", "queued"):
                 counts["running"] += 1
             elif state == "done":
                 counts["review"] += 1
