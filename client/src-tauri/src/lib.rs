@@ -8,18 +8,25 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, Url, WebviewWindowBuilder};
 
+mod find;
+use find::{common_candidates, pick_existing, pick_from_shell_output};
+use std::path::{Path, PathBuf};
+
 /// 需要发通知的状态：作业从「运行中」变到这些状态之一
 const NOTIFY_STATES: [&str; 4] = ["done", "failed", "interrupted", "stopped"];
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Settings {
     server_url: String,
+    /// 用户在设置里指定的 agent-dispatch 路径，留空则自动查找
+    #[serde(default)]
+    agent_dispatch_path: String,
     notify: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { server_url: "http://127.0.0.1:8765".into(), notify: true }
+        Settings { server_url: "http://127.0.0.1:8765".into(), agent_dispatch_path: String::new(), notify: true }
     }
 }
 
@@ -69,27 +76,108 @@ fn overview_reachable(url: &str) -> bool {
         .get(&format!("{url}/api/overview")).call().is_ok()
 }
 
-/// 用登录 shell 拉起后台服务：图形界面启动的应用拿不到 shell 的 PATH；端口跟着配置的地址走
-fn try_start_service(server_url: &str) -> bool {
+/// 文件存在且有可执行位（Windows 不自动拉起，不会走到这里）
+#[cfg(unix)]
+fn is_exec_file(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.is_file() && fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+/// 带 5 秒超时跑一条 shell 命令，返回 stdout；超时或失败返回 None
+fn run_shell_with_timeout(shell: &str, flag: &str, cmd: &str) -> Option<String> {
+    let mut child = std::process::Command::new(shell).arg(flag).arg(cmd)
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+        .spawn().ok()?;
+    for _ in 0..100 {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                use std::io::Read;
+                let mut out = String::new();
+                if let Some(mut s) = child.stdout.take() { let _ = s.read_to_string(&mut out); }
+                return Some(out);
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => { let _ = child.kill(); return None; }
+        }
+    }
+    let _ = child.kill(); // 交互 shell 可能卡住等输入，5 秒后放弃
+    None
+}
+
+/// 自己找 agent-dispatch，不依赖登录 shell 的 PATH：
+/// ① 设置里指定的路径；② 常见安装位置；③ 问 shell（-lc 再 -ic）
+fn find_agent_dispatch(configured: &str) -> Option<PathBuf> {
+    let configured = configured.trim();
+    #[cfg(unix)]
+    let check = is_exec_file;
+    #[cfg(unix)]
+    {
+        if !configured.is_empty() {
+            let p = PathBuf::from(configured);
+            if check(&p) { return Some(p); }
+        }
+        if let Some(home) = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty()) {
+            if let Some(p) = pick_existing(common_candidates(&home), check) { return Some(p); }
+        }
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        for flag in ["-lc", "-ic"] {
+            if let Some(out) = run_shell_with_timeout(&shell, flag, "command -v agent-dispatch") {
+                if let Some(p) = pick_from_shell_output(&out, check) { return Some(p); }
+            }
+        }
+    }
+    let _ = configured;
+    None
+}
+
+/// 把找到的路径写回设置，下次直接用
+fn remember_dispatch_path(app: &AppHandle, path: &Path) {
+    let state = app.state::<AppState>();
+    let mut s = state.settings.lock().unwrap();
+    if s.agent_dispatch_path != path.to_string_lossy() {
+        s.agent_dispatch_path = path.to_string_lossy().into_owned();
+        let snapshot = s.clone();
+        drop(s);
+        let _ = save_settings_file(app, &snapshot);
+    }
+}
+
+fn emit_service_error(app: &AppHandle, reason: String) {
+    eprintln!("[agent-dispatch-client] service-error: {reason}"); // 无头验证/排障时能看到事件内容
+    let _ = app.emit("service-error", reason);
+}
+
+/// 直接执行找到的路径拉起服务，不经过 shell。
+/// 子进程 PATH 前面补上常见 bin 目录，脚本内部的 python3 优先用 Homebrew 的。
+fn try_start_service(app: &AppHandle, server_url: &str) -> Result<(), String> {
     if cfg!(windows) {
-        return false; // Windows 上提示用户手动启动
+        return Err("Windows 上不做自动拉起，请在 WSL 里手动运行 agent-dispatch web start".into());
     }
     let (host, port) = match tauri::Url::parse(server_url) {
         Ok(u) => (u.host_str().unwrap_or("127.0.0.1").to_string(), u.port_or_known_default().unwrap_or(8765)),
         Err(_) => ("127.0.0.1".to_string(), 8765),
     };
-    let shells = [std::env::var("SHELL").ok().filter(|s| !s.is_empty()), Some("/bin/zsh".into()), Some("/bin/bash".into())];
-    for shell in shells.into_iter().flatten() {
-        let ok = std::process::Command::new(shell)
-            .arg("-lc").arg(format!("agent-dispatch web start --host {host} --port {port}"))
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return true;
-        }
+    let configured = app.state::<AppState>().settings.lock().unwrap().agent_dispatch_path.clone();
+    let Some(path) = find_agent_dispatch(&configured) else {
+        return Err("找不到 agent-dispatch 命令（设置里可以手动指定路径）".into());
+    };
+    remember_dispatch_path(app, &path);
+    let extra = format!("/usr/local/bin:/opt/homebrew/bin:{}/.local/bin", std::env::var("HOME").unwrap_or_default());
+    let path_env = match std::env::var("PATH") {
+        Ok(p) => format!("{extra}:{p}"),
+        Err(_) => extra,
+    };
+    match std::process::Command::new(&path)
+        .args(["web", "start", "--host", host.as_str(), "--port", &port.to_string()])
+        .env("PATH", path_env)
+        .stderr(std::process::Stdio::piped())
+        .output()
+    {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!("agent-dispatch 报错：{}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(format!("执行 {} 失败：{e}", path.display())),
     }
-    false
 }
 
 /// 启动时的连接流程：可达就直接通知前端；否则拉起服务后重试若干次
@@ -98,7 +186,13 @@ fn ensure_service(app: AppHandle, url: String, gen: u64) {
         let _ = app.emit("service-ready", &url);
         return;
     }
-    try_start_service(&url);
+    let start_err = try_start_service(&app, &url).err();
+    if let Some(reason) = start_err {
+        if !cfg!(windows) {
+            emit_service_error(&app, reason); // 拉起已确定失败，不空转重试
+            return;
+        }
+    }
     for _ in 0..15 {
         std::thread::sleep(Duration::from_millis(1500));
         if app.state::<AppState>().generation.load(Ordering::SeqCst) != gen {
@@ -108,6 +202,9 @@ fn ensure_service(app: AppHandle, url: String, gen: u64) {
             let _ = app.emit("service-ready", &url);
             return;
         }
+    }
+    if !cfg!(windows) {
+        emit_service_error(&app, format!("服务启动后仍连不上 {url}"));
     }
 }
 
@@ -208,14 +305,27 @@ fn get_server_url(state: State) -> String {
 }
 
 #[tauri::command]
-fn try_start_service_cmd(state: State) -> bool {
-    try_start_service(&state.settings.lock().unwrap().server_url)
+fn try_start_service_cmd(app: AppHandle, state: State) -> bool {
+    let url = state.settings.lock().unwrap().server_url.clone();
+    let started = try_start_service(&app, &url);
+    if let Err(reason) = started {
+        if !cfg!(windows) {
+            emit_service_error(&app, reason);
+        }
+    }
+    true
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, state: State, url: String, notify_enabled: bool) -> Result<(), String> {
+fn find_dispatch_path_cmd(state: State) -> Option<String> {
+    find_agent_dispatch(&state.settings.lock().unwrap().agent_dispatch_path)
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn save_settings(app: AppHandle, state: State, url: String, agent_dispatch_path: String, notify_enabled: bool) -> Result<(), String> {
     let url = normalize_url(&url);
-    let settings = Settings { server_url: url.clone(), notify: notify_enabled };
+    let settings = Settings { server_url: url.clone(), agent_dispatch_path: agent_dispatch_path.trim().to_string(), notify: notify_enabled };
     save_settings_file(&app, &settings).map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings.clone();
     // 换一代线程：新的连接流程 + 新的监控基线
@@ -318,7 +428,8 @@ pub fn run() {
             index_url: Mutex::new(None),
             generation: AtomicU64::new(0),
         })
-        .invoke_handler(tauri::generate_handler![get_settings, get_server_url, save_settings, try_start_service_cmd])
+        .invoke_handler(tauri::generate_handler![get_settings, get_server_url, save_settings, try_start_service_cmd, find_dispatch_path_cmd])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

@@ -7,15 +7,20 @@
 
 ## 功能
 
-- **自动拉起服务**：启动时检查 `<地址>/api/overview`，连不上就用登录 shell 执行
-  `agent-dispatch web start`（依次尝试 `$SHELL -lc`、`/bin/zsh -lc`、`/bin/bash -lc`，因为从图形界面
-  启动的应用拿不到 shell 的 PATH），然后重试若干次；仍失败则显示说明和「重试」按钮。
+- **自动拉起服务**：启动时检查 `<地址>/api/overview`，连不上就自动执行
+  `agent-dispatch web start` 拉起服务（端口跟配置的地址走），然后重试若干次；仍失败则显示具体原因和「重试」按钮。
+  因为从图形界面启动的应用拿不到 shell 的 PATH（登录 shell 不读 `~/.zshrc`），客户端自己找命令：
+  ① 设置里指定的路径（存在且可执行才用）；② 常见位置（`$HOME/.local/bin`、`/usr/local/bin`、
+  `/opt/homebrew/bin`、`$HOME/bin`）；③ 问 shell（`$SHELL -lc` 再 `-ic`，各 5 秒超时）。
+  找到后写回设置，下次直接用；执行时不再经过 shell，子进程 PATH 会补上常见 bin 目录。
+  拉起失败（找不到命令 / 命令报错 / 启动后仍连不上）时本地加载页会显示具体原因，可重试或在设置里指定路径。
   Windows 上不做自动拉起，只提示手动启动（见下）。
 - **系统通知**（Rust 侧轮询，与网页脚本无关）：作业从「运行中」变为
   待审查 / 运行失败 / 意外中断 / 已叫停，或出现「待你决定」标记时，弹系统通知
   （标题如「作业 xxx 待审查」，正文带 STATUS 和任务摘要）。启动后第一次拉取只记基线不发通知；
   连接断开时不刷屏，恢复后继续。
-- **设置**：服务地址、是否开启通知，存在应用配置目录的 `settings.json`
+- **设置**：服务地址、agent-dispatch 路径（留空则自动查找，页面会显示当前自动找到的路径）、是否开启通知，
+  存在应用配置目录的 `settings.json`
   （macOS：`~/Library/Application Support/dev.agentdispatch.client/`）。托盘菜单 →「设置…」。
 - **菜单 / 托盘**：重新加载、在浏览器中打开、设置…、退出。
 
