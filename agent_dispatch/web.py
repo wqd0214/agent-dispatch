@@ -169,21 +169,43 @@ def dispatch_options():
 
 
 def run_cli(args, stdin_text=None):
-    """用子进程调命令行，复用其中的业务规则。返回 (返回码, 提示文字, 错误文字)。"""
+    """用子进程调命令行，复用其中的业务规则。返回 (返回码, 提示文字, 错误文字, 标准输出)。"""
     env = dict(os.environ, PYTHONPATH=backends.ROOT)
     try:
         kwargs = {"input": stdin_text} if stdin_text is not None else {"stdin": subprocess.DEVNULL}
         proc = subprocess.run([sys.executable, "-m", "agent_dispatch", *args], env=env,
                               capture_output=True, text=True, timeout=60, **kwargs)
     except subprocess.TimeoutExpired:
-        return None, "", "命令超时（60 秒）"
+        return None, "", "命令超时（60 秒）", ""
     text = (proc.stderr + proc.stdout).strip()
     error = ""
     if proc.returncode != 0:
         marker = "[agent-dispatch] 错误："
         lines = [line[len(marker):].strip() for line in proc.stderr.splitlines() if line.startswith(marker)]
         error = lines[-1] if lines else (text or f"命令失败（返回码 {proc.returncode}）")
-    return proc.returncode, text, error
+    return proc.returncode, text, error, proc.stdout.strip()
+
+
+def dispatch_start_args(data):
+    """把派工表单的请求体变成 (作业名, 任务文本, start 的参数列表)。任务文本走标准输入，避免被当成选项。"""
+    role = (data.get("role") or "").strip()
+    if not role:
+        raise store.DispatchError("缺少角色")
+    job = (data.get("job") or "").strip() or f"{role}-{time.strftime('%m%d-%H%M%S')}"
+    store.check_name(job)
+    task = (data.get("task") or "").strip()
+    if not task:
+        raise store.DispatchError("任务为空")
+    args = ["start", job]
+    if data.get("project"):
+        args += ["--project", data["project"]]
+    args += ["--role", role]
+    if data.get("repo"):
+        args += ["--repo", data["repo"]]
+    if data.get("batch"):
+        args += ["--batch", data["batch"]]
+    args += ["-"]
+    return job, task, args
 
 
 def list_run_files(run_dir):
@@ -324,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def run_job_action(self, name, args, stdin_text=None, gate=False):
         """对单个作业跑一条命令：非 0 返回 400；gate 的返回码 1 表示闸门未过，不算接口错误。"""
-        code, text, error = run_cli(args, stdin_text)
+        code, text, error, _ = run_cli(args, stdin_text)
         if code is None:
             return self.send_json({"ok": False, "passed": gate and False, "message": error}, 500)
         if gate:
@@ -334,25 +356,9 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, "message": text})
 
     def post_job(self, data):
-        """派工：作业名可省，省了就按角色和时间生成。任务文本走标准输入，避免被当成选项。"""
-        role = (data.get("role") or "").strip()
-        if not role:
-            return self.send_json({"ok": False, "error": "缺少角色"}, 400)
-        job = (data.get("job") or "").strip() or f"{role}-{time.strftime('%m%d-%H%M%S')}"
-        store.check_name(job)
-        task = (data.get("task") or "").strip()
-        if not task:
-            return self.send_json({"ok": False, "error": "任务为空"}, 400)
-        args = ["start", job]
-        if data.get("project"):
-            args += ["--project", data["project"]]
-        args += ["--role", role]
-        if data.get("repo"):
-            args += ["--repo", data["repo"]]
-        if data.get("batch"):
-            args += ["--batch", data["batch"]]
-        args += ["-"]
-        code, text, error = run_cli(args, task)
+        """派工：作业名可省，省了就按角色和时间生成。"""
+        job, task, args = dispatch_start_args(data)
+        code, text, error, _ = run_cli(args, task)
         if code is None:
             return self.send_json({"ok": False, "message": error}, 500)
         if code != 0:
@@ -360,30 +366,17 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, "job": job, "message": text})
 
     def post_preview(self, data):
-        """派工预览：同一套参数跑子进程 dry-run，返回不真正派出的 JSON。"""
-        role = (data.get("role") or "").strip()
-        if not role:
-            return self.send_json({"ok": False, "error": "缺少角色"}, 400)
-        job = (data.get("job") or "").strip() or f"{role}-{time.strftime('%m%d-%H%M%S')}"
-        store.check_name(job)
-        task = (data.get("task") or "").strip()
-        if not task:
-            return self.send_json({"ok": False, "error": "任务为空"}, 400)
-        args = ["start", job]
-        if data.get("project"):
-            args += ["--project", data["project"]]
-        args += ["--role", role]
-        if data.get("repo"):
-            args += ["--repo", data["repo"]]
-        if data.get("batch"):
-            args += ["--batch", data["batch"]]
-        args += ["-", "--dry-run", "--json"]
-        code, text, error = run_cli(args, task)
+        """派工预览：同一套参数跑子进程 dry-run，返回不真正派出的 JSON。只解析标准输出， stderr 里的提示不影响。"""
+        _, task, args = dispatch_start_args(data)
+        code, _, error, out = run_cli(args + ["--dry-run", "--json"], task)
         if code is None:
             return self.send_json({"ok": False, "message": error}, 500)
         if code != 0:
             return self.send_json({"ok": False, "error": error, "message": error}, 400)
-        return self.send_json(json.loads(text))
+        try:
+            return self.send_json(json.loads(out))
+        except ValueError:
+            return self.send_json({"ok": False, "message": f"预览输出不是合法 JSON：{out[:500]}"}, 500)
 
     def do_POST(self):
         if not self.writable():

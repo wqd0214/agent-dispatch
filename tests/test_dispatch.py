@@ -741,5 +741,30 @@ class OpencodeReaderTest(unittest.TestCase):
         self.assertEqual([item["kind"] for item in items], ["user"])
 
 
+class RunCliStdoutTest(unittest.TestCase):
+    """run_cli 要把标准输出单独交回：预览解析 JSON 不能被 stderr 里的提示污染。"""
+
+    def test_stdout_is_returned_separately(self):
+        sys.path.insert(0, ROOT)
+        import agent_dispatch.web as web
+        payload = json.dumps({"brief": "你是测试工程师", "job": "j9"}, ensure_ascii=False)
+
+        class Proc:
+            returncode = 0
+            stdout = payload
+            stderr = "[agent-dispatch] 提示：stderr 里有些无关输出\n"
+
+        original = web.subprocess.run
+        web.subprocess.run = lambda *a, **k: Proc()
+        try:
+            code, text, error, out = web.run_cli(["start", "j9", "--dry-run", "--json", "-"], "跑一下")
+        finally:
+            web.subprocess.run = original
+        self.assertEqual(code, 0)
+        data = json.loads(out)  # 只解析标准输出，stderr 的提示不混进来
+        self.assertEqual(data["job"], "j9")
+        self.assertIn("无关输出", text)  # 提示文字仍然能看到
+
+
 if __name__ == "__main__":
     unittest.main()
