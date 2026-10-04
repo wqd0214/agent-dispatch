@@ -12,6 +12,6 @@ export const router = createRouter({
     { path: '/dashboard', component: () => import('./views/Placeholder.vue'), props: { title: '工作台' } },
     { path: '/batches', component: () => import('./views/Placeholder.vue'), props: { title: '批次' } },
     { path: '/stats', component: () => import('./views/Placeholder.vue'), props: { title: '统计' } },
-    { path: '/settings/projects', component: () => import('./views/Placeholder.vue'), props: { title: '项目设置' } },
+    { path: '/settings/:page', component: () => import('./views/Placeholder.vue'), props: route => ({ title: ({ repos: '工程', roles: '角色', mcp: 'MCP', skills: '技能', supervisor: '主管规则' } as Record<string, string>)[String(route.params.page)] || '项目设置' }) },
   ],
 })

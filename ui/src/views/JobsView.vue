@@ -82,7 +82,7 @@ watch(() => scope.jobs.value, jobs => {
 </template>
 
 <style scoped>
-.jobs { display: grid; grid-template-columns: 340px 1fr; gap: 12px; height: 100%; min-height: 0; }
+.jobs { display: grid; grid-template-columns: 360px 1fr; gap: 12px; height: 100%; min-height: 0; }
 .list, .detail { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-bg-color); padding: 10px; overflow: hidden; }
 .filters { display: flex; flex-wrap: wrap; gap: 6px; }
 .f { width: 100px; }
