@@ -13,6 +13,7 @@ HOME = os.environ.get("AGENT_DISPATCH_HOME") or os.path.join(os.path.expanduser(
 JOBS_DIR = os.path.join(HOME, "jobs")
 CHANNELS_DIR = os.path.join(HOME, "channels")
 SESSIONS_DIR = os.path.join(HOME, "sessions")
+BATCHES_DIR = os.path.join(HOME, "batches")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # 一轮结束后的状态；running 之外都算「已落定」
@@ -138,6 +139,91 @@ def all_jobs():
                     continue
     jobs.sort(key=lambda j: j.get("created", ""), reverse=True)
     return jobs
+
+
+# ---------- 事项（批次的标题与原因） ----------
+
+def batch_path(batch):
+    # 批次名可以是中文等任意文本，文件名做安全化（与会话登记同一套做法）
+    return os.path.join(BATCHES_DIR, SAFE_ID_RE.sub("_", batch) + ".json")
+
+
+def load_batch(batch):
+    try:
+        data = json.loads(read_text(batch_path(batch)) or "")
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def register_batch(batch, title=None, reason=None, dispatcher=None):
+    """登记 / 更新事项：标题和原因只有显式给出非空值才写，不谱空已有的；派工者记第一张单的。"""
+    if not batch:
+        return None
+    data = load_batch(batch) or {"id": batch, "title": "", "reason": "",
+                                 "created": now(), "dispatcher": None}
+    if title:
+        data["title"] = title
+    if reason:
+        data["reason"] = reason
+    if dispatcher and not data.get("dispatcher"):
+        data["dispatcher"] = {"kind": dispatcher.get("kind"), "session_id": dispatcher.get("session_id")}
+    write_text(batch_path(batch), json.dumps(data, ensure_ascii=False, indent=2))
+    return data
+
+
+def _count_bucket(state):
+    if state in ("running", "held"):
+        return "running"
+    if state == "done":
+        return "review"
+    if state in ("accepted", "rejected", "stopped"):
+        return "done"
+    return "failed"
+
+
+def batch_dispatcher_row(jobs):
+    """事项的派工者：优先登记文件里的，退回作业台账里的；都没有则是未登记的历史批次。"""
+    who = None
+    for job in jobs:
+        dispatcher = job.get("dispatcher")
+        if dispatcher:
+            who = dispatcher
+            break
+    if not who:
+        return {"kind": "未登记", "session_id": "", "title": ""}
+    data = load_session(who.get("session_id")) or {}
+    return {"kind": who.get("kind") or "-", "session_id": who.get("session_id") or "",
+            "title": who.get("title") or data.get("title") or ""}
+
+
+def batch_rows(project=None):
+    """按批次（事项）汇总作业；没有登记文件的批次标题为空，不报错。"""
+    groups = {}
+    for job in all_jobs():
+        if job.get("batch"):
+            groups.setdefault(job["batch"], []).append(job)
+    rows = []
+    for batch, jobs in groups.items():
+        meta = load_batch(batch) or {}
+        if project is not None:
+            projects = {job.get("project_id") or project_of(job)[0] for job in jobs}
+            if project not in projects:
+                continue
+        counts = {"total": len(jobs), "running": 0, "review": 0, "done": 0, "failed": 0}
+        for job in jobs:
+            counts[_count_bucket(effective_state(job))] += 1
+        jobs.sort(key=lambda j: (j.get("created") or "", j["name"]))  # 按派出时间正序
+        dispatcher = meta.get("dispatcher") or batch_dispatcher_row(jobs)
+        if meta.get("dispatcher") and not meta["dispatcher"].get("title"):
+            session = load_session(meta["dispatcher"].get("session_id")) or {}
+            dispatcher = dict(meta["dispatcher"], title=session.get("title") or "")
+        rows.append({"id": batch, "title": meta.get("title") or "", "reason": meta.get("reason") or "",
+                     "created": meta.get("created"), "dispatcher": dispatcher, "counts": counts,
+                     "activity": max(j.get("updated") or j.get("created") or "" for j in jobs),
+                     "jobs": [j["name"] for j in jobs]})
+    rows.sort(key=lambda r: r["activity"] or "", reverse=True)
+    return rows
 
 
 # ---------- 派工者与会话登记 ----------

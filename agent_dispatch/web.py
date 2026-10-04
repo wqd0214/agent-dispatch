@@ -47,20 +47,25 @@ def last_log_line(name):
     return lines[-1] if lines else ""
 
 
-def summarize(job):
+def summarize(job, batch_titles=None, session_titles=None, batch_reasons=None):
     state = store.effective_state(job)
     start = job.get("turn_started_ts")
     end = time.time() if state == "running" else job.get("ended_ts") or start
     group, project = store.project_of(job)
     escalated = job.get("needs_user")
+    dispatcher = job.get("dispatcher") or None
+    if dispatcher and not dispatcher.get("title"):
+        dispatcher = dict(dispatcher, title=(session_titles or {}).get(dispatcher.get("session_id")) or None)
     return {
         "name": job["name"], "batch": job.get("batch") or "", "profile": job.get("profile"),
+        "batch_title": (batch_titles or {}).get(job.get("batch")) or "",
+        "batch_reason": (batch_reasons or {}).get(job.get("batch")) or "",
         "group": group, "project": project, "role": job.get("role"), "role_title": job.get("role_title"),
         "backend": job.get("backend"), "model": job.get("model"), "model_alias": job.get("model_alias"),
         "model_actual": job.get("model_actual"), "state": state,
         "state_label": cli.STATE_LABEL.get(state, state), "status": job.get("status"), "turn": job.get("turn"),
         "seconds": int(max(0, end - start)) if start else None, "channels": job.get("channels") or [],
-        "dispatcher": job.get("dispatcher") or None,
+        "dispatcher": dispatcher, "follows": job.get("follows") or [],
         "task": job.get("task", ""), "needs_user": escalated.get("question") if isinstance(escalated, dict) else escalated, "reason": job.get("reason"),
         "gate_ok": (job.get("gate") or {}).get("ok"), "created": job.get("created"), "mode": job.get("mode", "headless"),
         "updated": job.get("updated"), "ended": job.get("ended"),
@@ -84,6 +89,16 @@ def defined_projects():
 def overview():
     jobs = store.all_jobs()
     definitions_ = defined_projects()
+    # 事项标题、会话标题：批次数不多，一次在内存里建好映射避免逐个读文件
+    batch_titles, batch_reasons, session_titles = {}, {}, {}
+    for job in jobs:
+        if job.get("batch") and job["batch"] not in batch_titles:
+            meta = store.load_batch(job["batch"]) or {}
+            batch_titles[job["batch"]] = meta.get("title") or ""
+            batch_reasons[job["batch"]] = meta.get("reason") or ""
+        sid = (job.get("dispatcher") or {}).get("session_id")
+        if sid and sid not in session_titles:
+            session_titles[sid] = (store.load_session(sid) or {}).get("title") or ""
     profiles, channels, cases = {}, {}, []
     for project in definitions_:  # 定义里带通道的工程：没有作业也显示通道
         for repo in project["repos"]:
@@ -102,7 +117,8 @@ def overview():
             cases.append({"tc": verdict.get("tc"), "verdict": verdict.get("verdict"), "evidence": verdict.get("evidence"),
                           "note": verdict.get("note"), "job": job["name"], "batch": job.get("batch") or "",
                           "group": group, "project": project, "run": os.path.basename(run_dir)})
-    return {"now": store.now(), "home": store.HOME, "jobs": [summarize(j) for j in jobs], "cases": cases,
+    return {"now": store.now(), "home": store.HOME,
+            "jobs": [summarize(j, batch_titles, session_titles, batch_reasons) for j in jobs], "cases": cases,
             "channels": list(channels.values()), "definitions": definitions_}
 
 
@@ -126,9 +142,18 @@ def model_page():
             item["pass"] += job.get("status") == "PASS"
             item["failed"] += state in ("failed", "interrupted")
     used = {}
+    role_titles = {(r["role"], None): r["title"] for r in definitions.list_roles(None)}
+    project_names = {"": "全局"}
+    for project in definitions.list_projects():
+        project_names[project["id"]] = project["name"]
+        for r in definitions.list_roles(project):
+            role_titles[(r["role"], project["id"])] = r["title"]
     for project_id, role_id, pool in models.all_pools():
         for entry in pool:
-            used.setdefault(entry["model"], []).append({"project": project_id, "role": role_id, "weight": entry["weight"]})
+            used.setdefault(entry["model"], []).append({
+                "project": project_id, "project_name": project_names.get(project_id, project_id or "全局"),
+                "role": role_id, "role_title": role_titles.get((role_id, project_id)) or role_titles.get((role_id, None)) or role_id,
+                "weight": entry["weight"]})
     model_rows = []
     for alias, model in registry["models"].items():
         st = stats.get(alias, {"jobs": 0, "pass": 0, "settled": 0, "failed": 0, "seconds": 0})
@@ -227,6 +252,12 @@ def dispatch_start_args(data):
         args += ["--repo", data["repo"]]
     if data.get("batch"):
         args += ["--batch", data["batch"]]
+        if data.get("batch_title"):
+            args += ["--batch-title", data["batch_title"]]
+        if data.get("batch_reason"):
+            args += ["--batch-reason", data["batch_reason"]]
+    for followed in data.get("follows") or []:
+        args += ["--follows", followed]
     args += ["-"]
     return job, task, args
 
@@ -251,8 +282,12 @@ def job_detail(name):
         attach = cli.how_to_attach(job)
     except store.DispatchError:
         attach = None
-    detail = summarize(job)
+    meta = store.load_batch(job.get("batch")) or {}
+    batch_titles = {job["batch"]: meta.get("title") or ""} if job.get("batch") else {}
+    batch_reasons = {job["batch"]: meta.get("reason") or ""} if job.get("batch") else {}
+    detail = summarize(job, batch_titles, {}, batch_reasons)
     detail.update({
+        "followed_by": [j["name"] for j in store.all_jobs() if job["name"] in (j.get("follows") or [])],
         "cwd": job.get("cwd"), "session_id": job.get("session_id"), "attach": attach,
         "mode": job.get("mode", "headless"), "tmux_alive": tmux.alive(job.get("tmux")),
         "report": job.get("report") or {}, "gate": job.get("gate"), "decisions": job.get("decisions") or [],
@@ -334,6 +369,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_page(os.path.join(ui, "index.html"))  # 前端路由：找不到的路径回退到入口页
             if parts == ["api", "sessions"]:
                 return self.send_json({"now": store.now(), "sessions": store.session_rows()})
+            if parts == ["api", "batches"]:
+                return self.send_json({"now": store.now(), "batches": store.batch_rows(query["project"][0] if query.get("project") else None)})
             if parts == ["api", "overview"]:
                 return self.send_json(overview())
             if parts == ["api", "config"]:
@@ -478,6 +515,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "path": path})
             if parts == ["api", "jobs"]:
                 return self.post_job(data)
+            if len(parts) == 3 and parts[:2] == ["api", "batches"]:
+                batch = parts[2]
+                if not any(j.get("batch") == batch for j in store.all_jobs()) and not store.load_batch(batch):
+                    raise store.DispatchError(f"没有这个批次：{batch}")
+                store.register_batch(batch, (data.get("title") or "").strip() or None,
+                                     (data.get("reason") or "").strip() or None)
+                return self.send_json({"ok": True, "batch": store.load_batch(batch)})
             if parts == ["api", "jobs", "preview"]:
                 return self.post_preview(data)
             if len(parts) == 4 and parts[:2] == ["api", "jobs"]:

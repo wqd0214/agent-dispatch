@@ -83,14 +83,17 @@ agent-dispatch backends disable opencode        # 停用某个派工工具：新
 
 ```bash
 # 按角色派工。在项目的工程目录里执行时 --project 可省略
-agent-dispatch start sanTai-01 --project c2 --role tester --batch 回归-1002 "跑 托盘库出库-整托三态判定"
-agent-dispatch start fix-5619 -P c2 -r backend-dev --batch 回归-1002 "修复：移入收货重复点击产生两条记录……"
+agent-dispatch start sanTai-01 --project c2 --role tester --batch 回归-1002 \
+    --batch-title "出库回归" --batch-reason "上线前回归出库主流程" "跑 托盘库出库-整托三态判定"
+agent-dispatch start fix-5619 -P c2 -r backend-dev --batch 回归-1002 --follows sanTai-01 "修复：移入收货重复点击产生两条记录……"
 agent-dispatch start pda-ui -P c2 -r frontend-dev --repo pda "……"      # 角色负责多个工程时指明工程
 
 agent-dispatch wait sanTai-01            # 限时等；返回码 3 = 还在跑
 agent-dispatch status                    # 总览；--project <项目名> --repo <工程名> 筛选
 agent-dispatch status sanTai-01          # 单个作业：结论、STATUS、QUESTION、接入方式、派工者
 agent-dispatch sessions                  # 按派工会话汇总：每个会话派了几张单、各是什么状态
+agent-dispatch batches                   # 按事项汇总：每个批次的标题、原因、谁派的、各状态数量
+agent-dispatch batch 回归-1002           # 看一个事项；--title / --reason 事后补标题和原因
 agent-dispatch gate sanTai-01            # 机械闸门
 agent-dispatch accept sanTai-01 --note "核对了 report.md 的三态断言"
 ```
@@ -104,6 +107,10 @@ agent-dispatch start demo --cwd ~/some/repo -b pi "把 README 里的错别字改
 `start` 会自动识别是谁在派工（执行者嵌套派工、`AGENT_DISPATCH_SESSION` 自设会话、Claude Code 会话、终端），
 记进作业的 `dispatcher` 字段并登记到 `sessions/` 目录；也可以用 `--session-title "一句话说明这次会话在办什么事"` 给会话起名，
 方便用户在总览里按会话查看。裁决（reply / accept / reject / stop 等）也会记下是哪个会话做的。
+
+每个批次是一个「事项」：`--batch-title` / `--batch-reason` 说明要办什么事、为什么派这批单（登记在 `batches/<批次>.json`，
+忘了带时命令会提醒事后用 `agent-dispatch batch <批次> --title … --reason …` 补上）；`--follows <作业名>` 标明这张单
+是因为哪张单才派的（重派、按复核意见修复、接着上一步做），网页上会挂在那张单下面。
 
 ## 让谁当主管
 
@@ -141,10 +148,9 @@ agent-dispatch reply <作业> "…"       # 在同一会话里续派
 agent-dispatch take <作业>            # 人工接手：主管不再往里派；用完 release
 ```
 
-网页的作业部分是只读的旁观者，「模型与角色」页可以修改配置；关掉网页不影响任何作业。它按批次列出作业、通道占用、等你决定的事项，
-并把各作业 run 目录里的 `verdicts.json` 汇总成用例判定表。
-
-作业按「项目 → 工程 → 批次」归类，网页顶部可以逐级筛选，选中项目后还会列出它的角色。
+网页的作业部分是只读的旁观者，「模型与角色」页可以修改配置；关掉网页不影响任何作业。工作台按事项（批次）分组列出
+要你处理的单子（可切回按状态），顶部有通道占用提示；「事项」页按派出顺序列出每个事项的全部单子，带 follows 的缩进挂靠；
+作业详情里有用例判定和「因 X 而派 / 后续：Y」的关联。
 没有登记进项目的目录也能派工，归类按目录推断：工程是目录名（worktree 归到主工程），项目是它的上级目录名。
 
 ## 状态目录
@@ -160,6 +166,7 @@ agent-dispatch take <作业>            # 人工接手：主管不再往里派�
 │   └── turns/<n>.task.md / <n>.result.md / <n>.raw.jsonl
 ├── channels/<工程>/        通道占用（一个通道一个文件）
 ├── sessions/               派工会话登记：谁派的、标题、最近活动
+├── batches/                事项登记：批次的标题、原因、派工者
 ├── projects/               项目、工程、角色的定义
 └── roles/                  本机的全局角色
 ```
