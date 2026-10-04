@@ -61,6 +61,7 @@ def summarize(job):
         "model_actual": job.get("model_actual"), "state": state,
         "state_label": cli.STATE_LABEL.get(state, state), "status": job.get("status"), "turn": job.get("turn"),
         "seconds": int(max(0, end - start)) if start else None, "channels": job.get("channels") or [],
+        "dispatcher": job.get("dispatcher") or None,
         "task": job.get("task", ""), "needs_user": escalated.get("question") if isinstance(escalated, dict) else escalated, "reason": job.get("reason"),
         "gate_ok": (job.get("gate") or {}).get("ok"), "created": job.get("created"), "mode": job.get("mode", "headless"),
         "updated": job.get("updated"), "ended": job.get("ended"),
@@ -334,6 +335,8 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.isfile(os.path.join(ui, *parts)):
                     return self.send_ui_file(os.path.join(*parts))
                 return self.send_page(os.path.join(ui, "index.html"))  # 前端路由：找不到的路径回退到入口页
+            if parts == ["api", "sessions"]:
+                return self.send_json({"now": store.now(), "sessions": store.session_rows()})
             if parts == ["api", "overview"]:
                 return self.send_json(overview())
             if parts == ["api", "config"]:

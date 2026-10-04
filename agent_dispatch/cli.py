@@ -15,7 +15,7 @@ import unicodedata
 import webbrowser
 
 from . import backends, definitions, gates, models, runner, store, tmux
-from .store import DispatchError
+from .store import DispatchError, identify_dispatcher, touch_session, who_dispatches
 
 STATE_LABEL = {"running": "运行中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
                "interrupted": "意外中断", "held": "人工持有", "accepted": "已验收", "rejected": "已驳回"}
@@ -162,8 +162,16 @@ def how_to_attach(job):
     return f"cd {job['cwd']} && {attach}" if attach else None
 
 
+def decision_entry(job, action, note=None):
+    """一条裁决记录：记下是谁做的（与派工者同一套识别逻辑）。"""
+    who = who_dispatches()
+    touch_session(who)
+    return {"at": store.now(), "turn": job.get("turn"), "action": action, "note": note,
+            "by": {"kind": who["kind"], "session_id": who["session_id"]}}
+
+
 def decide(job, action, note=None):
-    job.setdefault("decisions", []).append({"at": store.now(), "turn": job.get("turn"), "action": action, "note": note})
+    job.setdefault("decisions", []).append(decision_entry(job, action, note))
 
 
 def elapsed(job):
@@ -262,6 +270,10 @@ def cmd_start(a):
 
     now_ts = time.time()
     group, project = store.derive_project(cwd)
+    who = who_dispatches()
+    if a.session_title:
+        who["title"] = a.session_title
+    touch_session(who, a.session_title)
     job = {
         "name": a.job, "batch": a.batch or "", "profile": profile["name"], "backend": backend_name, "model": model,
         "group": profile.get("group") or group, "project": profile.get("project") or project,  # 项目名 / 工程名
@@ -269,6 +281,7 @@ def cmd_start(a):
         "role_title": profile.get("title"), "channel_ns": profile.get("channel_ns"),
         "model_alias": model_alias, "model_pool": profile.get("model_pool"), "model_attempts": [],
         "cwd": cwd, "session_id": session_id, "state": "running", "status": None,
+        "dispatcher": who,
         "mode": mode, "tmux": "ad-" + a.job.replace(".", "_") if mode == "tmux" else None,
         "turn": 1, "channels": channels, "task": task,
         "timeout_min": a.timeout if a.timeout is not None else profile.get("timeout_min"),
@@ -389,6 +402,23 @@ def cmd_wait(a):
     return 0
 
 
+def cmd_sessions(a):
+    """按派工会话汇总：一次会话派了几张单、各是什么状态。"""
+    rows_data = store.session_rows()
+    if a.project:
+        rows_data = [r for r in rows_data if a.project in r["projects"]]
+    if not rows_data:
+        print("（暂无作业）")
+        return 0
+    rows = [("类型", "标题", "项目", "总数", "执行中", "待审查", "已完成", "失败", "最近活动", "会话")]
+    for r in rows_data:
+        c = r["counts"]
+        rows.append((r["kind"], r["title"] or "-", "、".join(r["projects"]) or "-", c["total"],
+                     c["running"], c["review"], c["done"], c["failed"], r["activity"] or "-", r["id"] or "-"))
+    table(rows)
+    return 0
+
+
 def print_status_table(batch=None, group=None, project=None):
     jobs = [reconcile(j) for j in store.all_jobs() if batch is None or j.get("batch") == batch]
     jobs = [j for j in jobs if (group is None or store.project_of(j)[0] == group)
@@ -423,6 +453,9 @@ def print_job_detail(job):
     print(f"目录      {job['cwd']}")
     print(f"通道      {','.join(job.get('channels') or []) or '-'}")
     print(f"会话      {job.get('session_id') or '（尚未取得）'}")
+    dispatcher = job.get("dispatcher")
+    if dispatcher:
+        print(f"派工者    {dispatcher['kind']}  {dispatcher.get('title') or dispatcher.get('session_id') or ''}")
     print(f"方式      {job.get('mode', 'headless')}" + (f"   界面{'开着' if tmux.alive(job.get('tmux')) else '已关闭'}" if job.get("tmux") else ""))
     attach = how_to_attach(job)
     if attach and tmux.alive(job.get("tmux")):
@@ -550,8 +583,7 @@ def cmd_stop(a):
             return 0
         store.info(f"作业 {a.job} 不在运行（{STATE_LABEL.get(job['state'], job['state'])}）")
         return 0
-    store.update(a.job, decisions=(job.get("decisions") or []) + [
-        {"at": store.now(), "turn": job.get("turn"), "action": "stop", "note": a.reason}])
+    store.update(a.job, decisions=(job.get("decisions") or []) + [decision_entry(job, "stop", a.reason)])
     print(summary_line(job))
     return 0
 
@@ -950,8 +982,12 @@ def build_parser():
     p.add_argument("--mode", choices=["headless", "tmux"],
                    help="运行方式：headless 无头；tmux 交互界面跑在 tmux 里，可接入、两轮之间不退出（默认取 profile）")
     p.add_argument("--timeout", type=float, help="单轮最长分钟数，超时终止（默认取 profile）")
+    p.add_argument("--session-title", dest="session_title", help="一句话说明这次会话在办什么事，总览里可按会话查看")
     p.add_argument("--dry-run", action="store_true", help="只打印派工单，不派出")
     p.add_argument("--json", action="store_true", help="配合 --dry-run：输出结构化的预览 JSON")
+
+    p = add("sessions", cmd_sessions, "按派工会话汇总：派了几张单、各是什么状态")
+    p.add_argument("--project", "-P", help="只看这个项目的会话（项目 ID）")
 
     p = add("wait", cmd_wait, "限时等待作业落定；超时返回码 3，只表示还在跑")
     p.add_argument("jobs", nargs="*")

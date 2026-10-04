@@ -54,9 +54,13 @@ class DispatchTest(unittest.TestCase):
             subprocess.run(["tmux", "kill-session", "-t", "=ad-" + name], capture_output=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def cli(self, *args, stdin=None, cwd=None):
+    def cli(self, *args, stdin=None, cwd=None, env_extra=None):
         env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT)
-        env.pop("AGENT_DISPATCH_WORKER", None)
+        # 跑测试的进程可能带着派工者相关的环境变量，识别不能被它们污染
+        for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
+                    "CLAUDE_CODE_SESSION_ID", "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
+            env.pop(key, None)
+        env.update(env_extra or {})
         return subprocess.run([sys.executable, "-m", "agent_dispatch", *args], env=env, cwd=cwd,
                               capture_output=True, text=True, input=stdin, timeout=60)
 
@@ -1047,6 +1051,106 @@ class ConfigApiTest(DispatchTest):
             self.assertEqual(call("POST", "/api/config/projects/p1/supervisor", {"text": "p1 规则"})[0], 200)
             self.assertEqual(next(p for p in call("GET", "/api/config")[1]["projects"]
                                   if p["id"] == "p1")["supervisor"], "p1 规则")
+        finally:
+            self.ok("web", "stop")
+
+
+class DispatcherSessionTest(DispatchTest):
+    """派工者登记：识别、会话文件、sessions 查询、网页接口。"""
+
+    def test_identify_dispatcher_four_cases(self):
+        sys.path.insert(0, ROOT)
+        from agent_dispatch import store
+        # 1. 执行者嵌套派工：取父作业的会话标识
+        who = store.identify_dispatcher({"AGENT_DISPATCH_WORKER": "j-x"}, 1, lambda n: {"session_id": "ses-1"})
+        self.assertEqual((who["kind"], who["session_id"], who["parent_job"]), ("执行者", "ses-1", "j-x"))
+        # 2. 主管自设会话
+        who = store.identify_dispatcher({"AGENT_DISPATCH_SESSION": "s-sup", "AGENT_DISPATCH_SESSION_KIND": "网页"}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("网页", "s-sup"))
+        who = store.identify_dispatcher({"AGENT_DISPATCH_SESSION": "s-sup"}, 1)
+        self.assertEqual(who["kind"], "主管")  # 类型缺省为主管
+        # 3. Claude Code 会话
+        who = store.identify_dispatcher({"CLAUDE_CODE_SESSION_ID": "cc-9"}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("Claude Code", "cc-9"))
+        # 4. 终端：TMUX_PANE 带服务器标识、TERM_SESSION_ID、ppid 兜底
+        who = store.identify_dispatcher({"TMUX_PANE": "%3", "TMUX": "/tmp/tmux-501/default,123,0"}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("终端", "tmux:default:%3"))
+        who = store.identify_dispatcher({"TERM_SESSION_ID": "w0t0p1"}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("终端", "w0t0p1"))
+        who = store.identify_dispatcher({}, 4242)
+        self.assertEqual((who["kind"], who["session_id"]), ("终端", "ppid-4242"))
+
+    SUP = {"AGENT_DISPATCH_SESSION": "s-aaa", "AGENT_DISPATCH_SESSION_KIND": "pi"}
+
+    def test_same_session_two_jobs_and_counts(self):
+        self.ok("start", "d1", "-p", "t", "--batch", "b1", "STATUS: PASS", env_extra=self.SUP)
+        self.ok("start", "d2", "-p", "t", "--batch", "b1", "--channels", "none", "SLEEP 30", env_extra=self.SUP)
+        self.ok("start", "d3", "-p", "t", "--batch", "b1", "--channels", "none", "SLEEP 30", env_extra=self.SUP)
+        for job in ("d1", "d2", "d3"):
+            self.assertEqual(self.job(job)["dispatcher"]["session_id"], "s-aaa")
+        self.ok("wait", "d1", "--timeout", "20")
+        self.ok("stop", "d2", "--reason", "测试", env_extra=self.SUP)
+        listing = self.ok("sessions").stdout
+        self.assertIn("pi", listing)
+        self.assertIn("b1", listing)  # 无标题时退回首个批次名
+        self.assertRegex(listing, r"\b3\s+1\s+1\s+1\s+0\b")  # 总数 3：执行中/待审查/已完成各 1
+        with open(os.path.join(self.home, "sessions", "s-aaa.json")) as f:
+            session = json.load(f)
+        self.assertEqual(session["id"], "s-aaa")
+        self.assertIn("last_seen", session)
+
+    def test_session_title_persists(self):
+        self.ok("start", "t1", "-p", "t", "--session-title", "修复登录问题", "STATUS: PASS",
+                env_extra=self.SUP)
+        self.assertEqual(self.job("t1")["dispatcher"]["title"], "修复登录问题")
+        # 第二次不带标题：不清空已登记的标题
+        self.ok("start", "t2", "-p", "t", "STATUS: PASS", env_extra=self.SUP)
+        self.assertIsNone(self.job("t2")["dispatcher"]["title"])
+        with open(os.path.join(self.home, "sessions", "s-aaa.json")) as f:
+            self.assertEqual(json.load(f)["title"], "修复登录问题")
+        self.assertIn("修复登录问题", self.ok("sessions").stdout)
+
+    def test_legacy_jobs_unregistered(self):
+        os.makedirs(os.path.join(self.home, "jobs", "old1"))
+        with open(os.path.join(self.home, "jobs", "old1", "job.json"), "w") as f:
+            json.dump({"name": "old1", "profile": "t", "state": "done", "cwd": self.work, "turn": 1,
+                       "created": "2024-01-01 00:00:00"}, f)
+        listing = self.ok("sessions").stdout
+        self.assertIn("未登记", listing)
+        self.assertRegex(listing, r"\b1\s+0\s+1\s+0\s+0\b")  # 一张历史作业，归到未登记
+
+    def test_decisions_have_by(self):
+        self.ok("start", "b1", "-p", "t", "MKRUN rb\nSTATUS: PASS\nRUN_DIR: runs/rb", env_extra=self.SUP)
+        self.ok("wait", "b1", "--timeout", "20")
+        self.ok("gate", "b1")
+        self.ok("accept", "b1", env_extra=self.SUP)
+        decisions = self.job("b1")["decisions"]
+        self.assertTrue(decisions)
+        for d in decisions:
+            if d["action"] == "accept":
+                self.assertEqual((d["by"]["kind"], d["by"]["session_id"]), ("pi", "s-aaa"))
+
+    def test_api_sessions(self):
+        import socket, urllib.request
+        self.ok("start", "a1", "-p", "t", "--session-title", "总览按会话看", "STATUS: PASS",
+                env_extra=self.SUP)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        try:
+            self.ok("web", "start", "--port", port)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/sessions", timeout=5) as response:
+                data = json.load(response)
+            self.assertIn("sessions", data)
+            row = next(r for r in data["sessions"] if r["id"] == "s-aaa")
+            self.assertEqual(row["kind"], "pi")
+            self.assertEqual(row["title"], "总览按会话看")
+            self.assertEqual(row["total"], 1)
+            self.assertIn("a1", row["jobs"])
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/overview", timeout=5) as response:
+                overview = json.load(response)
+            job = next(j for j in overview["jobs"] if j["name"] == "a1")
+            self.assertEqual(job["dispatcher"]["session_id"], "s-aaa")
         finally:
             self.ok("web", "stop")
 

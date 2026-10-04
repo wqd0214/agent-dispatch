@@ -89,7 +89,8 @@ agent-dispatch start pda-ui -P c2 -r frontend-dev --repo pda "……"      # 角
 
 agent-dispatch wait sanTai-01            # 限时等；返回码 3 = 还在跑
 agent-dispatch status                    # 总览；--project <项目名> --repo <工程名> 筛选
-agent-dispatch status sanTai-01          # 单个作业：结论、STATUS、QUESTION、接入方式
+agent-dispatch status sanTai-01          # 单个作业：结论、STATUS、QUESTION、接入方式、派工者
+agent-dispatch sessions                  # 按派工会话汇总：每个会话派了几张单、各是什么状态
 agent-dispatch gate sanTai-01            # 机械闸门
 agent-dispatch accept sanTai-01 --note "核对了 report.md 的三态断言"
 ```
@@ -99,6 +100,10 @@ agent-dispatch accept sanTai-01 --note "核对了 report.md 的三态断言"
 ```bash
 agent-dispatch start demo --cwd ~/some/repo -b pi "把 README 里的错别字改掉，最后写 STATUS: PASS"
 ```
+
+`start` 会自动识别是谁在派工（执行者嵌套派工、`AGENT_DISPATCH_SESSION` 自设会话、Claude Code 会话、终端），
+记进作业的 `dispatcher` 字段并登记到 `sessions/` 目录；也可以用 `--session-title "一句话说明这次会话在办什么事"` 给会话起名，
+方便用户在总览里按会话查看。裁决（reply / accept / reject / stop 等）也会记下是哪个会话做的。
 
 ## 让谁当主管
 
@@ -129,6 +134,7 @@ agent-dispatch attach <作业>          # tmux 方式：接进界面，可直接
 agent-dispatch web start --open       # 网页总览，后台运行并打开浏览器；web stop 停止，web status 查看
 agent-dispatch web                    # 同上，但在前台运行（Ctrl-C 关闭）
 agent-dispatch status --watch         # 终端里的总览
+agent-dispatch sessions                # 按派工会话汇总（--project <项目ID> 筛选）；配合 start --session-title 使用
 
 agent-dispatch stop <作业>            # 叫停（已结束的 tmux 作业：只关界面、释放通道）
 agent-dispatch reply <作业> "…"       # 在同一会话里续派
@@ -153,6 +159,7 @@ agent-dispatch take <作业>            # 人工接手：主管不再往里派�
 │   ├── result.md           最近一轮的结论
 │   └── turns/<n>.task.md / <n>.result.md / <n>.raw.jsonl
 ├── channels/<工程>/        通道占用（一个通道一个文件）
+├── sessions/               派工会话登记：谁派的、标题、最近活动
 ├── projects/               项目、工程、角色的定义
 └── roles/                  本机的全局角色
 ```

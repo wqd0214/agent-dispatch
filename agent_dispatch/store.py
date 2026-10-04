@@ -12,6 +12,7 @@ from . import tmux
 HOME = os.environ.get("AGENT_DISPATCH_HOME") or os.path.join(os.path.expanduser("~"), ".agent-dispatch")
 JOBS_DIR = os.path.join(HOME, "jobs")
 CHANNELS_DIR = os.path.join(HOME, "channels")
+SESSIONS_DIR = os.path.join(HOME, "sessions")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # 一轮结束后的状态；running 之外都算「已落定」
@@ -137,6 +138,115 @@ def all_jobs():
                     continue
     jobs.sort(key=lambda j: j.get("created", ""), reverse=True)
     return jobs
+
+
+# ---------- 派工者与会话登记 ----------
+
+SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def identify_dispatcher(env, ppid, load_job=None):
+    """纯函数：按环境变量识别当前是谁在派工/裁决。load_job 只在执行者嵌套派工时用来查父作业的会话标识。"""
+    def out(kind, session_id, parent_job=None):
+        return {"kind": kind, "session_id": session_id, "title": None, "cwd": None, "parent_job": parent_job}
+    worker = env.get("AGENT_DISPATCH_WORKER")
+    if worker:
+        session_id = None
+        if load_job:
+            try:
+                session_id = (load_job(worker) or {}).get("session_id")
+            except (DispatchError, ValueError, OSError):
+                session_id = None
+        return out("执行者", session_id or f"job:{worker}", worker)
+    if env.get("AGENT_DISPATCH_SESSION"):  # 任何主管工具都可以自设
+        return out(env.get("AGENT_DISPATCH_SESSION_KIND") or "主管", env["AGENT_DISPATCH_SESSION"])
+    if env.get("CLAUDE_CODE_SESSION_ID"):
+        return out("Claude Code", env["CLAUDE_CODE_SESSION_ID"])
+    if env.get("TMUX_PANE"):  # 带 tmux 服务器标识，避免不同服务器的窗格编号重复
+        server = os.path.basename((env.get("TMUX") or "default").split(",")[0])
+        return out("终端", f"tmux:{server}:{env['TMUX_PANE']}")
+    if env.get("TERM_SESSION_ID"):
+        return out("终端", env["TERM_SESSION_ID"])
+    return out("终端", f"ppid-{ppid}")
+
+
+def who_dispatches():
+    """当前命令的派工者身份；cwd 记命令执行时所在的目录。"""
+    who = identify_dispatcher(os.environ, os.getppid(), load)
+    who["cwd"] = os.getcwd()
+    return who
+
+
+def session_path(session_id):
+    return os.path.join(SESSIONS_DIR, SAFE_ID_RE.sub("_", session_id) + ".json")
+
+
+def load_session(session_id):
+    try:
+        data = json.loads(read_text(session_path(session_id)) or "")
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def touch_session(who, title=None):
+    """每次派工或裁决时刷新会话登记的 last_seen；标题只有显式给出才写。"""
+    if not who or not who.get("session_id"):
+        return
+    timestamp = now()
+    data = load_session(who["session_id"])
+    if data is None:
+        data = {"id": who["session_id"], "kind": who.get("kind"), "title": None,
+                "cwd": who.get("cwd"), "first_seen": timestamp, "last_seen": timestamp}
+    else:
+        data["last_seen"] = timestamp
+        data["cwd"] = who.get("cwd") or data.get("cwd")
+    if title:
+        data["title"] = title
+    write_text(session_path(who["session_id"]), json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def session_rows():
+    """按派工会话汇总所有作业；没有 dispatcher 的历史作业归到一行「（未登记）」。"""
+    groups = {}
+    for job in all_jobs():
+        groups.setdefault((job.get("dispatcher") or {}).get("session_id") or "", []).append(job)
+    rows = []
+    for session_id, jobs in groups.items():
+        counts = {"total": len(jobs), "running": 0, "review": 0, "done": 0, "failed": 0}
+        projects, batches = set(), []
+        for job in jobs:
+            state = effective_state(job)
+            if state in ("running", "held"):
+                counts["running"] += 1
+            elif state == "done":
+                counts["review"] += 1
+            elif state in ("accepted", "rejected", "stopped"):
+                counts["done"] += 1
+            else:
+                counts["failed"] += 1
+            projects.add(job.get("project_id") or project_of(job)[0])
+            if job.get("batch") and job["batch"] not in batches:
+                batches.append(job["batch"])
+        activity = max(j.get("updated") or j.get("created") or "" for j in jobs)
+        if not session_id:
+            row = {"id": "", "kind": "未登记", "title": batches[0] if batches else "", "cwd": None,
+                   "first_seen": None, "last_seen": None}
+        else:
+            data = load_session(session_id) or {}
+            row = {"id": session_id, "kind": data.get("kind") or (jobs[0].get("dispatcher") or {}).get("kind") or "-",
+                   "title": data.get("title") or (jobs[0].get("dispatcher") or {}).get("title") or "",
+                   "cwd": data.get("cwd"),
+                   "first_seen": data.get("first_seen") or min(j.get("created") or "" for j in jobs),
+                   "last_seen": max(filter(None, [data.get("last_seen")] + [j.get("created") or "" for j in jobs]))}
+            activity = max(activity, row["last_seen"] or "")
+        if not row["title"] and batches:
+            row["title"] = batches[0]  # 界面退回用首个批次名
+        row.update(projects=sorted(p for p in projects if p), counts=counts, total=len(jobs), activity=activity,
+                   jobs=[j["name"] for j in jobs])
+        rows.append(row)
+    rows.sort(key=lambda r: r["activity"] or "", reverse=True)
+    return rows
 
 
 # ---------- 浏览器通道占用 ----------
