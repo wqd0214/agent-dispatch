@@ -1,0 +1,1 @@
+import{d as o,f as n,n as p,p as c}from"./index-Da0G7rAD.js";const a=o({__name:"Placeholder",props:{title:{}},setup(e){return(r,s)=>{const t=p("el-empty");return c(),n(t,{description:`${e.title}：即将提供`},null,8,["description"])}}});export{a as default};

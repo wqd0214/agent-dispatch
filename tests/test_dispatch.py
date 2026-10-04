@@ -646,6 +646,13 @@ class DispatchTest(unittest.TestCase):
             else:
                 os.environ["AGENT_DISPATCH_UI_DIST"] = old_env
 
+    def test_ui_dist_is_built_and_committed(self):
+        """新界面的构建产物随仓库提交：用户运行时不需要 Node，ui_dist 必须在包里。"""
+        dist = os.path.join(ROOT, "agent_dispatch", "ui_dist")
+        self.assertTrue(os.path.isfile(os.path.join(dist, "index.html")),
+                        "缺少 ui_dist/index.html：在 ui/ 下执行 pnpm build 并提交产物")
+        self.assertTrue(os.path.isdir(os.path.join(dist, "assets")), "缺少 ui_dist/assets")
+
     def test_web_preview_and_overview_fields(self):
         """POST /api/jobs/preview 走子进程 dry-run；总览作业带 updated / ended 字段。"""
         import socket, urllib.error, urllib.request
