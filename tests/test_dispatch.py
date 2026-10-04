@@ -481,6 +481,71 @@ class DispatchTest(unittest.TestCase):
         finally:
             self.ok("web", "stop")
 
+    def test_web_dispatches_jobs(self):
+        """网页的操作接口：派工、续派、叫停、裁决都走子进程命令行。"""
+        import socket, urllib.error, urllib.request
+        self.make_project()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None, header=True):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            if header:
+                request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=70) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, json.load(exc)
+                finally:
+                    exc.close()
+
+        try:
+            self.ok("web", "start", "--port", str(port))
+            # 没有请求头的写操作被拒
+            self.assertEqual(call("POST", "/api/jobs", {"project": "p1", "role": "dev", "task": "x"}, header=False)[0], 403)
+            # 派工选项里能看到项目 p1 和它的角色
+            options = call("GET", "/api/dispatch-options")[1]
+            p1 = next(p for p in options["projects"] if p["id"] == "p1")
+            self.assertEqual(p1["name"], "产品线A")
+            self.assertTrue({"dev", "qa"} <= {r["id"] for r in p1["roles"]})
+            dev = next(r for r in p1["roles"] if r["id"] == "dev")
+            self.assertEqual(dev["repos"], ["app"])
+            # 派一个角色不存在的作业：400 且错误信息里含「没有角色」
+            status, error = call("POST", "/api/jobs", {"job": "w-nope", "project": "p1", "role": "nope", "task": "x"})
+            self.assertEqual(status, 400)
+            self.assertIn("没有角色", error["error"])
+            # 派工并等它跑完
+            self.assertEqual(call("POST", "/api/jobs", {"job": "w2", "project": "p1", "role": "dev",
+                                                          "task": "STATUS: PASS"})[0], 200)
+            self.ok("wait", "w2", "--timeout", "20")
+            self.assertEqual(self.job("w2")["state"], "done")
+            # 不填作业名：自动生成，以角色 ID 开头
+            status, started = call("POST", "/api/jobs", {"project": "p1", "role": "dev", "task": "STATUS: PASS"})
+            self.assertEqual(status, 200)
+            self.assertTrue(started["job"].startswith("dev-"))
+            self.ok("wait", started["job"], "--timeout", "20")
+            # 依次闸门、验收；驳回不带 reason 返回 400
+            self.assertEqual(call("POST", "/api/jobs/w2/gate")[1]["passed"], True)
+            self.assertEqual(call("POST", "/api/jobs/w2/accept")[0], 200)
+            self.assertEqual(call("POST", "/api/jobs/w2/reject", {"reason": ""})[0], 400)
+            # 长任务可以叫停
+            self.assertEqual(call("POST", "/api/jobs", {"job": "w3", "project": "p1", "role": "dev",
+                                                          "task": "SLEEP 30"})[0], 200)
+            status, stopped = call("POST", "/api/jobs/w3/stop", {"reason": "测试叫停"})
+            self.assertEqual(status, 200)
+            self.assertEqual(self.job("w3")["state"], "stopped")
+            # 续派和清除待决标记
+            self.assertEqual(call("POST", "/api/jobs/w3/reply", {"text": "STATUS: PASS"})[0], 200)
+            self.ok("wait", "w3", "--timeout", "20")
+            self.assertEqual(call("POST", "/api/jobs/w3/clear-escalation")[0], 200)
+        finally:
+            self.ok("web", "stop")
+
     def test_dry_run_prints_brief(self):
         out = self.ok("start", "j15", "-p", "t", "--dry-run", "跑场景A").stdout
         self.assertIn("派工单 j15 通道 a、b", out)

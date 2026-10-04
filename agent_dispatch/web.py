@@ -2,6 +2,8 @@
 import json
 import mimetypes
 import os
+import subprocess
+import sys
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -146,6 +148,36 @@ def model_page():
             "backends": [t["name"] for t in tools], "tools": tools}
 
 
+def dispatch_options():
+    """派工表单的选项：项目、工程和可派的角色。"""
+    out = []
+    for project in definitions.list_projects():
+        roles = [{"id": r["role"], "title": r["title"], "description": r.get("description") or "",
+                  "repos": r["repos"], "pooled": bool(r.get("model_pool"))} for r in definitions.list_roles(project)]
+        out.append({"id": project["id"], "name": project["name"],
+                    "repos": [{"id": repo_id, "name": repo["name"]} for repo_id, repo in project["repos"].items()],
+                    "roles": roles})
+    return {"projects": out}
+
+
+def run_cli(args, stdin_text=None):
+    """用子进程调命令行，复用其中的业务规则。返回 (返回码, 提示文字, 错误文字)。"""
+    env = dict(os.environ, PYTHONPATH=backends.ROOT)
+    try:
+        kwargs = {"input": stdin_text} if stdin_text is not None else {"stdin": subprocess.DEVNULL}
+        proc = subprocess.run([sys.executable, "-m", "agent_dispatch", *args], env=env,
+                              capture_output=True, text=True, timeout=60, **kwargs)
+    except subprocess.TimeoutExpired:
+        return None, "", "命令超时（60 秒）"
+    text = (proc.stderr + proc.stdout).strip()
+    error = ""
+    if proc.returncode != 0:
+        marker = "[agent-dispatch] 错误："
+        lines = [line[len(marker):].strip() for line in proc.stderr.splitlines() if line.startswith(marker)]
+        error = lines[-1] if lines else (text or f"命令失败（返回码 {proc.returncode}）")
+    return proc.returncode, text, error
+
+
 def list_run_files(run_dir):
     files = []
     for base, dirs, names in os.walk(run_dir):
@@ -218,6 +250,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_body(f.read(), "text/html; charset=utf-8")
             if parts == ["api", "overview"]:
                 return self.send_json(overview())
+            if parts == ["api", "dispatch-options"]:
+                return self.send_json(dispatch_options())
             if parts == ["api", "models"]:
                 return self.send_json(model_page())
             if len(parts) >= 3 and parts[:2] == ["api", "job"]:
@@ -250,6 +284,43 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(length) or b"{}") if length else {}
 
+    def run_job_action(self, name, args, stdin_text=None, gate=False):
+        """对单个作业跑一条命令：非 0 返回 400；gate 的返回码 1 表示闸门未过，不算接口错误。"""
+        code, text, error = run_cli(args, stdin_text)
+        if code is None:
+            return self.send_json({"ok": False, "passed": gate and False, "message": error}, 500)
+        if gate:
+            return self.send_json({"ok": True, "passed": code == 0, "message": text})
+        if code != 0:
+            return self.send_json({"ok": False, "message": error, "error": error}, 400)
+        return self.send_json({"ok": True, "message": text})
+
+    def post_job(self, data):
+        """派工：作业名可省，省了就按角色和时间生成。任务文本走标准输入，避免被当成选项。"""
+        role = (data.get("role") or "").strip()
+        if not role:
+            return self.send_json({"ok": False, "error": "缺少角色"}, 400)
+        job = (data.get("job") or "").strip() or f"{role}-{time.strftime('%m%d-%H%M%S')}"
+        store.check_name(job)
+        task = (data.get("task") or "").strip()
+        if not task:
+            return self.send_json({"ok": False, "error": "任务为空"}, 400)
+        args = ["start", job]
+        if data.get("project"):
+            args += ["--project", data["project"]]
+        args += ["--role", role]
+        if data.get("repo"):
+            args += ["--repo", data["repo"]]
+        if data.get("batch"):
+            args += ["--batch", data["batch"]]
+        args += ["-"]
+        code, text, error = run_cli(args, task)
+        if code is None:
+            return self.send_json({"ok": False, "message": error}, 500)
+        if code != 0:
+            return self.send_json({"ok": False, "job": job, "message": error, "error": error}, 400)
+        return self.send_json({"ok": True, "job": job, "message": text})
+
     def do_POST(self):
         if not self.writable():
             return
@@ -275,6 +346,31 @@ class Handler(BaseHTTPRequestHandler):
                 pool = data.get("pool") or []
                 definitions.set_pool(project, data.get("role", ""), pool or None)
                 return self.send_json({"ok": True})
+            if parts == ["api", "jobs"]:
+                return self.post_job(data)
+            if len(parts) == 4 and parts[:2] == ["api", "jobs"]:
+                name, action = parts[2], parts[3]
+                store.check_name(name)
+                if action == "reply":
+                    text = (data.get("text") or "").strip()
+                    if not text:
+                        return self.send_json({"ok": False, "error": "内容为空"}, 400)
+                    return self.run_job_action(name, ["reply", name, "-"], text)
+                if action == "stop":
+                    args = ["stop", name] + ([f"--reason={data['reason']}"] if data.get("reason") else [])
+                    return self.run_job_action(name, args)
+                if action == "gate":
+                    return self.run_job_action(name, ["gate", name], gate=True)
+                if action == "accept":
+                    args = ["accept", name] + ([f"--note={data['note']}"] if data.get("note") else [])
+                    return self.run_job_action(name, args)
+                if action == "reject":
+                    reason = (data.get("reason") or "").strip()
+                    if not reason:
+                        return self.send_json({"ok": False, "error": "驳回必须写原因"}, 400)
+                    return self.run_job_action(name, ["reject", name, f"--reason={reason}"])
+                if action == "clear-escalation":
+                    return self.run_job_action(name, ["escalate", name, "--clear"])
             self.send_json({"error": "not found"}, 404)
         except (store.DispatchError, ValueError) as exc:
             self.send_json({"error": str(exc)}, 400)
