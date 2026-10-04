@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fieldOverridden, hasOwnLayer, poolRows, summarizeRole } from '../src/lib/roles'
+import { fieldOverridden, hasOwnLayer, inheritLabel, poolRows, projectRoleRows, summarizeRole, uniqueRepoSamples } from '../src/lib/roles'
 import type { RoleDetail } from '../src/types'
 
 function detail(fields: Record<string, { value: unknown; source: string }>, extra: Partial<RoleDetail> = {}): RoleDetail {
@@ -56,5 +56,37 @@ describe('层级判断', () => {
     expect(hasOwnLayer(d)).toBe(true)
     expect(fieldOverridden(d, 'timeout_min')).toBe(true)
     expect(fieldOverridden(d, 'backend')).toBe(false)
+  })
+})
+
+describe('inheritLabel / projectRoleRows', () => {
+  it('项目视图下按 scope 标继承状态，全部项目视图不显示', () => {
+    expect(inheritLabel('全局', true)).toBe('继承全局')
+    expect(inheritLabel('项目覆盖全局', true)).toBe('本项目已单独配置')
+    expect(inheritLabel('项目专属', true)).toBe('项目专属')
+    expect(inheritLabel('全局', false)).toBe('')
+  })
+  it('未定义的项目照样给全局角色（都是继承全局），已定义项目给合并角色', () => {
+    const config = {
+      projects: [{ id: 'p1', name: '项目一', default_role: null, defaults: {}, supervisor: '', repos: [],
+        roles: [{ id: 'dev', title: '开发', description: '', repos: [], scope: '项目覆盖全局' },
+                { id: 'qa', title: '测试', description: '', repos: [], scope: '项目专属' }] }],
+      roles: [{ id: 'dev', title: '开发', description: '' }, { id: 'ops', title: '运维', description: '' }],
+    }
+    expect(projectRoleRows(config, 'p1').rows.map(r => [r.id, inheritLabel(r.scope, true)]))
+      .toEqual([['dev', '本项目已单独配置'], ['qa', '项目专属']])
+    const unknown = projectRoleRows(config, 'nope')
+    expect(unknown.defined).toBe(false)
+    expect(unknown.rows.map(r => inheritLabel(r.scope, true))).toEqual(['继承全局', '继承全局'])
+    expect(projectRoleRows(config, '').rows.map(r => r.id)).toEqual(['dev', 'ops'])
+    expect(projectRoleRows(null, 'p1')).toEqual({ rows: [], defined: true })
+  })
+})
+
+describe('uniqueRepoSamples', () => {
+  it('按工程名去重并各取一个代表作业', () => {
+    expect(uniqueRepoSamples([
+      { project: 'app', name: 'j1' }, { project: 'app', name: 'j2' }, { project: 'web', name: 'j3' }, { project: '', name: 'j4' },
+    ])).toEqual([{ name: 'app', sample: 'j1' }, { name: 'web', sample: 'j3' }])
   })
 })

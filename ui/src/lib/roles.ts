@@ -1,6 +1,6 @@
 // 角色页的纯逻辑：一句话现状、模型池比例、层级判断（纯函数，可单测）
 
-import type { PoolEntry, RoleDetail } from '../types'
+import type { ConfigOverview, PoolEntry, RoleDetail } from '../types'
 
 export interface PoolRow { model: string; weight: number; pct: number }
 
@@ -51,4 +51,33 @@ export function fieldOverridden(detail: RoleDetail, key: string): boolean {
   const own = ['本机全局', '项目']
   const f = detail.fields[key]
   return !!f && own.includes(f.source)
+}
+
+/** 项目视图下角色列表每一项的继承状态标签；全部项目视图返回空串（不显示） */
+export function inheritLabel(scope: string, inProjectView: boolean): string {
+  if (!inProjectView) return ''
+  if (scope === '全局') return '继承全局'
+  if (scope === '项目覆盖全局') return '本项目已单独配置'
+  return '项目专属'
+}
+
+export interface RoleListRow { id: string; title: string; description: string; scope: string }
+
+/** 某个项目视图下要列出的角色：已定义项目给合并后的角色（含继承的全局角色，带 scope）；
+ * 没定义过的项目照样给全局角色（全部标「继承全局」），页面才不至于空掉 */
+export function projectRoleRows(config: ConfigOverview | null, projectId: string): { rows: RoleListRow[]; defined: boolean } {
+  if (!config) return { rows: [], defined: true }
+  if (!projectId) return { rows: config.roles.map(r => ({ ...r, scope: '全局' })), defined: true }
+  const project = config.projects.find(p => p.id === projectId)
+  if (project) return { rows: project.roles.map(r => ({ ...r, scope: r.scope || '项目专属' })), defined: true }
+  return { rows: config.roles.map(r => ({ ...r, scope: '全局' })), defined: false }
+}
+
+/** 定义项目对话框的工程预填：该项目已有作业按工程名去重，每个工程取一个代表作业名（用于查工作目录） */
+export function uniqueRepoSamples(jobs: { project: string; name: string }[]): { name: string; sample: string }[] {
+  const byName = new Map<string, string>()
+  for (const j of jobs) {
+    if (j.project && !byName.has(j.project)) byName.set(j.project, j.name)
+  }
+  return [...byName.entries()].map(([name, sample]) => ({ name, sample }))
 }
