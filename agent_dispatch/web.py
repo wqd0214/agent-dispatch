@@ -1,4 +1,4 @@
-"""只读的本地网页总览：读的就是状态目录，不改任何状态，关掉不影响派工。"""
+"""本地网页总览：作业部分只读；「模型与角色」页可以管理模型登记表和角色的模型池。关掉不影响派工。"""
 import json
 import mimetypes
 import os
@@ -6,7 +6,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import cli, definitions, gates, store, tmux
+from . import backends, cli, definitions, gates, models, store, tmux
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web.html")
 TEXT_SUFFIXES = (".md", ".json", ".jsonl", ".txt", ".log", ".sql", ".csv")
@@ -47,7 +47,8 @@ def summarize(job):
     return {
         "name": job["name"], "batch": job.get("batch") or "", "profile": job.get("profile"),
         "group": group, "project": project, "role": job.get("role"), "role_title": job.get("role_title"),
-        "backend": job.get("backend"), "model": job.get("model"), "model_actual": job.get("model_actual"), "state": state,
+        "backend": job.get("backend"), "model": job.get("model"), "model_alias": job.get("model_alias"),
+        "model_actual": job.get("model_actual"), "state": state,
         "state_label": cli.STATE_LABEL.get(state, state), "status": job.get("status"), "turn": job.get("turn"),
         "seconds": int(max(0, end - start)) if start else None, "channels": job.get("channels") or [],
         "task": job.get("task", ""), "needs_user": job.get("needs_user"), "reason": job.get("reason"),
@@ -92,6 +93,50 @@ def overview():
                           "group": group, "project": project, "run": os.path.basename(run_dir)})
     return {"now": store.now(), "home": store.HOME, "jobs": [summarize(j) for j in jobs], "cases": cases,
             "channels": list(channels.values()), "definitions": definitions_}
+
+
+def model_page():
+    """模型登记表、各模型的使用统计、各角色的模型池与实际配比。"""
+    registry, paused, jobs = models.load_registry(), models.health(), store.all_jobs()
+    by_id = {(m["backend"], m["id"]): alias for alias, m in registry["models"].items()}
+    stats, provider_failures = {}, {}
+    for job in jobs:
+        for attempt in job.get("model_attempts") or []:
+            provider_failures[attempt["model"]] = provider_failures.get(attempt["model"], 0) + 1
+        alias = job.get("model_alias") or by_id.get((job.get("backend"), job.get("model")))
+        if not alias:
+            continue
+        item = stats.setdefault(alias, {"jobs": 0, "pass": 0, "settled": 0, "failed": 0, "seconds": 0})
+        item["jobs"] += 1
+        state = store.effective_state(job)
+        if state != "running" and job.get("created_ts") and job.get("ended_ts"):
+            item["settled"] += 1
+            item["seconds"] += job["ended_ts"] - job["created_ts"]
+            item["pass"] += job.get("status") == "PASS"
+            item["failed"] += state in ("failed", "interrupted")
+    used = {}
+    for project_id, role_id, pool in models.all_pools():
+        for entry in pool:
+            used.setdefault(entry["model"], []).append({"project": project_id, "role": role_id, "weight": entry["weight"]})
+    model_rows = []
+    for alias, model in registry["models"].items():
+        st = stats.get(alias, {"jobs": 0, "pass": 0, "settled": 0, "failed": 0, "seconds": 0})
+        model_rows.append({"alias": alias, "backend": model["backend"], "id": model["id"], "enabled": model.get("enabled", True),
+                           "note": model.get("note", ""), "paused": paused.get(alias), "used_by": used.get(alias, []),
+                           "jobs": st["jobs"], "settled": st["settled"], "pass": st["pass"], "failed": st["failed"],
+                           "avg_seconds": int(st["seconds"] / st["settled"]) if st["settled"] else None,
+                           "provider_failures": provider_failures.get(alias, 0)})
+    model_rows.sort(key=lambda m: (not m["used_by"], not m["enabled"], m["backend"], m["alias"]))
+    roles = []
+    for project in definitions.list_projects():
+        for role in definitions.list_roles(project):
+            counts = models.usage(project["id"], role["role"])
+            roles.append({"project": project["id"], "project_name": project["name"], "role": role["role"], "title": role["title"],
+                          "repos": role["repos"], "pool": role.get("model_pool") or [], "usage": counts,
+                          "fallback": role.get("model") or (role.get("models") or {}).get(role.get("backend") or "")
+                          or f"{role.get('backend') or '-'} 的默认模型"})
+    return {"cooldown_min": registry["cooldown_min"], "models": model_rows, "roles": roles,
+            "backends": sorted(backends.load_all())}
 
 
 def list_run_files(run_dir):
@@ -166,6 +211,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_body(f.read(), "text/html; charset=utf-8")
             if parts == ["api", "overview"]:
                 return self.send_json(overview())
+            if parts == ["api", "models"]:
+                return self.send_json(model_page())
             if len(parts) >= 3 and parts[:2] == ["api", "job"]:
                 name = parts[2]
                 store.check_name(name)
@@ -180,6 +227,59 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def writable(self):
+        """写操作只接受本页面发出的请求：要求自定义请求头，跨站表单和脚本带不上它。"""
+        if self.headers.get("X-Agent-Dispatch") != "1":
+            self.send_json({"error": "拒绝：缺少请求头"}, 403)
+            return False
+        origin = self.headers.get("Origin")
+        if origin and urllib.parse.urlparse(origin).hostname not in ("127.0.0.1", "localhost"):
+            self.send_json({"error": "拒绝：来源不是本机"}, 403)
+            return False
+        return True
+
+    def body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(length) or b"{}") if length else {}
+
+    def do_POST(self):
+        if not self.writable():
+            return
+        parts = [urllib.parse.unquote(p) for p in urllib.parse.urlparse(self.path).path.split("/") if p]
+        try:
+            data = self.body()
+            if parts == ["api", "models", "import"]:
+                return self.send_json({"added": models.import_all()})
+            if parts == ["api", "models"]:
+                models.add(data.get("alias", "").strip(), data.get("backend", ""), data.get("id", "").strip(), data.get("note", ""))
+                return self.send_json({"ok": True})
+            if len(parts) == 4 and parts[:2] == ["api", "models"] and parts[3] == "resume":
+                models.resume(parts[2])
+                return self.send_json({"ok": True})
+            if len(parts) == 3 and parts[:2] == ["api", "models"]:
+                models.update(parts[2], enabled=data.get("enabled"), note=data.get("note"))
+                return self.send_json({"ok": True})
+            if parts == ["api", "pools"]:
+                project = definitions.load_project(data.get("project", ""))
+                pool = data.get("pool") or []
+                definitions.set_pool(project, data.get("role", ""), pool or None)
+                return self.send_json({"ok": True})
+            self.send_json({"error": "not found"}, 404)
+        except (store.DispatchError, ValueError) as exc:
+            self.send_json({"error": str(exc)}, 400)
+
+    def do_DELETE(self):
+        if not self.writable():
+            return
+        parts = [urllib.parse.unquote(p) for p in urllib.parse.urlparse(self.path).path.split("/") if p]
+        try:
+            if len(parts) == 3 and parts[:2] == ["api", "models"]:
+                models.remove(parts[2])
+                return self.send_json({"ok": True})
+            self.send_json({"error": "not found"}, 404)
+        except store.DispatchError as exc:
+            self.send_json({"error": str(exc)}, 400)
 
     def send_run_file(self, name, relative):
         """只允许读该作业 run 目录之内的文件。"""
@@ -200,7 +300,7 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host, port):
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
-    print(f"只读总览：http://{host}:{port}/    状态目录：{store.HOME}    （Ctrl-C 关闭，不影响任何作业）", flush=True)
+    print(f"派工总览：http://{host}:{port}/    状态目录：{store.HOME}    （Ctrl-C 关闭，不影响任何作业）", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

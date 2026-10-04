@@ -18,7 +18,8 @@ import sys
 import threading
 import time
 
-from . import backends, store, tmux
+from . import backends, models, store, tmux
+from .store import DispatchError
 
 STATUS_RE = re.compile(r"^[\s>*#-]*STATUS\**\s*[:：]\s*\**\s*([A-Za-z_]+)\**[ \t]*$", re.M)
 FIELD_RE = re.compile(r"^[\s>*-]*([A-Z][A-Z_]{2,})\**\s*[:：]\s*(.*)$", re.M)
@@ -59,6 +60,7 @@ class Recorder:
 
     def __init__(self, name, turn):
         self.turn = turn
+        self.tools = 0
         self.errors = []
         self.final = ""
         self.events = open(store.job_path(name, "events.jsonl"), "a", encoding="utf-8")
@@ -76,6 +78,7 @@ class Recorder:
         self.events.write(json.dumps(event, ensure_ascii=False) + "\n")
         self.events.flush()
         if event["kind"] == "tool":
+            self.tools += 1
             took = f" {event['ms']}ms" if event.get("ms") is not None else ""
             self.say(f"工具  {event['name']} {clip(event.get('input'), 300)}")
             self.say(f"      └ {'失败' if event.get('error') else '完成'}{took}: {clip(event.get('output') or '', 300)}")
@@ -118,6 +121,48 @@ def settle(name, turn, recorder, result_state, reason, rc, final=None):
             job["state"] = result_state
         store.save(job)
     return job
+
+
+def try_failover(name, recorder, reason):
+    """模型服务商出错（额度、限流、鉴权……）时：先暂停这个模型；能自动换就换池里另一个模型重新派出。
+
+    只在「本作业第 1 轮、这次尝试还没执行过任何工具」时自动换——已经动过手的，从头重来可能重复操作，
+    交给主管决定。返回 True 表示已换模型重新派出（调用方不要再落定、不要释放通道）。
+    """
+    job = store.load(name)
+    cause = recorder.cause().lstrip("：") or reason or ""
+    if not models.is_provider_error(" ".join(recorder.errors) + " " + (reason or "")):
+        return False
+    alias = job.get("model_alias") or models.alias_of(job["backend"], job["model"])
+    if alias:
+        models.pause(alias, cause)
+        recorder.say(f"⚠ 模型 {alias} 的服务商报错，已暂停使用 {models.load_registry()['cooldown_min']} 分钟：{cause[:200]}")
+    if not job.get("model_pool") or not alias:
+        return False
+    if job["turn"] != 1 or recorder.tools or job.get("state") == "held":
+        recorder.say("   本轮" + ("已执行过操作" if recorder.tools else "是续派轮次") + "，不自动换模型重派，以免重复执行；交给主管决定")
+        return False
+    tried = [a["model"] for a in job.get("model_attempts") or []] + [alias]
+    try:
+        new_alias, picked = models.pick(job["model_pool"], job.get("project_id"), job.get("role"), exclude=tried)
+    except DispatchError as exc:
+        recorder.say(f"   池内没有其它可用模型，不再重派：{exc}")
+        return False
+    backend = backends.get(picked["backend"])
+    from . import definitions
+    extra = (definitions.load(job["profile"]) if ":" in (job.get("profile") or "") else {}).get("backend_args") or []
+    recorder.say(f"⟳ 自动换成模型 {new_alias}（{picked['backend']} · {picked['id']}）重新派出")
+    recorder.close()
+    tmux.kill(job.get("tmux"))
+    with store.locked(name):
+        job = store.load(name)
+        job.setdefault("model_attempts", []).append({"model": alias, "reason": cause[:300], "at": store.now()})
+        job.update(model_alias=new_alias, backend=picked["backend"], model=picked["id"], model_actual=None,
+                   session_id=backends.initial_session(backend, name), child_pid=None,
+                   backend_args=list(extra.get(picked["backend"]) or []) if isinstance(extra, dict) else list(extra))
+        store.save(job)
+    store.update(name, runner_pid=spawn(name))
+    return True
 
 
 def install_stop(flags, on_stop):
@@ -193,6 +238,8 @@ def run_headless(name, job, backend, task):
         result = ("failed", f"智能体没有给出任何回复{last_error}")
     else:
         result = ("done", None)
+    if result[0] == "failed" and not flags["timed_out"] and try_failover(name, recorder, result[1]):
+        return
     job = settle(name, turn, recorder, result[0], result[1], rc, final)
     store.release_channels(store.channel_ns(job), job.get("channels"), name)
 
@@ -263,6 +310,8 @@ def run_tmux(name, job, backend, task):
             continue
         break
 
+    if result[0] == "failed" and not flags["stopped"] and try_failover(name, recorder, result[1]):
+        return
     actual = backends.session_model(backend, job)
     if actual and actual != job["model"]:
         recorder.say(f"⚠ 实际使用的模型是 {actual}，与指定的 {job['model']} 不一致")

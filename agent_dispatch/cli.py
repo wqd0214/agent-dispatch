@@ -14,7 +14,7 @@ import time
 import unicodedata
 import webbrowser
 
-from . import backends, definitions, gates, runner, store, tmux
+from . import backends, definitions, gates, models, runner, store, tmux
 from .store import DispatchError
 
 STATE_LABEL = {"running": "运行中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
@@ -215,12 +215,20 @@ def cmd_start(a):
     cwd = os.path.realpath(os.path.expanduser(os.path.expandvars(cwd)))
     if not os.path.isdir(cwd):
         raise DispatchError(f"工作目录不存在：{cwd}")
-    backend_name = a.backend or profile.get("backend")
-    if not backend_name:
-        raise DispatchError("没有指定后端：用 --backend，或在角色定义里配置 backend")
+    model_alias = None
+    if profile.get("model_pool"):  # 模型由角色的模型池按比例决定，主管不能指定
+        if a.model or a.backend:
+            raise DispatchError(f"角色 {profile.get('title') or profile.get('role')} 的模型由它的模型池按比例决定，"
+                                "不能用 --model / --backend 指定。要调整请改模型池（网页「模型与角色」或 agent-dispatch roles pool）")
+        model_alias, picked = models.pick(profile["model_pool"], profile.get("project_id"), profile.get("role"))
+        backend_name, model = picked["backend"], picked["id"]
+    else:
+        backend_name = a.backend or profile.get("backend")
+        if not backend_name:
+            raise DispatchError("没有指定后端：用 --backend，或在角色定义里配置 backend")
+        model = (a.model or (profile.get("model") if not a.backend else None)
+                 or (profile.get("models") or {}).get(backend_name) or backends.get(backend_name).get("default_model"))
     backend = backends.get(backend_name)
-    model = (a.model or (profile.get("model") if not a.backend else None) or (profile.get("models") or {}).get(backend_name)
-             or backend.get("default_model"))
     if not model:
         raise DispatchError(f"后端 {backend_name} 没有默认模型，请用 --model 指定")
     task = read_task(a)
@@ -246,6 +254,7 @@ def cmd_start(a):
         "group": profile.get("group") or group, "project": profile.get("project") or project,  # 项目名 / 工程名
         "project_id": profile.get("project_id"), "repo": profile.get("repo"), "role": profile.get("role"),
         "role_title": profile.get("title"), "channel_ns": profile.get("channel_ns"),
+        "model_alias": model_alias, "model_pool": profile.get("model_pool"), "model_attempts": [],
         "cwd": cwd, "session_id": session_id, "state": "running", "status": None,
         "mode": mode, "tmux": "ad-" + a.job.replace(".", "_") if mode == "tmux" else None,
         "turn": 1, "channels": channels, "task": task,
@@ -263,7 +272,8 @@ def cmd_start(a):
         shutil.rmtree(store.job_dir(a.job), ignore_errors=True)
         raise
     who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
-    store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model} 通道={','.join(channels) or '无'}")
+    picked_note = f"（按模型池选中 {model_alias}）" if model_alias else ""
+    store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model}{picked_note} 通道={','.join(channels) or '无'}")
     store.info(f"等结果：agent-dispatch wait {a.job}    看输出：agent-dispatch log {a.job} -f"
                + (f"    接进界面：agent-dispatch attach {a.job}" if mode == "tmux" else ""))
     return 0
@@ -391,8 +401,10 @@ def print_job_detail(job):
     print(f"状态      {STATE_LABEL.get(job['state'], job['state'])}   STATUS={job.get('status') or '-'}   第 {job['turn']} 轮   耗时 {elapsed(job)}")
     if job.get("reason"):
         print(f"原因      {job['reason']}")
-    print(f"后端      {job['backend']}  {job['model']}"
+    print(f"后端      {job['backend']}  {job['model']}" + (f"（{job['model_alias']}，按模型池选中）" if job.get("model_alias") else "")
           + (f"   ⚠ 实际用的是 {job['model_actual']}" if job.get("model_actual") else ""))
+    for attempt in job.get("model_attempts") or []:
+        print(f"  换过模型 [{attempt['at']}] {attempt['model']} → 原因：{attempt['reason']}")
     print(f"目录      {job['cwd']}")
     print(f"通道      {','.join(job.get('channels') or []) or '-'}")
     print(f"会话      {job.get('session_id') or '（尚未取得）'}")
@@ -661,10 +673,11 @@ def current_project(a):
 
 
 def role_table(project):
-    rows = [("角色ID", "称呼", "工程", "后端·方式", "来源", "说明")]
+    rows = [("角色ID", "称呼", "工程", "模型·方式", "来源", "说明")]
     for role in definitions.list_roles(project):
         repos = "、".join(role["repos"]) or ("（派工时指定）" if project else "-")
-        rows.append((role["role"], role["title"], repos, f"{role.get('backend') or '-'}·{role.get('mode') or 'headless'}",
+        pool = " ".join(f"{e['model']}={e['weight']}" for e in role.get("model_pool") or [])
+        rows.append((role["role"], role["title"], repos, f"{pool or role.get('backend') or '-'}·{role.get('mode') or 'headless'}",
                      role["scope"], runner.clip(role.get("description") or "", 44)))
     return rows
 
@@ -685,6 +698,62 @@ def cmd_role(a):
         print(f"- `{repo['id']}`：{repo['cwd']}{channels}")
     print(f"\n## 可派的角色（agent-dispatch start <作业名> --project {project['id']} --role <角色ID> \"任务\"）\n")
     table(role_table(project))
+    return 0
+
+
+def parse_pool(pairs):
+    pool = []
+    for pair in pairs:
+        alias, sep, weight = pair.rpartition("=")
+        if not sep:
+            raise DispatchError(f"写成 <模型短名>=<比例>，如 pi:glm-5.3-flash=70：{pair!r}")
+        try:
+            pool.append({"model": alias, "weight": float(weight) if "." in weight else int(weight)})
+        except ValueError:
+            raise DispatchError(f"比例必须是数字：{pair!r}")
+    return pool
+
+
+def model_table():
+    registry, paused = models.load_registry(), models.health()
+    rows = [("短名", "后端", "模型", "状态", "用在哪些角色", "备注")]
+    users = {}
+    for project_id, role_id, pool in models.all_pools():
+        for entry in pool:
+            users.setdefault(entry["model"], []).append(f"{project_id}:{role_id}={entry['weight']}")
+    for alias, model in sorted(registry["models"].items()):
+        state = "停用" if not model.get("enabled", True) else (f"暂停至 {time.strftime('%H:%M', time.localtime(paused[alias]['until']))}" if alias in paused else "可用")
+        rows.append((alias, model["backend"], model["id"], state, "、".join(users.get(alias, [])) or "-", model.get("note") or ""))
+    return rows
+
+
+def cmd_models(a):
+    action = a.action or "list"
+    if action == "list":
+        if not models.load_registry()["models"]:
+            print("（模型登记表是空的。导入本机 pi 和 OpenCode 的全部模型：agent-dispatch models import）")
+            return 0
+        table(model_table())
+        return 0
+    if action == "import":
+        added = models.import_all()
+        store.info(f"新登记 {len(added)} 个模型" + (f"：{'、'.join(added)}" if added else "（都已登记过）"))
+        return 0
+    if not a.alias:
+        raise DispatchError(f"models {action} 需要模型短名")
+    if action == "add":
+        if not a.backend or not a.id:
+            raise DispatchError("用法：agent-dispatch models add <短名> --backend pi --id <provider/model> [--note 备注]")
+        models.add(a.alias, a.backend, a.id, a.note or "")
+    elif action in ("enable", "disable"):
+        models.update(a.alias, enabled=action == "enable")
+    elif action == "note":
+        models.update(a.alias, note=a.note or "")
+    elif action == "resume":
+        models.resume(a.alias)
+    elif action == "remove":
+        models.remove(a.alias)
+    store.info(f"已处理：models {action} {a.alias}")
     return 0
 
 
@@ -744,6 +813,10 @@ def cmd_roles(a):
         print(f"\n派工单模板：{role['_brief_path'] or '（无，任务原文直接作为派工单）'}")
         if role["_brief_path"]:
             print("\n" + (store.read_text(role["_brief_path"]) or ""))
+        return 0
+    if action == "pool":
+        path = definitions.set_pool(project, a.name, None if a.clear else parse_pool(a.pool))
+        store.info(f"已{'去掉' if a.clear else '更新'}角色 {a.name} 的模型池：{path}")
         return 0
     if action == "add":
         path, inherits = definitions.add_role(a.name, project, a.title, a.description,
@@ -906,6 +979,13 @@ def build_parser():
     p = add("role", cmd_role, "打印主管角色文档（职责、工作循环、裁决表）；在项目里会附上项目规则和可派的角色")
     p.add_argument("--project", "-P", help="项目 ID 或名称（默认按当前目录识别）")
 
+    p = add("models", cmd_models, "模型登记：列表 / import / add / enable / disable / note / resume / remove")
+    p.add_argument("action", nargs="?", choices=["list", "import", "add", "enable", "disable", "note", "resume", "remove"])
+    p.add_argument("alias", nargs="?", help="模型短名，如 pi:glm-5.3-flash")
+    p.add_argument("--backend", help="add：后端")
+    p.add_argument("--id", help="add：后端里的模型 ID，如 cc-switch-zhipu-glm/glm-5.3-flash")
+    p.add_argument("--note", help="add / note：备注")
+
     p = add("projects", cmd_projects, "项目定义：列表 / show <ID> / add <ID> / add-repo <ID> <工程名>=<目录>")
     p.add_argument("action", nargs="?", choices=["list", "show", "add", "add-repo"])
     p.add_argument("args", nargs="*")
@@ -913,9 +993,11 @@ def build_parser():
     p.add_argument("--repo", action="append", metavar="工程名=目录", help="add：登记一个工程，可重复")
     p.add_argument("--channels", help="add-repo：这个工程的浏览器通道，逗号分隔")
 
-    p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID>")
-    p.add_argument("action", nargs="?", choices=["list", "show", "add"])
+    p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID> / pool <角色> <模型短名>=<比例> …")
+    p.add_argument("action", nargs="?", choices=["list", "show", "add", "pool"])
     p.add_argument("name", nargs="?")
+    p.add_argument("pool", nargs="*", help="pool：模型池，如 pi:glm-5.3-flash=70 oc:glm-5=30")
+    p.add_argument("--clear", action="store_true", help="pool：去掉模型池")
     p.add_argument("--project", "-P", help="项目 ID 或名称（默认按当前目录识别）")
     p.add_argument("--global", dest="is_global", action="store_true", help="只看 / 新建全局角色")
     p.add_argument("--title", help="add：角色的称呼，如 后端开发工程师")

@@ -293,3 +293,24 @@ def add_role(role_id, project=None, title=None, description=None, repos=None, ba
         store.write_text(os.path.join(directory, f"{role_id}.brief.md"), ROLE_BRIEF_TEMPLATE % (title or role_id))
     _write_json(path, data)
     return path, inherits
+
+
+def set_pool(project, role_ref, pool):
+    """把模型池写进项目的角色定义（没有项目角色文件时建一个只含覆盖项的）。pool 为空表示去掉模型池。"""
+    from . import models
+    if not project:
+        raise DispatchError("模型池要配置在项目的角色上：加 --project，或在项目的工程目录里执行")
+    role_id = find_role_id(project, role_ref)
+    if pool:
+        models.check_pool(pool)
+    path = os.path.join(_project_role_dirs(project)[0], f"{role_id}.json")
+    data = _read_json(path) or {}
+    if pool:
+        data["model_pool"] = [{"model": e["model"], "weight": e["weight"]} for e in pool]
+        data.pop("model", None)  # 有模型池就不再用固定模型，免得两处说法不一
+        data.pop("models", None)
+    else:
+        data.pop("model_pool", None)
+    _write_json(path, data)
+    return path
+

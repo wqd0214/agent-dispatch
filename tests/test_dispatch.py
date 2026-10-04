@@ -21,8 +21,8 @@ class DispatchTest(unittest.TestCase):
         os.makedirs(os.path.join(self.work, "runs"))
         backends = {
             "fakepi": {"format": "pi", "session": "named", "default_model": "m",
-                       "argv": [sys.executable, FAKE, "pi", "{session}", "{task}"],
-                       "resume_argv": [sys.executable, FAKE, "pi", "{session}", "{task}"],
+                       "argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}"],
+                       "resume_argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}"],
                        "attach": "fakepi --session-id {session}",
                        "interactive_argv": [sys.executable, FAKE_TUI, os.path.join(self.tmp, "sessions"), "{session}", "{task}"],
                        "session_reader": {"glob": os.path.join(self.tmp, "sessions", "*", "*_{session}.jsonl")}},
@@ -329,6 +329,59 @@ class DispatchTest(unittest.TestCase):
         job = self.job("g1")
         self.assertEqual((job["role"], job["project"], job["project_id"]), ("qa", "elsewhere", None))
 
+    def make_pool(self, role, *pairs):
+        for alias, model_id in (("fa", "m-a"), ("fb", "m-b")):
+            if alias not in self.ok("models").stdout:
+                self.ok("models", "add", alias, "--backend", "fakepi", "--id", model_id)
+        self.ok("roles", "pool", role, "-P", "p1", *pairs)
+
+    def test_model_pool_strict_ratio(self):
+        self.make_project()
+        self.make_pool("dev", "fa=2", "fb=1")
+        rejected = self.cli("start", "x0", "-P", "p1", "-r", "dev", "--model", "m-a", "x")
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("模型池", rejected.stderr)
+        picks = []
+        for i in range(6):
+            self.ok("start", f"p{i}", "-P", "p1", "-r", "dev", "STATUS: PASS")
+            self.ok("wait", f"p{i}", "--timeout", "20")
+            picks.append(self.job(f"p{i}")["model_alias"])
+        self.assertEqual(picks, ["fa", "fb", "fa", "fa", "fb", "fa"])  # 2:1 严格配比
+        self.assertEqual(self.job("p0")["model"], "m-a")
+        # 停用的模型自动跳过
+        self.ok("models", "disable", "fa")
+        self.ok("start", "p6", "-P", "p1", "-r", "dev", "STATUS: PASS")
+        self.assertEqual(self.job("p6")["model_alias"], "fb")
+        self.ok("wait", "p6", "--timeout", "20")
+        self.ok("models", "disable", "fb")
+        none_left = self.cli("start", "p7", "-P", "p1", "-r", "dev", "x")
+        self.assertIn("没有可用的模型", none_left.stderr)
+        self.assertIn("fa=2", self.ok("roles", "-P", "p1").stdout)
+
+    def test_provider_error_fails_over_to_another_model(self):
+        self.make_project()
+        self.make_pool("dev", "fa=1", "fb=1")
+        self.ok("start", "f1", "-P", "p1", "-r", "dev", "FAILON m-a\nSTATUS: PASS")
+        self.ok("wait", "f1", "--timeout", "30")
+        job = self.job("f1")
+        self.assertEqual((job["state"], job["status"], job["model_alias"]), ("done", "PASS", "fb"))
+        self.assertEqual(job["model_attempts"][0]["model"], "fa")
+        self.assertIn("quota", job["model_attempts"][0]["reason"])
+        self.assertIn("暂停", self.ok("models").stdout)  # 出错的模型被暂停
+        log = self.ok("log", "f1", "-n", "100").stdout
+        self.assertIn("自动换成模型 fb", log)
+        # 暂停期间新作业不会选到它
+        self.ok("start", "f2", "-P", "p1", "-r", "dev", "STATUS: PASS")
+        self.assertEqual(self.job("f2")["model_alias"], "fb")
+        self.ok("wait", "f2", "--timeout", "20")
+        self.ok("models", "resume", "fa")
+        # 干到一半才被拒：只暂停，不自动重派
+        self.ok("start", "f3", "-P", "p1", "-r", "dev", "FAILAFTERTOOL m-a\nFAILAFTERTOOL m-b\nSTATUS: PASS")
+        self.ok("wait", "f3", "--timeout", "30")
+        job = self.job("f3")
+        self.assertEqual((job["state"], job["model_attempts"]), ("failed", []))
+        self.assertIn("不自动换模型重派", self.ok("log", "f3", "-n", "100").stdout)
+
     def test_supervisor_role_doc_includes_project(self):
         self.make_project()
         with open(os.path.join(self.home, "projects", "p1", "supervisor.md"), "w") as f:
@@ -352,6 +405,47 @@ class DispatchTest(unittest.TestCase):
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("暂无作业", result.stdout)
+
+    def test_web_edits_models_and_pools(self):
+        import socket, urllib.error, urllib.request
+        self.make_project()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None, header=True):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            if header:
+                request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.load(exc)
+
+        try:
+            self.ok("web", "start", "--port", str(port))
+            self.assertEqual(call("POST", "/api/models", {"alias": "fa", "backend": "fakepi", "id": "m-a"}, header=False)[0], 403)
+            self.assertEqual(call("POST", "/api/models", {"alias": "fa", "backend": "fakepi", "id": "m-a"})[0], 200)
+            self.assertEqual(call("POST", "/api/models", {"alias": "fb", "backend": "fakepi", "id": "m-b"})[0], 200)
+            status, error = call("POST", "/api/pools", {"project": "p1", "role": "dev", "pool": [{"model": "nope", "weight": 1}]})
+            self.assertEqual(status, 400)
+            self.assertIn("不在模型登记表里", error["error"])
+            self.assertEqual(call("POST", "/api/pools", {"project": "p1", "role": "dev",
+                                                         "pool": [{"model": "fa", "weight": 3}, {"model": "fb", "weight": 1}]})[0], 200)
+            self.assertEqual(call("POST", "/api/models/fb", {"enabled": False})[0], 200)
+            page = call("GET", "/api/models")[1]
+            dev = next(r for r in page["roles"] if r["role"] == "dev")
+            self.assertEqual(dev["pool"], [{"model": "fa", "weight": 3}, {"model": "fb", "weight": 1}])
+            self.assertFalse(next(m for m in page["models"] if m["alias"] == "fb")["enabled"])
+            self.assertEqual(call("DELETE", "/api/models/fa")[0], 400)  # 还在模型池里，不能删
+            self.ok("start", "w1", "-P", "p1", "-r", "dev", "STATUS: PASS")  # 网页上的配置即时生效
+            self.assertEqual(self.job("w1")["model_alias"], "fa")
+            self.ok("wait", "w1", "--timeout", "20")
+        finally:
+            self.ok("web", "stop")
 
     def test_dry_run_prints_brief(self):
         out = self.ok("start", "j15", "-p", "t", "--dry-run", "跑场景A").stdout

@@ -6,6 +6,8 @@
   SILENT           不输出最终回复
   MKRUN <目录名>   在 cwd/runs/ 下建 run 目录并写 report.md
   PWDCHECK         在回复里报告环境变量 PWD 是否等于实际工作目录
+  FAILON <模型>     用这个模型时，一开始就报服务商错误（额度用尽）
+  FAILAFTERTOOL <模型>  用这个模型时，执行过一次工具后才报服务商错误
   其余文本里的 `STATUS: X` 等行会原样作为最终回复
 """
 import json
@@ -15,6 +17,7 @@ import sys
 import time
 
 fmt, session, task = sys.argv[1], sys.argv[2], sys.argv[3]
+model = sys.argv[4] if len(sys.argv) > 4 else ""
 
 
 def emit(obj):
@@ -28,6 +31,12 @@ turns_file = os.path.join(os.getcwd(), f".fake-turns-{session}")
 turn = int(open(turns_file).read()) + 1 if os.path.exists(turns_file) else 1
 with open(turns_file, "w") as f:
     f.write(str(turn))
+
+if f"FAILON {model}" in task.split("\n") or (model and f"FAILON {model}" in task):  # 模拟模型服务商拒绝（还没干活）
+    emit({"type": "session", "id": session})
+    emit({"type": "message_end", "message": {"role": "assistant", "content": [], "stopReason": "error",
+                                             "errorMessage": "429 usage allocated quota exceeded"}})
+    sys.exit(1)
 
 if fmt == "pi":
     emit({"type": "session", "id": session})
@@ -52,6 +61,10 @@ if match:
 
 reply = "\n".join(line for line in task.splitlines() if re.match(r"^[A-Z_]+: ", line)) or "完成"
 reply = f"第 {turn} 轮。\n{reply}"
+if model and f"FAILAFTERTOOL {model}" in task:  # 干了一半才被服务商拒绝
+    emit({"type": "message_end", "message": {"role": "assistant", "content": [], "stopReason": "error",
+                                             "errorMessage": "429 usage allocated quota exceeded"}})
+    sys.exit(1)
 if "PWDCHECK" in task:  # 有的智能体按环境变量 PWD 认工作目录
     same = os.path.realpath(os.environ.get("PWD", "")) == os.path.realpath(os.getcwd())
     reply += f"\nPWD_OK: {'yes' if same else 'no'}"

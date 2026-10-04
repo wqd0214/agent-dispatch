@@ -64,6 +64,24 @@ tbody tr.link:hover { background: var(--gray-bg); }
 .scope:hover { text-decoration: none; border-color: var(--blue); }
 .scope.on { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); font-weight: 600; }
 .scope .n { margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 400; }
+.nav { display: flex; gap: 4px; }
+.nav a { color: var(--muted); padding: 3px 10px; border-radius: 6px; }
+.nav a.on { color: var(--text); background: var(--gray-bg); text-decoration: none; }
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 4px 0 10px; }
+button.btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px; padding: 4px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+button.btn:hover { border-color: var(--blue); }
+button.btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+button.btn.danger { color: var(--red); }
+button.btn.small { padding: 1px 8px; font-size: 12px; }
+input.field, select.field { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 13px; }
+input.field.num { width: 72px; }
+.toast { position: fixed; right: 20px; bottom: 20px; padding: 10px 16px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0,0,0,.15); z-index: 9; }
+.toast.err { border-color: var(--red); color: var(--red); }
+.role-card { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.role-card:last-child { border-bottom: 0; }
+.pool-row { display: grid; grid-template-columns: minmax(220px, 2fr) 90px 70px minmax(160px, 1fr) 60px; gap: 8px; align-items: center; margin: 6px 0; }
+.bar { height: 6px; border-radius: 3px; background: var(--gray-bg); overflow: hidden; display: flex; }
+.bar span { background: var(--blue); }
 h2.project { font-size: 15px; color: var(--text); margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--line); }
 .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; min-width: 104px; }
 .stat b { display: block; font-size: 22px; line-height: 1.2; }
@@ -94,11 +112,12 @@ code { background: var(--code); padding: 1px 5px; border-radius: 4px; font: 12px
 <body>
 <header>
   <h1><a href="#/" style="color:inherit">派工总览</a></h1>
+  <nav class="nav"><a href="#/" id="nav-jobs">作业</a><a href="#/models" id="nav-models">模型与角色</a></nav>
   <span class="meta" id="home"></span>
   <span class="theme" id="theme">
     <button data-theme-choice="auto">跟随系统</button><button data-theme-choice="light">亮色</button><button data-theme-choice="dark">暗色</button>
   </span>
-  <span class="live" id="live">只读 · 每 3 秒刷新</span>
+  <span class="live" id="live">每 3 秒刷新</span>
 </header>
 <main id="main"></main>
 <script>
@@ -146,7 +165,7 @@ async function api(path) {
 function setLive(ok) {
   const el = document.getElementById('live');
   el.classList.toggle('off', !ok);
-  el.textContent = ok ? '只读 · 每 3 秒刷新' : '连接已断开（agent-dispatch web 可能已关闭）';
+  el.textContent = ok ? (location.hash.startsWith('#/models') ? '改动即时生效' : '每 3 秒刷新') : '连接已断开（agent-dispatch web 可能已关闭）';
 }
 
 // ---------- 总览（项目 → 工程 → 批次 → 作业）；数据里 group 存项目名、project 存工程名 ----------
@@ -173,7 +192,7 @@ function jobTable(rows) {
       h('td', {}, statusChip(j)),
       h('td', {}, j.gate_ok === true ? chip('通过', 'green') : j.gate_ok === false ? chip('未通过', 'red') : h('span', {class: 'muted'}, '-')),
       h('td', {}, j.turn), h('td', {class: 'nowrap'}, duration(j.seconds)),
-      h('td', {class: 'nowrap'}, j.backend, j.mode === 'tmux' ? ' · tmux' : '', h('div', {class: 'muted small'}, j.model),
+      h('td', {class: 'nowrap'}, j.backend, j.mode === 'tmux' ? ' · tmux' : '', h('div', {class: 'muted small'}, j.model_alias || j.model),
         j.model_actual ? h('div', {class: 'small', style: 'color:var(--amber)'}, '⚠ 实际：' + j.model_actual) : null),
       h('td', {class: 'small nowrap', title: j.channels.join(', ')}, j.channels.length > 3 ? j.channels.length + ' 个通道' : j.channels.join(', ') || '-'),
       h('td', {}, h('div', {class: 'task', title: j.task}, j.task),
@@ -267,6 +286,97 @@ function renderOverview(data) {
   main.replaceChildren(...nodes);
 }
 
+// ---------- 模型与角色（可编辑） ----------
+function toast(text, err) {
+  const el = h('div', {class: 'toast' + (err ? ' err' : '')}, text);
+  document.body.append(el); setTimeout(() => el.remove(), err ? 6000 : 2500);
+}
+async function send(method, path, body) {
+  const r = await fetch(path, {method, headers: {'Content-Type': 'application/json', 'X-Agent-Dispatch': '1'}, body: body ? JSON.stringify(body) : undefined});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+async function act(fn, okText) {
+  try { await fn(); if (okText) toast(okText); await loadModels(); } catch (e) { toast(e.message, true); }
+}
+const pct = (a, b) => b ? Math.round(a * 100 / b) + '%' : '-';
+async function loadModels() {
+  const data = await api('/api/models');
+  renderModels(data);
+}
+function renderModels(data) {
+  const nodes = [];
+  const enabledModels = data.models.filter(m => m.enabled);
+  // 模型登记表
+  const form = {alias: h('input', {class: 'field', placeholder: '短名，如 pi:glm-flash'}), backend: h('select', {class: 'field'}, data.backends.map(b => h('option', {value: b}, b))),
+    id: h('input', {class: 'field', placeholder: '后端里的模型 ID，如 provider/model', style: 'min-width:280px'}), note: h('input', {class: 'field', placeholder: '备注（可选）'})};
+  nodes.push(h('h2', {}, '模型登记表', h('small', {}, `${data.models.length} 个模型 · 服务商报错后暂停 ${data.cooldown_min} 分钟`)),
+    h('div', {class: 'toolbar'},
+      h('button', {class: 'btn primary', onclick: () => act(async () => { const r = await send('POST', '/api/models/import'); toast(r.added.length ? `新登记 ${r.added.length} 个模型` : '没有新模型'); })}, '从 pi / OpenCode 导入'),
+      h('span', {class: 'muted small'}, '或手动添加：'), form.alias, form.backend, form.id, form.note,
+      h('button', {class: 'btn', onclick: () => act(() => send('POST', '/api/models', {alias: form.alias.value, backend: form.backend.value, id: form.id.value, note: form.note.value}), '已添加')}, '添加')));
+  if (!data.models.length) nodes.push(h('div', {class: 'panel empty'}, '还没有登记模型。点「从 pi / OpenCode 导入」把本机可用的模型都登记进来。'));
+  else nodes.push(h('div', {class: 'panel'}, h('table', {}, h('thead', {}, h('tr', {}, ['短名', '后端', '模型 ID', '状态', '用在哪些角色', '作业', '通过率', '平均耗时', '服务商报错', '备注', ''].map(x => h('th', {}, x)))),
+    h('tbody', {}, data.models.map(m => {
+      const note = h('input', {class: 'field', value: m.note, placeholder: '备注', style: 'width:140px'});
+      note.addEventListener('change', () => act(() => send('POST', '/api/models/' + encodeURIComponent(m.alias), {note: note.value}), '备注已保存'));
+      const state = !m.enabled ? chip('停用') : m.paused ? chip('暂停中', 'amber') : chip('可用', 'green');
+      return h('tr', {},
+        h('td', {class: 'nowrap'}, h('b', {}, m.alias)), h('td', {class: 'small'}, m.backend), h('td', {class: 'small'}, h('code', {}, m.id)),
+        h('td', {class: 'nowrap'}, state, m.paused ? h('div', {class: 'small muted', title: m.paused.reason}, `至 ${new Date(m.paused.until * 1000).toLocaleTimeString()} · ${m.paused.reason.slice(0, 30)}`) : null),
+        h('td', {class: 'small'}, m.used_by.length ? m.used_by.map(u => `${u.project}:${u.role}=${u.weight}`).join('、') : h('span', {class: 'muted'}, '-')),
+        h('td', {}, m.jobs || h('span', {class: 'muted'}, '0')), h('td', {}, pct(m.pass, m.settled)), h('td', {class: 'nowrap'}, duration(m.avg_seconds)),
+        h('td', {}, m.provider_failures ? chip(m.provider_failures, 'red') : h('span', {class: 'muted'}, '0')), h('td', {}, note),
+        h('td', {class: 'nowrap'},
+          m.paused ? h('button', {class: 'btn small', onclick: () => act(() => send('POST', `/api/models/${encodeURIComponent(m.alias)}/resume`), '已恢复')}, '恢复') : null, ' ',
+          h('button', {class: 'btn small', onclick: () => act(() => send('POST', '/api/models/' + encodeURIComponent(m.alias), {enabled: !m.enabled}), m.enabled ? '已停用' : '已启用')}, m.enabled ? '停用' : '启用'), ' ',
+          h('button', {class: 'btn small danger', onclick: () => confirm(`从登记表删除 ${m.alias}？`) && act(() => send('DELETE', '/api/models/' + encodeURIComponent(m.alias)), '已删除')}, '删除')));
+    })))));
+
+  // 角色的模型池
+  nodes.push(h('h2', {}, '角色的模型池', h('small', {}, '派工只认角色：按比例从池子里选模型，历史上严格贴合比例；停用或暂停的模型自动跳过')));
+  const projects = [...new Set(data.roles.map(r => r.project))];
+  if (!projects.length) nodes.push(h('div', {class: 'panel empty'}, '还没有定义项目和角色。'));
+  for (const pid of projects) {
+    const roles = data.roles.filter(r => r.project === pid);
+    nodes.push(h('h2', {class: 'project'}, roles[0].project_name, h('small', {}, `（${pid}）`)), h('div', {class: 'panel'}, roles.map(r => roleCard(r, enabledModels, data.models))));
+  }
+  main.replaceChildren(...nodes);
+}
+function roleCard(role, enabledModels, allModels) {
+  const rows = role.pool.map(e => ({model: e.model, weight: e.weight}));
+  const box = h('div');
+  const totalUse = Object.values(role.usage).reduce((a, b) => a + b, 0);
+  function draw() {
+    const total = rows.reduce((a, r) => a + (Number(r.weight) || 0), 0);
+    box.replaceChildren(
+      rows.length ? h('div', {class: 'pool-row muted small'}, h('span', {}, '模型'), h('span', {}, '比例'), h('span', {}, '目标'), h('span', {}, '实际派工（历史）'), h('span', {})) : null,
+      rows.map((row, i) => {
+        const select = h('select', {class: 'field'}, h('option', {value: ''}, '选择模型…'),
+          allModels.filter(m => m.enabled || m.alias === row.model).map(m => h('option', {value: m.alias, selected: m.alias === row.model ? 'selected' : null}, `${m.alias}（${m.backend}）${m.paused ? ' · 暂停中' : ''}`)));
+        select.addEventListener('change', () => { row.model = select.value; draw(); });
+        const weight = h('input', {class: 'field num', type: 'number', min: '1', value: row.weight});
+        weight.addEventListener('input', () => { row.weight = Number(weight.value); draw(); });
+        const used = role.usage[row.model] || 0;
+        return h('div', {class: 'pool-row'}, select, weight, h('span', {}, pct(Number(row.weight) || 0, total)),
+          h('span', {class: 'small'}, h('div', {class: 'bar'}, h('span', {style: `width:${totalUse ? used * 100 / totalUse : 0}%`})), `${used} 个 · ${pct(used, totalUse)}`),
+          h('button', {class: 'btn small danger', onclick: () => { rows.splice(i, 1); draw(); }}, '移除'));
+      }),
+      rows.length ? null : h('div', {class: 'small muted', style: 'margin:6px 0'}, `未配置模型池：派工用 ${role.fallback}，主管也可以用 --model 指定。`),
+      h('div', {class: 'toolbar'},
+        h('button', {class: 'btn small', onclick: () => { rows.push({model: '', weight: 1}); draw(); }}, '+ 添加模型'),
+        h('button', {class: 'btn small primary', onclick: () => {
+          if (rows.some(r => !r.model)) return toast('有一行还没选模型', true);
+          act(() => send('POST', '/api/pools', {project: role.project, role: role.role, pool: rows}), rows.length ? '模型池已保存，下次派工生效' : '已去掉模型池');
+        }}, '保存'),
+        role.pool.length ? h('button', {class: 'btn small danger', onclick: () => confirm('去掉这个角色的模型池？') && act(() => send('POST', '/api/pools', {project: role.project, role: role.role, pool: []}), '已去掉模型池')}, '清空模型池') : null));
+  }
+  draw();
+  return h('div', {class: 'role-card'}, h('div', {}, h('b', {}, role.title), ' ', h('code', {}, role.role),
+    h('span', {class: 'muted small'}, '  负责：' + (role.repos.join('、') || '派工时指定'))), box);
+}
+
 // ---------- 作业详情 ----------
 function buildJobView(name) {
   const v = {name, tab: 'log', offset: -1, head: h('div'), body: h('div', {class: 'panel'}), log: h('pre', {class: 'log'}), viewer: h('pre', {class: 'log'}, '点左侧文件查看内容'), detail: null};
@@ -346,9 +456,14 @@ async function pollLog(v) {
 
 // ---------- 路由与轮询 ----------
 async function tick() {
+  for (const [id, on] of [['nav-jobs', !location.hash.startsWith('#/models')], ['nav-models', location.hash.startsWith('#/models')]])
+    document.getElementById(id).classList.toggle('on', on);
   try {
     const match = location.hash.match(/^#\/job\/(.+)$/);
-    if (match) {
+    if (location.hash.startsWith('#/models')) {
+      // 编辑页不自动刷新，免得打断正在填写的内容；每次操作后会重新读取
+      if (view !== 'models') { view = 'models'; await loadModels(); }
+    } else if (match) {
       const name = decodeURIComponent(match[1]);
       if (!view || view.name !== name) view = buildJobView(name);
       const current = view;
@@ -367,7 +482,7 @@ async function tick() {
     if (err instanceof TypeError) setLive(false); else main.replaceChildren(h('div', {class: 'panel empty'}, String(err.message || err)), h('p', {}, h('a', {href: '#/'}, '← 返回总览')));
   }
 }
-function start() { clearInterval(timer); tick(); timer = setInterval(tick, 3000); }
+function start() { clearInterval(timer); if (view === 'models') view = null; tick(); timer = setInterval(tick, 3000); }
 window.addEventListener('hashchange', start);
 start();
 </script>
