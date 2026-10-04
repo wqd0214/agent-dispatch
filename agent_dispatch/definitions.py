@@ -118,7 +118,7 @@ def add_project(project_id, name=None, repos=None):
     return _project_file(project_id)
 
 
-def add_repo(project_id, repo_id, cwd, channels=None):
+def add_repo(project_id, repo_id, cwd, channels=None, channel_namespace=None):
     store.check_name(repo_id)
     data = _read_json(_project_file(project_id))
     if data is None:
@@ -129,8 +129,52 @@ def add_repo(project_id, repo_id, cwd, channels=None):
     repo = {"cwd": cwd}
     if channels:
         repo["channels"] = channels
+    if channel_namespace:
+        repo["channel_namespace"] = channel_namespace
     data.setdefault("repos", {})[repo_id] = {**(data.get("repos") or {}).get(repo_id, {}), **repo}
     _write_json(_project_file(project_id), data)
+
+
+def update_project(project_id, name=None, default_role=None, defaults=None):
+    """改项目定义：显示名、默认角色、defaults 覆盖层。只改给定的项。"""
+    data = _read_json(_project_file(project_id))
+    if data is None:
+        raise DispatchError(f"没有定义项目 {project_id!r}")
+    if name is not None:
+        data["name"] = name
+    if default_role is not None:
+        find_role_id(load_project(project_id), default_role)  # 角色不存在就拒
+        data["default_role"] = default_role
+    if defaults is not None:
+        _check_field_values(load_project(project_id), defaults)
+        data["defaults"] = {**(data.get("defaults") or {}), **defaults}
+    _write_json(_project_file(project_id), data)
+    return _project_file(project_id)
+
+
+def remove_repo(project_id, repo_id):
+    """从项目里删工程；还有角色的 repos 引用它时拒绝。"""
+    project = load_project(project_id)
+    if repo_id not in project["repos"]:
+        raise DispatchError(f"项目 {project_id} 没有工程 {repo_id!r}，可选：{'、'.join(project['repos'])}")
+    referencing = [r["role"] for r in list_roles(project) if repo_id in (r.get("repos") or [])]
+    if referencing:
+        raise DispatchError(f"工程 {repo_id} 还被角色 {'、'.join(referencing)} 引用，先改这些角色的 repos 再删除")
+    data = _read_json(_project_file(project_id))
+    data.get("repos", {}).pop(repo_id, None)
+    _write_json(_project_file(project_id), data)
+
+
+def get_supervisor_notes(project_id):
+    return store.read_text(os.path.join(project_dir(project_id), "supervisor.md"))
+
+
+def set_supervisor_notes(project_id, text):
+    if _read_json(_project_file(project_id)) is None:
+        raise DispatchError(f"没有定义项目 {project_id!r}")
+    path = os.path.join(project_dir(project_id), "supervisor.md")
+    store.write_text(path, text)
+    return path
 
 
 # ---------- 角色 ----------
@@ -325,4 +369,158 @@ def set_pool(project, role_ref, pool):
     else:
         data.pop("model_pool", None)
     _write_json(path, data)
+    return path
+
+
+# ---------- 配置中心：角色字段的分层读写 ----------
+
+# 网页上允许修改的角色字段；brief_template 等内部字段不开放
+EDITABLE_ROLE_FIELDS = {"title", "description", "repos", "backend", "model", "models", "mode", "channels",
+                        "timeout_min", "statuses", "gates", "reply_suffix", "runs_root", "backend_args",
+                        "model_pool"}
+
+
+def _layers(project, role_id):
+    """从下到上列出各层 [(来源标签, 目录, 该层 json 或 None)]：随工具发布 → 本机全局 → 项目默认 → 项目。"""
+    store.check_name(role_id)  # 角色ID直接拼路径，先挡住穿越
+    shipped = _read_json(os.path.join(SHIPPED_ROLE_DIR, f"{role_id}.json"))
+    local = _read_json(os.path.join(LOCAL_ROLE_DIR, f"{role_id}.json"))
+    project_dir = _project_role_dirs(project)[0] if project else None
+    project_role = _read_json(os.path.join(project_dir, f"{role_id}.json")) if project_dir else None
+    defaults = (project or {}).get("defaults") or None
+    return [("随工具发布", SHIPPED_ROLE_DIR, shipped), ("本机全局", LOCAL_ROLE_DIR, local),
+            ("项目默认", None, dict(defaults) if defaults else None), ("项目", project_dir, project_role)]
+
+
+def _require_role(project, role_id):
+    if not any(data for _, _, data in _layers(project, role_id)):
+        where = f"项目 {project['id']} 和全局" if project else "全局"
+        raise DispatchError(f"{where}都没有角色 {role_id!r}")
+
+
+def _check_field_values(project, fields):
+    unknown = [k for k in fields if k not in EDITABLE_ROLE_FIELDS]
+    if unknown:
+        raise DispatchError(f"不允许修改字段：{'、'.join(unknown)}。可修改：{'、'.join(sorted(EDITABLE_ROLE_FIELDS))}")
+    if "repos" in fields:
+        repos = fields["repos"]
+        if not isinstance(repos, list) or not repos:
+            raise DispatchError("repos 必须是非空的工程 ID 列表")
+        if not project:
+            raise DispatchError("全局角色不能绑定工程（repos）")
+        missing = [r for r in repos if r not in project["repos"]]
+        if missing:
+            raise DispatchError(f"工程 {'、'.join(missing)} 不在项目 {project['id']} 的工程清单里")
+    if fields.get("backend") and fields["backend"] not in backends.load_all():
+        raise DispatchError(f"后端 {fields['backend']!r} 不在 backends.json 里，可用：{'、'.join(sorted(backends.load_all()))}")
+    if "mode" in fields and fields["mode"] not in ("headless", "tmux"):
+        raise DispatchError(f"mode 只能是 headless 或 tmux，不是 {fields['mode']!r}")
+    if fields.get("model_pool"):
+        from . import models
+        models.check_pool(fields["model_pool"])
+
+
+def _layer_dir(project):
+    return _project_role_dirs(project)[0] if project else LOCAL_ROLE_DIR
+
+
+def _layer_json_path(project, role_id):
+    store.check_name(role_id)
+    return os.path.join(_layer_dir(project), f"{role_id}.json")
+
+
+def _layer_brief_path(project, role_id):
+    store.check_name(role_id)
+    return os.path.join(_layer_dir(project), f"{role_id}.brief.md")
+
+
+def role_detail(project, role_id):
+    """角色的完整视图：合并后的值、每个字段的来源层、派工单模板及其来源和路径。"""
+    layers = _layers(project, role_id)
+    _require_role(project, role_id)
+    merged, sources = {}, {}
+    for label, _, data in layers:
+        for key, value in (data or {}).items():
+            if key == "brief_template":
+                continue
+            if key == "repo":  # 单数写法与 repos 等价
+                key, value = "repos", [value]
+            merged[key] = value
+            sources[key] = label
+    pool_source = "项目" if sources.get("model_pool") == "项目" else ("全局" if sources.get("model_pool") else None)
+    return {
+        "role": role_id,
+        "title": merged.get("title") or role_id,
+        "scope": "全局" if not any(d for l, _, d in layers if l == "项目") else
+                 ("项目覆盖全局" if any(d for l, _, d in layers if l in ("随工具发布", "本机全局")) else "项目专属"),
+        "repos": merged.get("repos") or [],
+        "pool_source": pool_source,
+        "fields": {key: {"value": merged[key], "source": sources[key]} for key in sorted(merged)},
+        "brief": get_brief(project, role_id),
+    }
+
+
+def set_role_fields(project, role_id, fields):
+    """把字段写到这一层（有项目写项目角色，否则写本机全局）；永远不改随工具发布的 roles/。"""
+    _check_field_values(project, fields)
+    path = _layer_json_path(project, role_id)
+    data = _read_json(path) or {}
+    data.update(fields)
+    _write_json(path, data)
+    return path
+
+
+def reset_role_fields(project, role_id, keys):
+    """从这一层删掉字段，恢复继承上一层的值。"""
+    path = _layer_json_path(project, role_id)
+    data = _read_json(path)
+    if data is None:
+        layer = f"项目 {project['id']}" if project else "本机全局"
+        raise DispatchError(f"{layer}这一层没有角色 {role_id} 的定义文件，无从恢复继承")
+    for key in keys:
+        data.pop(key, None)
+    _write_json(path, data)
+    return path
+
+
+def get_brief(project, role_id):
+    """从最上层往下找第一个存在的派工单模板，带来源层和路径。"""
+    _require_role(project, role_id)
+    for label, directory, data in reversed(_layers(project, role_id)):
+        if not directory:
+            continue
+        name = (data or {}).get("brief_template") or f"{role_id}.brief.md"
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            return {"text": store.read_text(path, ""), "source": label, "path": path}
+    return {"text": None, "source": None, "path": None}
+
+
+def set_brief(project, role_id, text):
+    _require_role(project, role_id)
+    path = _layer_brief_path(project, role_id)
+    store.write_text(path, text)
+    return path
+
+
+def reset_brief(project, role_id):
+    """删掉这一层的模板，回落到上一层的模板。"""
+    path = _layer_brief_path(project, role_id)
+    if not os.path.isfile(path):
+        layer = f"项目 {project['id']}" if project else "本机全局"
+        raise DispatchError(f"{layer}这一层没有 {role_id}.brief.md，不需要恢复继承")
+    os.remove(path)
+    return path
+
+
+def delete_role_layer(project, role_id):
+    """删除这一层的角色定义和模板（项目层或本机全局层）；随工具发布的角色不能删。"""
+    path = _layer_json_path(project, role_id)
+    if not os.path.isfile(path):
+        layer = f"项目 {project['id']}" if project else "本机全局"
+        raise DispatchError(f"{layer}这一层没有角色 {role_id} 的定义；随工具发布的角色不能删除，只能在本机全局或项目层覆盖")
+    os.remove(path)
+    brief = _layer_brief_path(project, role_id)
+    if os.path.isfile(brief):
+        os.remove(brief)
     return path

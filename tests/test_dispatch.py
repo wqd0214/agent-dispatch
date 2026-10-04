@@ -1,4 +1,5 @@
 """端到端测试：用假智能体走完整的命令行流程，不依赖真实的 pi / opencode。"""
+import contextlib
 import json
 import os
 import shutil
@@ -718,6 +719,272 @@ class DispatchTest(unittest.TestCase):
             job = next(j for j in overview["jobs"] if j["name"] == "ov1")
             self.assertTrue(job["updated"])
             self.assertTrue(job["ended"])
+        finally:
+            self.ok("web", "stop")
+
+
+class ConfigApiTest(DispatchTest):
+    """配置中心的纯函数与网页接口：字段来源、恢复继承、项目与主管规则的读写。"""
+
+    SHIPPED = os.path.join(ROOT, "roles")
+
+    def setUp(self):
+        super().setUp()
+        # 随工具发布的 roles/ 在测试前后必须原样
+        self.shipped_snapshot = self._snapshot()
+
+    def _snapshot(self):
+        with contextlib.ExitStack() as stack:
+            files = {name: stack.enter_context(open(os.path.join(self.SHIPPED, name), "rb"))
+                     for name in sorted(os.listdir(self.SHIPPED))}
+            return {name: f.read() for name, f in files.items()}
+
+    def tearDown(self):
+        self.assertEqual(self._snapshot(), self.shipped_snapshot, "随工具发布的 roles/ 目录被改动了")
+        super().tearDown()
+
+    def py(self, statements):
+        """在子进程里用测试状态目录执行 definitions 的代码，返回 result 变量的 JSON。"""
+        import textwrap
+        script = ("import json, os, sys\nsys.path.insert(0, %r)\n"
+                  "from agent_dispatch import definitions\n"
+                  "%s\nprint('@@' + json.dumps(result, ensure_ascii=False, default=str))") % (
+            ROOT, textwrap.dedent(statements))
+        env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT)
+        proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        line = [l for l in proc.stdout.splitlines() if l.startswith("@@")][-1]
+        return json.loads(line[2:])
+
+    def raises(self, statements):
+        """断言子进程代码抛 DispatchError，返回错误信息。"""
+        import textwrap
+        script = ("import json, sys\nsys.path.insert(0, %r)\n"
+                  "from agent_dispatch import definitions\nfrom agent_dispatch.store import DispatchError\n"
+                  "try:\n%s\n"
+                  "except DispatchError as e:\n    print('@@' + str(e))\nelse:\n    raise SystemExit('没有抛 DispatchError')") % (ROOT, textwrap.indent(textwrap.dedent(statements), "    "))
+        env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT)
+        proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        return [l for l in proc.stdout.splitlines() if l.startswith("@@")][-1][2:]
+
+    def test_role_detail_field_sources(self):
+        self.make_project()
+        out = self.py("""
+            project = definitions.load_project("p1")
+            global_qa = definitions.role_detail(None, "qa")
+            qa = definitions.role_detail(project, "qa")
+            shipped = definitions.role_detail(None, "tester")
+            dev = definitions.role_detail(project, "dev")
+            definitions.set_role_fields(project, "qa", {"timeout_min": 30, "title": "资深测试工程师"})
+            overridden = definitions.role_detail(project, "qa")
+            definitions.reset_role_fields(project, "qa", ["timeout_min", "title"])
+            reset = definitions.role_detail(project, "qa")
+            result = {"global_qa": global_qa, "qa": qa, "shipped": shipped, "dev": dev,
+                      "overridden": overridden, "reset": reset}
+        """)
+        # 全局角色 qa 的字段来自本机全局；项目层只覆盖了 repos
+        self.assertEqual(out["global_qa"]["fields"]["backend"]["source"], "本机全局")
+        self.assertEqual(out["qa"]["fields"]["backend"]["source"], "本机全局")
+        self.assertEqual(out["qa"]["fields"]["repos"]["source"], "项目")
+        # 随工具发布的角色：字段来源标成随工具发布
+        self.assertEqual(out["shipped"]["fields"]["backend"]["source"], "随工具发布")
+        self.assertEqual(out["shipped"]["title"], "测试工程师")
+        # 项目专属角色：全部来自项目层
+        self.assertEqual(out["dev"]["fields"]["title"]["source"], "项目")
+        self.assertEqual(out["dev"]["repos"], ["app"])
+        # 项目覆盖后来源变成项目；恢复继承后回落
+        self.assertEqual(out["overridden"]["fields"]["timeout_min"], {"value": 30, "source": "项目"})
+        self.assertEqual(out["overridden"]["fields"]["title"]["value"], "资深测试工程师")
+        self.assertNotIn("timeout_min", out["reset"]["fields"])  # 本机全局层本来就没写这项，reset 后整个字段消失
+        self.assertEqual(out["reset"]["fields"]["title"]["value"], "测试工程师")
+
+    def test_project_defaults_layer(self):
+        self.make_project()
+        out = self.py("""
+            definitions.update_project("p1", defaults={"timeout_min": 45})
+            project = definitions.load_project("p1")
+            result = definitions.role_detail(project, "qa")["fields"]["timeout_min"]
+        """)
+        self.assertEqual(out, {"value": 45, "source": "项目默认"})
+
+    def test_set_role_fields_validation(self):
+        self.make_project()
+        self.assertIn("不允许", self.raises("""
+            definitions.set_role_fields(definitions.load_project("p1"), "qa", {"brief_template": "x.md"})
+        """))
+        self.assertIn("不在项目", self.raises("""
+            definitions.set_role_fields(definitions.load_project("p1"), "qa", {"repos": ["nope"]})
+        """))
+        self.assertIn("backends.json", self.raises("""
+            definitions.set_role_fields(definitions.load_project("p1"), "qa", {"backend": "no-such-tool"})
+        """))
+        self.assertIn("mode", self.raises("""
+            definitions.set_role_fields(definitions.load_project("p1"), "qa", {"mode": "inline"})
+        """))
+        # 合法写入真的落盘
+        out = self.py("""
+            import json as _json
+            definitions.set_role_fields(definitions.load_project("p1"), "dev", {"mode": "tmux", "timeout_min": 15})
+            with open(os.path.join(definitions.project_dir("p1"), "roles", "dev.json")) as f:
+                result = _json.load(f)
+        """)
+        self.assertEqual((out["mode"], out["timeout_min"]), ("tmux", 15))
+
+    def test_brief_write_read_reset(self):
+        self.make_project()
+        out = self.py("""
+            project = definitions.load_project("p1")
+            base = definitions.get_brief(project, "qa")
+            definitions.set_brief(project, "qa", "项目层的模板")
+            after_set = definitions.get_brief(project, "qa")
+            definitions.reset_brief(project, "qa")
+            after_reset = definitions.get_brief(project, "qa")
+            global_before = definitions.get_brief(None, "tester")
+            definitions.set_brief(None, "tester", "本机全局的模板")
+            global_after = definitions.get_brief(None, "tester")
+            definitions.reset_brief(None, "tester")
+            global_reset = definitions.get_brief(None, "tester")
+            result = {"base": base, "after_set": after_set, "after_reset": after_reset,
+                      "global_before": global_before, "global_after": global_after, "global_reset": global_reset}
+        """)
+        self.assertEqual(out["base"]["source"], "本机全局")
+        self.assertIn("你是{{role}}", out["base"]["text"])
+        self.assertEqual((out["after_set"]["text"], out["after_set"]["source"]), ("项目层的模板", "项目"))
+        self.assertEqual(out["after_reset"]["source"], "本机全局")
+        self.assertEqual(out["global_before"]["source"], "随工具发布")
+        self.assertEqual((out["global_after"]["text"], out["global_after"]["source"]), ("本机全局的模板", "本机全局"))
+        self.assertEqual(out["global_reset"]["source"], "随工具发布")
+        self.assertIn("tester", out["global_reset"]["path"])
+
+    def test_delete_role_layer(self):
+        self.make_project()
+        err = self.raises("definitions.delete_role_layer(None, 'tester')")
+        self.assertIn("随工具发布", err)
+        self.py("""
+            project = definitions.load_project("p1")
+            definitions.set_role_fields(project, "qa", {"timeout_min": 30})
+            definitions.delete_role_layer(project, "qa")
+            import os
+            result = os.path.exists(os.path.join(definitions.project_dir("p1"), "roles", "qa.json"))
+        """)
+        err = self.raises("definitions.delete_role_layer(definitions.load_project('p1'), 'qa')")
+        self.assertIn("没有", err)
+
+    def test_remove_repo_referenced_by_role(self):
+        self.make_project()
+        # web 被 qa 引用：拒绝并说明角色；app 被 dev 和 qa 同时引用
+        err = self.raises("definitions.remove_repo('p1', 'web')")
+        self.assertIn("qa", err)
+        err = self.raises("definitions.remove_repo('p1', 'app')")
+        self.assertIn("dev", err)
+        self.assertIn("qa", err)
+        err = self.raises("definitions.remove_repo('p1', 'nope')")
+        self.assertIn("没有", err)
+
+    def test_remove_repo_after_unreference(self):
+        self.make_project()
+        out = self.py("""
+            project = definitions.load_project("p1")
+            definitions.set_role_fields(project, "qa", {"repos": ["app"]})
+            definitions.update_project("p1", name="产品线B")
+            definitions.remove_repo("p1", "web")
+            project = definitions.load_project("p1")
+            result = {"repos": list(project["repos"]), "name": project["name"]}
+        """)
+        self.assertEqual(out["repos"], ["app"])
+        self.assertEqual(out["name"], "产品线B")
+
+    def test_supervisor_notes(self):
+        self.make_project()
+        out = self.py("""
+            definitions.set_supervisor_notes("p1", "先问再清库")
+            result = definitions.get_supervisor_notes("p1")
+        """)
+        self.assertEqual(out, "先问再清库")
+
+    def test_web_config_api(self):
+        import socket, urllib.error, urllib.request
+        self.make_project()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None, header=True):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            if header:
+                request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, json.load(exc)
+                finally:
+                    exc.close()
+
+        try:
+            self.ok("web", "start", "--port", port)
+            # 写操作没有请求头被拒
+            self.assertEqual(call("POST", "/api/config/roles", {"id": "x"}, header=False)[0], 403)
+            self.assertEqual(call("DELETE", "/api/config/roles/x", header=False)[0], 403)
+            # 配置总览：项目 + 全局角色
+            status, config = call("GET", "/api/config")
+            self.assertEqual(status, 200)
+            p1 = next(p for p in config["projects"] if p["id"] == "p1")
+            self.assertEqual(p1["name"], "产品线A")
+            self.assertTrue(any(r["id"] == "app" for r in p1["repos"]))
+            self.assertTrue({"dev", "qa"} <= {r["id"] for r in p1["roles"]})
+            self.assertIn("tester", {r["id"] for r in config["roles"]})
+            # 角色详情：字段来源
+            status, detail = call("GET", "/api/config/roles/qa?project=p1")
+            self.assertEqual(status, 200)
+            self.assertEqual(detail["fields"]["repos"]["source"], "项目")
+            self.assertEqual(detail["fields"]["backend"]["source"], "本机全局")
+            status, detail = call("GET", "/api/config/roles/tester")
+            self.assertEqual(detail["fields"]["backend"]["source"], "随工具发布")
+            # 新建角色、写字段、恢复继承
+            self.assertEqual(call("POST", "/api/config/roles", {"project": "p1", "id": "ops",
+                                                "title": "运维工程师", "description": "管机器"})[0], 200)
+            self.assertEqual(call("POST", "/api/config/roles/ops", {"project": "p1",
+                                                "fields": {"timeout_min": 20, "repos": ["app"]}})[0], 200)
+            self.assertEqual(call("POST", "/api/config/roles/ops", {"project": "p1",
+                                                "fields": {"repos": ["nope"]}})[0], 400)
+            status, detail = call("GET", "/api/config/roles/ops?project=p1")
+            self.assertEqual(detail["fields"]["timeout_min"], {"value": 20, "source": "项目"})
+            self.assertEqual(call("POST", "/api/config/roles/ops", {"project": "p1", "reset": ["timeout_min"]})[0], 200)
+            self.assertNotIn("timeout_min", call("GET", "/api/config/roles/ops?project=p1")[1]["fields"])
+            # 模板写入与恢复
+            self.assertEqual(call("POST", "/api/config/roles/ops/brief", {"project": "p1", "text": "运维模板"})[0], 200)
+            self.assertEqual(call("GET", "/api/config/roles/ops?project=p1")[1]["brief"]["text"], "运维模板")
+            self.assertEqual(call("POST", "/api/config/roles/ops/brief", {"project": "p1", "reset": True})[0], 200)
+            # 删除这一层角色
+            self.assertEqual(call("DELETE", "/api/config/roles/ops?project=p1")[0], 200)
+            self.assertEqual(call("GET", "/api/config/roles/ops?project=p1")[0], 404)
+            # 删除随工具发布的角色被拒
+            status, error = call("DELETE", "/api/config/roles/tester")
+            self.assertEqual(status, 400)
+            self.assertIn("随工具发布", error["error"])
+            # 项目：新建、改名、增删工程、主管规则
+            self.assertEqual(call("POST", "/api/config/projects", {"id": "p2", "name": "产品线C",
+                                                "repos": {"srv": self.work}})[0], 200)
+            self.assertEqual(call("POST", "/api/config/projects/p2", {"name": "产品线C2", "default_role": "qa"})[0], 200)
+            self.assertEqual(call("POST", "/api/config/projects/p2/repos", {"id": "web2", "cwd": self.web_dir,
+                                                "channels": "c3"})[0], 200)
+            config = call("GET", "/api/config")[1]
+            p2 = next(p for p in config["projects"] if p["id"] == "p2")
+            self.assertEqual((p2["name"], p2["default_role"]), ("产品线C2", "qa"))
+            self.assertEqual({r["id"] for r in p2["repos"]}, {"srv", "web2"})
+            self.assertEqual(call("DELETE", "/api/config/projects/p2/repos/web2")[0], 200)
+            self.assertEqual(call("POST", "/api/config/projects/p2/supervisor", {"text": "上线前要复查"})[0], 200)
+            self.assertEqual(next(p for p in call("GET", "/api/config")[1]["projects"]
+                                  if p["id"] == "p2")["supervisor"], "上线前要复查")
+            # p1 的主管规则也能读到
+            self.assertEqual(call("POST", "/api/config/projects/p1/supervisor", {"text": "p1 规则"})[0], 200)
+            self.assertEqual(next(p for p in call("GET", "/api/config")[1]["projects"]
+                                  if p["id"] == "p1")["supervisor"], "p1 规则")
         finally:
             self.ok("web", "stop")
 

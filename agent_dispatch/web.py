@@ -157,6 +157,28 @@ def model_page():
             "backends": [t["name"] for t in tools], "tools": tools}
 
 
+def config_overview():
+    """配置中心总览：全部项目（含工程、默认角色、defaults、主管规则）和全局角色列表。"""
+    projects = []
+    for project in definitions.list_projects():
+        projects.append({
+            "id": project["id"], "name": project["name"], "default_role": project.get("default_role"),
+            "defaults": project.get("defaults") or {}, "supervisor": definitions.get_supervisor_notes(project["id"]),
+            "repos": [{"id": repo["id"], "name": repo["name"], "cwd": repo["cwd"], "channels": repo["channels"],
+                       "channel_ns": repo["channel_ns"]} for repo in project["repos"].values()],
+            "roles": [{"id": r["role"], "title": r["title"], "description": r.get("description") or "",
+                       "repos": r["repos"], "scope": r["scope"]} for r in definitions.list_roles(project)],
+        })
+    roles = [{"id": r["role"], "title": r["title"], "description": r.get("description") or ""}
+             for r in definitions.list_roles(None)]
+    return {"projects": projects, "roles": roles}
+
+
+def config_project(data):
+    """请求体里的 project 为空表示全局角色。"""
+    return definitions.load_project(data["project"]) if data.get("project") else None
+
+
 def dispatch_options():
     """派工表单的选项：项目、工程和可派的角色。"""
     out = []
@@ -314,6 +336,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_page(os.path.join(ui, "index.html"))  # 前端路由：找不到的路径回退到入口页
             if parts == ["api", "overview"]:
                 return self.send_json(overview())
+            if parts == ["api", "config"]:
+                return self.send_json(config_overview())
+            if len(parts) == 4 and parts[:3] == ["api", "config", "roles"]:
+                project = definitions.load_project(query["project"][0]) if query.get("project") else None
+                return self.send_json(definitions.role_detail(project, parts[3]))
             if parts == ["api", "dispatch-options"]:
                 return self.send_json(dispatch_options())
             if parts == ["api", "models"]:
@@ -407,6 +434,44 @@ class Handler(BaseHTTPRequestHandler):
                 pool = data.get("pool") or []
                 definitions.set_pool(project, data.get("role", ""), pool or None)
                 return self.send_json({"ok": True})
+            if parts == ["api", "config", "roles"]:
+                project = config_project(data)
+                path, inherits = definitions.add_role(data.get("id", ""), project, data.get("title"),
+                                                      data.get("description"), data.get("repos"),
+                                                      data.get("backend"), data.get("mode"))
+                return self.send_json({"ok": True, "path": path, "inherits": inherits})
+            if len(parts) == 4 and parts[:3] == ["api", "config", "roles"]:
+                role_id, project = parts[3], config_project(data)
+                if "fields" in data:
+                    definitions.set_role_fields(project, role_id, data["fields"])
+                elif "reset" in data:
+                    definitions.reset_role_fields(project, role_id, data["reset"])
+                else:
+                    raise store.DispatchError("请求体里要有 fields（写字段）或 reset（恢复继承）")
+                return self.send_json({"ok": True})
+            if len(parts) == 5 and parts[:3] == ["api", "config", "roles"] and parts[4] == "brief":
+                project = config_project(data)
+                if data.get("reset"):
+                    definitions.reset_brief(project, parts[3])
+                else:
+                    definitions.set_brief(project, parts[3], data.get("text") or "")
+                return self.send_json({"ok": True})
+            if parts == ["api", "config", "projects"]:
+                path = definitions.add_project(data.get("id", ""), data.get("name"), data.get("repos"))
+                return self.send_json({"ok": True, "path": path})
+            if len(parts) == 4 and parts[:3] == ["api", "config", "projects"]:
+                definitions.update_project(parts[3], data.get("name"), data.get("default_role"), data.get("defaults"))
+                return self.send_json({"ok": True})
+            if len(parts) == 5 and parts[:3] == ["api", "config", "projects"] and parts[4] == "repos":
+                channels = data.get("channels")
+                if isinstance(channels, str):  # 网页表单里通道常写成逗号分隔的一个字符串
+                    channels = [c.strip() for c in channels.split(",") if c.strip()]
+                definitions.add_repo(parts[3], data.get("id", ""), data.get("cwd", ""), channels,
+                                     data.get("channel_namespace"))
+                return self.send_json({"ok": True})
+            if len(parts) == 5 and parts[:3] == ["api", "config", "projects"] and parts[4] == "supervisor":
+                path = definitions.set_supervisor_notes(parts[3], data.get("text") or "")
+                return self.send_json({"ok": True, "path": path})
             if parts == ["api", "jobs"]:
                 return self.post_job(data)
             if parts == ["api", "jobs", "preview"]:
@@ -442,9 +507,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self.writable():
             return
         parts = [urllib.parse.unquote(p) for p in urllib.parse.urlparse(self.path).path.split("/") if p]
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         try:
             if len(parts) == 3 and parts[:2] == ["api", "models"]:
                 models.remove(parts[2])
+                return self.send_json({"ok": True})
+            if len(parts) == 4 and parts[:3] == ["api", "config", "roles"]:
+                project = definitions.load_project(query["project"][0]) if query.get("project") else None
+                path = definitions.delete_role_layer(project, parts[3])
+                return self.send_json({"ok": True, "path": path})
+            if len(parts) == 6 and parts[:3] == ["api", "config", "projects"] and parts[4] == "repos":
+                definitions.remove_repo(parts[3], parts[5])
                 return self.send_json({"ok": True})
             self.send_json({"error": "not found"}, 404)
         except store.DispatchError as exc:
