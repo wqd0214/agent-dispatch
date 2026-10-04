@@ -1065,8 +1065,18 @@ def build_parser():
     return ap
 
 
+# 可以接收多个位置参数的字段：Python 3.11 及以前的 argparse 不接受「选项之后再跟这些位置参数」，要自己收回来
+TRAILING_LISTS = ("task", "question", "pool", "args", "jobs")
+
+
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        target = next((name for name in TRAILING_LISTS if isinstance(getattr(args, name, None), list)), None)
+        if target is None or any(token.startswith("-") and token != "-" for token in extra):
+            parser.error(f"无法识别的参数：{' '.join(extra)}")
+        setattr(args, target, getattr(args, target) + extra)
     try:
         return args.func(args) or 0
     except DispatchError as exc:
