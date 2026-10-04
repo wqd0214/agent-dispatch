@@ -869,6 +869,10 @@ def web_running():
 
 def cmd_web(a):
     from . import web
+    worker = os.environ.get("AGENT_DISPATCH_WORKER")
+    if worker and a.action in ("start", "stop") and not os.environ.get("AGENT_DISPATCH_HOME"):
+        # 执行者自测时忘了指定临时状态目录，就会停掉或占用用户自己的网页服务
+        raise DispatchError(f"你是作业 {worker} 的执行者，不能启停用户的网页服务。自测请设置 AGENT_DISPATCH_HOME 指向临时目录并换端口")
     running = web_running()
     if a.action == "status":
         print(f"后台网页在运行：{running['url']}  (pid {running['pid']})" if running else "后台网页没有在运行")

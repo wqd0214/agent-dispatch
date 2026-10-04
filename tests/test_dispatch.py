@@ -489,6 +489,14 @@ class DispatchTest(unittest.TestCase):
         finally:
             self.ok("web", "stop")
 
+    def test_worker_cannot_stop_users_web_service(self):
+        env = dict(os.environ, AGENT_DISPATCH_WORKER="j-x", PYTHONPATH=ROOT)
+        env.pop("AGENT_DISPATCH_HOME", None)
+        result = subprocess.run([sys.executable, "-m", "agent_dispatch", "web", "stop"], env=env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("不能启停用户的网页服务", result.stderr)
+
     def test_dry_run_prints_brief(self):
         out = self.ok("start", "j15", "-p", "t", "--dry-run", "跑场景A").stdout
         self.assertIn("派工单 j15 通道 a、b", out)
