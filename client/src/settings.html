@@ -19,6 +19,9 @@
   <h3 style="margin-top:0">设置</h3>
   <label for="url">服务地址</label>
   <input type="text" id="url" placeholder="http://127.0.0.1:8765">
+  <label for="adpath">agent-dispatch 路径（留空则自动查找）</label>
+  <input type="text" id="adpath" placeholder="/Users/you/.local/bin/agent-dispatch">
+  <p><small>当前自动找到的路径：<code id="found-path">（尚未查找）</code></small></p>
   <label class="row" style="font-weight:400"><input type="checkbox" id="notify"> 作业变化时发系统通知</label>
   <p><small>保存后主窗口会重新连接。通知在后台每 5 秒对比一次总览数据，仅提示运行中 → 待审查 / 运行失败 / 意外中断 / 已叫停，以及出现「待你决定」标记。</small></p>
   <button id="save">保存</button><button id="cancel">取消</button>
@@ -26,10 +29,14 @@
   const invoke = window.__TAURI__.core.invoke;
   invoke("get_settings").then(s => {
     document.getElementById("url").value = s.server_url;
+    document.getElementById("adpath").value = s.agent_dispatch_path || "";
     document.getElementById("notify").checked = s.notify;
   });
+  invoke("find_dispatch_path").then(p => {
+    document.getElementById("found-path").textContent = p || "（没找到，请手动指定）";
+  }).catch(() => {});
   document.getElementById("save").addEventListener("click", async () => {
-    await invoke("save_settings", { url: document.getElementById("url").value.trim(), notify: document.getElementById("notify").checked });
+    await invoke("save_settings", { url: document.getElementById("url").value.trim(), agentDispatchPath: document.getElementById("adpath").value.trim(), notify: document.getElementById("notify").checked });
     window.close();
   });
   document.getElementById("cancel").addEventListener("click", () => window.close());
