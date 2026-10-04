@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>派工总览 · 原型</title>
+<style>
+:root{
+  --bg:#f4f5f7; --panel:#ffffff; --panel2:#f8f9fb; --line:#e3e6eb; --line2:#eef0f3;
+  --text:#1c2330; --muted:#6a7485; --faint:#98a1b0;
+  --accent:#2f6fde; --accent-bg:#e9f0fd; --accent-text:#1d55b8;
+  --ok:#1a8a55; --ok-bg:#e3f4eb; --warn:#b26a00; --warn-bg:#fdf1dc; --bad:#c7362f; --bad-bg:#fbe8e6;
+  --run:#6b4fd0; --run-bg:#eeeafb; --mute-bg:#eceef2;
+  --shadow:0 8px 30px rgba(20,30,50,.16); --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+:root[data-theme="dark"]{
+  --bg:#14171c; --panel:#1c2027; --panel2:#20252d; --line:#2c323c; --line2:#262b34;
+  --text:#e4e8ef; --muted:#9aa4b4; --faint:#6c7686;
+  --accent:#5b93f5; --accent-bg:#1f2c45; --accent-text:#9cc0ff;
+  --ok:#4cc38a; --ok-bg:#173326; --warn:#e2a23b; --warn-bg:#3a2c12; --bad:#f0736b; --bad-bg:#3d1f1d;
+  --run:#a18cf5; --run-bg:#2a2445; --mute-bg:#2a2f38; --shadow:0 8px 30px rgba(0,0,0,.5);
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+#app{display:grid;grid-template-columns:216px 1fr;height:100vh}
+/* 侧栏 */
+.side{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.proj{margin:12px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);position:relative;cursor:pointer}
+.proj b{display:block;font-size:13.5px}
+.proj small{color:var(--muted)}
+.proj .caret{position:absolute;right:10px;top:12px;color:var(--faint)}
+.projmenu{position:absolute;left:12px;top:64px;width:260px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);z-index:30;padding:4px}
+.projmenu div{padding:8px 10px;border-radius:6px;display:flex;justify-content:space-between;cursor:pointer}
+.projmenu div:hover{background:var(--panel2)}
+.nav{flex:1;overflow:auto;padding:0 8px 12px}
+.nav h6{margin:14px 8px 4px;font-size:11px;color:var(--faint);font-weight:600;letter-spacing:.04em}
+.nav a{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;color:var(--text);text-decoration:none;cursor:pointer}
+.nav a:hover{background:var(--panel2)}
+.nav a.on{background:var(--accent-bg);color:var(--accent-text);font-weight:600}
+.nav a kbd{margin-left:auto}
+.nav .hint{margin:4px 10px;color:var(--faint);font-size:12px}
+.badge{margin-left:auto;background:var(--bad);color:#fff;border-radius:9px;padding:0 6px;font-size:11px;line-height:17px;font-weight:600}
+.badge.soft{background:var(--mute-bg);color:var(--muted)}
+kbd{font:11px var(--mono);color:var(--faint);border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--panel2)}
+.sidefoot{border-top:1px solid var(--line);padding:9px 14px;color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block}
+/* 主区 */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.top{height:50px;flex:none;display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.top h1{font-size:15px;margin:0;font-weight:600}
+.top .sub{color:var(--muted)}
+.top .sp{flex:1}
+.search{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:7px;padding:4px 9px;color:var(--faint);background:var(--panel2);cursor:pointer;width:190px}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:7px;padding:5px 11px}
+.btn:hover{border-color:var(--faint)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn.pri:hover{filter:brightness(1.07)}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--muted)}
+.btn.sm{padding:2px 8px;font-size:12px}
+.link{color:var(--accent);cursor:pointer;background:none;border:0;padding:0}
+.link:hover{text-decoration:underline}
+#view{flex:1;min-height:0;display:flex;flex-direction:column}
+.split{flex:1;min-height:0;display:grid;grid-template-columns:372px 1fr}
+.list{border-right:1px solid var(--line);overflow:auto;background:var(--panel)}
+.pane{overflow:auto;padding:16px 20px 30px}
+.page{flex:1;overflow:auto;padding:18px 22px 30px}
+.grp{padding:9px 14px 5px;font-size:12px;color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--line2);z-index:2;display:flex;gap:6px}
+.item{padding:9px 14px;border-bottom:1px solid var(--line2);cursor:pointer;border-left:3px solid transparent}
+.item:hover{background:var(--panel2)}
+.item.on{background:var(--accent-bg);border-left-color:var(--accent)}
+.item .r1{display:flex;align-items:center;gap:8px}
+.item .r1 b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .r1 .tag{margin-left:auto;flex:none}
+.item .r2{color:var(--muted);font-size:12px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .r3{margin-top:3px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tag{display:inline-block;border-radius:4px;padding:0 6px;font-size:11.5px;line-height:19px;font-weight:600;background:var(--mute-bg);color:var(--muted);white-space:nowrap}
+.tag.ok{background:var(--ok-bg);color:var(--ok)} .tag.warn{background:var(--warn-bg);color:var(--warn)}
+.tag.bad{background:var(--bad-bg);color:var(--bad)} .tag.run{background:var(--run-bg);color:var(--run)}
+.tag.acc{background:var(--accent-bg);color:var(--accent-text)}
+.empty{padding:40px 20px;text-align:center;color:var(--faint)}
+.filters{display:flex;gap:6px;flex-wrap:wrap;padding:9px 12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel);z-index:3}
+.chip{border:1px solid var(--line);background:var(--panel);border-radius:13px;padding:1px 10px;font-size:12px;color:var(--muted)}
+.chip.on{background:var(--accent-bg);border-color:var(--accent);color:var(--accent-text);font-weight:600}
+select,input[type=text],input[type=number],textarea{border:1px solid var(--line);border-radius:6px;background:var(--panel);padding:5px 8px;outline:0}
+select:focus,input:focus,textarea:focus{border-color:var(--accent)}
+textarea{width:100%;resize:vertical;line-height:1.55}
+/* 详情 */
+.dh{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dh h2{margin:0;font-size:17px}
+.meta{color:var(--muted);margin:3px 0 14px;font-size:12.5px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:13px 15px;margin-bottom:13px}
+.card h3{margin:0 0 8px;font-size:13px;display:flex;align-items:center;gap:8px}
+.card.decide{border-color:var(--warn);background:linear-gradient(var(--warn-bg),var(--warn-bg)) top/100% 3px no-repeat,var(--panel)}
+.card.fail{border-color:var(--bad)}
+.q{background:var(--panel2);border-left:3px solid var(--warn);padding:8px 11px;border-radius:0 6px 6px 0;margin:0 0 10px}
+.kv{display:grid;grid-template-columns:64px 1fr;gap:4px 10px}
+.kv dt{color:var(--muted)} .kv dd{margin:0}
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:4px 0 12px}
+.tabs a{padding:6px 12px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs a.on{color:var(--accent-text);border-color:var(--accent);font-weight:600}
+.log{font:12px/1.7 var(--mono);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;white-space:pre-wrap;word-break:break-all}
+.log .t{color:var(--faint)} .log .k{display:inline-block;min-width:34px;font-weight:600}
+.log .k.tool{color:var(--run)} .log .k.say{color:var(--accent)} .log .k.err{color:var(--bad)}
+pre.doc{font:12px/1.65 var(--mono);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:11px 13px;white-space:pre-wrap;margin:0;overflow:auto}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line2);vertical-align:middle}
+th{font-size:12px;color:var(--muted);font-weight:600;background:var(--panel2)}
+.tbl{background:var(--panel);border:1px solid var(--line);border-radius:9px;overflow:hidden;margin-bottom:14px}
+.tbl tr:last-child td{border-bottom:0}
+.src{font-size:11.5px;border-radius:4px;padding:0 6px;line-height:18px;display:inline-block}
+.src.g{background:var(--mute-bg);color:var(--muted)} .src.p{background:var(--accent-bg);color:var(--accent-text)}
+.bar{height:7px;border-radius:4px;background:var(--mute-bg);overflow:hidden;display:flex;min-width:90px}
+.bar i{display:block;height:100%}
+.bar .ok{background:var(--ok)} .bar .bad{background:var(--bad)} .bar .warn{background:var(--warn)} .bar .run{background:var(--run)}
+h2.pt{margin:0 0 3px;font-size:17px}
+p.pd{margin:0 0 14px;color:var(--muted)}
+.two{display:grid;grid-template-columns:230px 1fr;gap:14px;align-items:start}
+.rolelist{background:var(--panel);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.rolelist .item{border-left-width:3px}
+/* 矩阵 */
+.mx td,.mx th{text-align:center} .mx td:first-child,.mx th:first-child{text-align:left}
+.cell{width:22px;height:22px;border-radius:50%;border:2px solid var(--line);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;color:var(--faint);background:transparent}
+.cell.on{background:var(--accent);border-color:var(--accent)}
+.cell.inh{border-color:var(--accent)}
+.cell.off{border-style:dashed}
+.cell.x{border-color:var(--bad);color:var(--bad)}
+.legend{display:flex;gap:16px;color:var(--muted);font-size:12px;margin:8px 2px 14px;flex-wrap:wrap;align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend .cell{width:14px;height:14px;cursor:default;font-size:9px}
+/* 批次 */
+.flow{display:flex;flex-direction:column;gap:0}
+.step{display:grid;grid-template-columns:26px 1fr;gap:10px}
+.step .rail{display:flex;flex-direction:column;align-items:center}
+.step .rail b{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;background:var(--faint);flex:none}
+.step .rail i{flex:1;width:2px;background:var(--line);min-height:10px}
+.step .rail b.ok{background:var(--ok)} .step .rail b.bad{background:var(--bad)} .step .rail b.run{background:var(--run)} .step .rail b.warn{background:var(--warn)}
+.step .card{cursor:pointer;margin-bottom:10px}
+.step .card:hover{border-color:var(--accent)}
+/* 弹层 */
+.mask{position:fixed;inset:0;background:rgba(15,20,30,.45);display:flex;align-items:center;justify-content:center;z-index:50}
+.dlg{background:var(--panel);border-radius:11px;box-shadow:var(--shadow);width:460px;max-width:94vw;max-height:92vh;display:flex;flex-direction:column;border:1px solid var(--line)}
+.dlg.wide{width:1040px}
+.dlg header{padding:13px 18px;border-bottom:1px solid var(--line);font-weight:600;font-size:14px;display:flex;align-items:center}
+.dlg .body{padding:15px 18px;overflow:auto}
+.dlg footer{padding:11px 18px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end;align-items:center}
+.dlg footer .info{margin-right:auto;color:var(--muted);font-size:12px}
+label.f{display:block;margin-bottom:11px}
+label.f>span{display:block;color:var(--muted);font-size:12px;margin-bottom:3px}
+label.f input[type=text],label.f select{width:100%}
+.conseq{background:var(--panel2);border-radius:6px;padding:8px 10px;color:var(--muted);font-size:12px;margin-bottom:12px}
+.dgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.rolecards{display:grid;gap:7px;margin-bottom:12px}
+.rc{border:1px solid var(--line);border-radius:8px;padding:8px 11px;cursor:pointer}
+.rc.on{border-color:var(--accent);background:var(--accent-bg)}
+.rc small{color:var(--muted);display:block}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#1c2330;color:#fff;padding:8px 16px;border-radius:8px;z-index:80;box-shadow:var(--shadow);font-size:13px}
+.note{margin-top:16px;border:1px dashed var(--line);border-radius:8px;padding:9px 12px;color:var(--muted);font-size:12px;background:var(--panel2)}
+.note b{color:var(--text)}
+.sw{width:32px;height:18px;border-radius:9px;background:var(--mute-bg);border:0;position:relative;vertical-align:middle;padding:0}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.sw.on{background:var(--accent)} .sw.on::after{left:16px}
+.pal{width:560px} .pal input{width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:13px 16px;font-size:15px;background:transparent}
+.pal .res{max-height:340px;overflow:auto}
+.protobar{position:fixed;right:14px;bottom:12px;z-index:40;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:3px 10px;font-size:11.5px;color:var(--muted);box-shadow:0 2px 8px rgba(0,0,0,.08)}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside class="side" id="side"></aside>
+  <div class="main">
+    <div class="top" id="top"></div>
+    <div id="view"></div>
+  </div>
+</div>
+<div id="layer"></div>
+<div class="protobar">原型 · 数据均为示例，操作只在本页生效 · <button class="link" data-act="notes">设计说明 开/关</button></div>
+
+<script>
+/* ================= 示例数据 ================= */
+const PROJECTS = [
+  {id:'c2', name:'WMS_ZC_C2', repos:[
+    {id:'backend', name:'WMS_V3_backend', cwd:'~/WmsProjects/C2/WMS_V3_backend', channels:'—'},
+    {id:'web', name:'WMS_V3_web', cwd:'~/WmsProjects/C2/WMS_V3_web', channels:'—'},
+    {id:'pda', name:'WMS_V3_pda', cwd:'~/WmsProjects/C2/WMS_V3_pda', channels:'—'},
+    {id:'monitor', name:'WMS_V3_monitor', cwd:'~/WmsProjects/C2/WMS_V3_monitor', channels:'—'},
+    {id:'test', name:'Zc_Wms_Test_V2', cwd:'~/WmsProjects/C2/Zc_Wms_Test_V2', channels:'pallet、box、pda、lx01–lx04'}],
+   roles:['backend-dev','frontend-dev','tester'], defRole:'tester',
+   rules:'## 本项目的专属规则\n\n- 清库、改 activeEnv、重启服务一律先问用户。\n- 测试工程师的 FAIL 若为断言失败，归类「疑似产品缺陷」后上报，不重跑。\n- 后端修复必须附带回归测试，闸门未过不得验收。'},
+  {id:'a04', name:'WMS_ZC_A04', repos:[
+    {id:'backend', name:'Zc_A04_Wms_Backend', cwd:'~/WmsProjects/A04/Zc_A04_Wms_Backend', channels:'—'},
+    {id:'test', name:'Zc_A04_Wms_Test', cwd:'~/WmsProjects/A04/Zc_A04_Wms_Test', channels:'pallet、box'},
+    {id:'deploy', name:'Zc_A04_Deploy', cwd:'~/WmsProjects/A04/Zc_A04_Deploy', channels:'—'}],
+   roles:['backend-dev','frontend-dev','tester','reviewer','deployer'], defRole:'backend-dev',
+   rules:'## 本项目的专属规则\n\n- 发版只执行 Liquibase，不手工写库。\n- 代码复核者只读，不改代码、不提交。'},
+  {id:'ad', name:'agent-dispatch', repos:[
+    {id:'core', name:'client', cwd:'~/GitHubProjects/agent-dispatch/.worktrees/client', channels:'—'},
+    {id:'app', name:'client-app', cwd:'~/GitHubProjects/agent-dispatch/.worktrees/client-app', channels:'—'}],
+   roles:['dev'], defRole:'dev', rules:'## 本项目的专属规则\n\n- 自测网页服务用临时状态目录和别的端口，不碰 8765。'}
+];
+const ROLES = {
+  'backend-dev':{title:'后端开发工程师', desc:'后端施工、修复、只读取证与起草施工计划；TDD', repos:'backend', pool:[['pi:glm-5.2-en2',1],['pi:glm-5.3',1]], mode:'headless', statuses:'PASS / FAIL / BLOCKED / NEEDS_DECISION', timeout:180},
+  'frontend-dev':{title:'前端开发工程师', desc:'Web / PDA 施工；按接口文档与原型对齐', repos:'web / pda / monitor', pool:[['pi:glm-5.3',1],['pi:glm-5.2-en2',1]], mode:'headless', statuses:'PASS / FAIL / BLOCKED / NEEDS_DECISION', timeout:120},
+  'tester':{title:'测试工程师', desc:'执行自动化套件、UI 剧本；只认数据库真值，不为凑绿放宽断言', repos:'test', pool:[['pi:glm-5.3-flash-en2',7],['oc:glm-5',3]], mode:'tmux', statuses:'PASS / FAIL / BLOCKED / NEEDS_DECISION', timeout:120},
+  'reviewer':{title:'代码复核者', desc:'按功能项独立复核代码；只读，不改代码、不提交', repos:'backend', pool:[['pi:glm-5.3',1]], mode:'headless', statuses:'PASS / FAIL', timeout:60},
+  'deployer':{title:'发版执行人', desc:'按发版技能把指定提交发到测试环境并做发后核对', repos:'deploy', pool:[['pi:glm-5.3-flash-en2',1],['pi:qwen3.7-plus',1]], mode:'headless', statuses:'PASS / FAIL / BLOCKED', timeout:60},
+  'dev':{title:'agent-dispatch 开发工程师', desc:'在 agent-dispatch 工程里实现功能：Python 标准库、网页、Tauri', repos:'core / app', pool:[['pi:glm-5.2-en2',1]], mode:'headless', statuses:'PASS / FAIL / NEEDS_DECISION', timeout:180, own:'ad'}
+};
+const ST = {
+  decide:{t:'待你决定',c:'warn'}, review:{t:'待审查',c:'acc'}, failed:{t:'运行失败',c:'bad'}, running:{t:'运行中',c:'run'},
+  accepted:{t:'已验收',c:'ok'}, rejected:{t:'已驳回',c:''}, stopped:{t:'已叫停',c:''}
+};
+const J=(o)=>Object.assign({turn:1,gate:null,mode:'headless',channels:'—',decisions:[]},o);
+const JOBS = [
+  J({id:'smoke-381-r9',p:'c2',repo:'Zc_Wms_Test_V2',role:'tester',batch:'c2-381-verify',model:'pi:glm-5.3-flash-en2',st:'decide',status:'NEEDS_DECISION',dur:'3 分 02 秒',ago:'12 分钟前',mode:'tmux',channels:'pallet、box、pda',
+     task:'跑 playbooks/托盘库冒烟测试，目的：验证 381 版本出库主流程',
+     question:'测试库里有上次的 AT_ 残留（15 个容器），preflight 判为 BLOCKED。要不要清库后重跑？',
+     summary:'preflight 发现上次运行号残留，未开跑', evidence:'runs/20261004-1831/summary.md'}),
+  J({id:'move-fix-r2',p:'c2',repo:'WMS_V3_backend',role:'backend-dev',batch:'move-bugs',model:'pi:glm-5.3',st:'review',status:'PASS',dur:'7 分 31 秒',ago:'25 分钟前',gate:'pass',
+     task:'修复 5619：收货重复提交产生两条入库记录',
+     summary:'修复 5619 收货幂等，新增唯一约束与重复提交测试', evidence:'a1b2c3d · ReceiveService.java · 2 个测试文件'}),
+  J({id:'pda-ui-r1',p:'c2',repo:'WMS_V3_pda',role:'frontend-dev',batch:'move-bugs',model:'pi:glm-5.2-en2',st:'review',status:'PASS',dur:'18 分 12 秒',ago:'41 分钟前',
+     task:'移库确认页：扫描库位后自动聚焦数量输入框',
+     summary:'扫描后聚焦数量框，补充 2 个组件测试', evidence:'f09e2aa · pages/move/confirm.vue'}),
+  J({id:'sanTai-03',p:'c2',repo:'Zc_Wms_Test_V2',role:'tester',batch:'c2-381-verify',model:'oc:glm-5',st:'failed',status:null,dur:'9 分 40 秒',ago:'1 小时前',mode:'tmux',channels:'lx01',
+     task:'跑 三态出库 场景剧本第 3 组', reason:'模型额度用尽，已自动换模型 1 次后仍失败（Connection error）'}),
+  J({id:'move-repro-r5',p:'c2',repo:'Zc_Wms_Test_V2',role:'tester',batch:'move-bugs',model:'pi:glm-5.3-flash-en2',st:'running',status:null,dur:'14 分',ago:'刚刚',mode:'tmux',channels:'pallet、box、pda',
+     task:'跑 移库计划-端到端流程（含新增的 4 个 BUG 验证阶段）', now:'playwright-pallet.browser_click 「确认移库」'}),
+  J({id:'label-api-r1',p:'c2',repo:'WMS_V3_backend',role:'backend-dev',batch:'label-print',model:'pi:glm-5.2-en2',st:'running',status:null,dur:'6 分',ago:'刚刚',
+     task:'按《标签打印_接口文档》实现发料标签的两个接口', now:'bash ./gradlew :wms-app:test'}),
+  J({id:'label-web-r1',p:'c2',repo:'WMS_V3_web',role:'frontend-dev',batch:'label-print',model:'pi:glm-5.3',st:'running',status:null,dur:'2 分',ago:'刚刚',
+     task:'发料标签打印页：对接两个新接口', now:'read src/api/label.ts'}),
+  J({id:'move-analyze-r1',p:'c2',repo:'WMS_V3_backend',role:'backend-dev',batch:'move-bugs',model:'pi:glm-5.3',st:'accepted',status:'PASS',dur:'4 分 29 秒',ago:'今天 14:02',gate:'pass',
+     task:'只读分析：移库计划 4 个 BUG 的根因', summary:'4 个 BUG 定位到 2 处根因，附调用链', evidence:'runs/move-analyze/report.md',
+     decisions:[['14:08','主管','验收','根因与日志、代码行一致；未独立复核数据库真值']]}),
+  J({id:'pallet-out-3state-r1',p:'c2',repo:'Zc_Wms_Test_V2',role:'tester',batch:'c2-381-verify',model:'pi:glm-5.3-flash-en2',st:'accepted',status:'PASS',turn:4,dur:'11 分 21 秒',ago:'今天 11:30',gate:'pass',mode:'tmux',
+     task:'跑 托盘出库三态 场景', summary:'12 条用例全部通过', evidence:'runs/20261004-1112/verdict.json',
+     decisions:[['11:20','主管','续派','缺判定文件，要求补齐'],['11:44','主管','验收','闸门通过；抽查 3 条用例的库存真值一致']]}),
+  J({id:'smoke-381-r2',p:'c2',repo:'Zc_Wms_Test_V2',role:'tester',batch:'c2-381-verify',model:'oc:glm-5',st:'rejected',status:'BLOCKED',dur:'3 分 02 秒',ago:'昨天',mode:'tmux',
+     task:'跑 playbooks/托盘库冒烟测试', summary:'环境不通：登录失效', evidence:'runs/20261003-2010/summary.md',
+     decisions:[['昨天 20:15','主管','驳回','环境抖动，换名重派']]}),
+  J({id:'deploy-281-batch3',p:'a04',repo:'Zc_A04_Deploy',role:'deployer',batch:'a04-1004',model:'pi:glm-5.3-flash-en2',st:'review',status:'PASS',dur:'17 分 59 秒',ago:'30 分钟前',gate:'pass',
+     task:'发版执行人：合并批次第三次发 281 环境并做发后核对', summary:'281 已发版，Liquibase 无待执行变更，健康检查通过', evidence:'deploy-logs/281-1004-3.md'}),
+  J({id:'cr-f-bd-07-15',p:'a04',repo:'Zc_A04_Wms_Backend',role:'reviewer',batch:'code-review',model:'pi:glm-5.3',st:'review',status:'FAIL',dur:'18 分 26 秒',ago:'2 小时前',gate:'pass',
+     task:'功能项 F-BD-07～15 的代码复核', summary:'9 个功能项中 2 项不符合设计：库位类型缺版本号校验；设备维护缺并发保护', evidence:'review/CR-F-BD-07-15.md'}),
+  J({id:'smallfix-1004',p:'a04',repo:'Zc_A04_Wms_Backend',role:'backend-dev',batch:'a04-1004',model:'pi:glm-5.2-en2',st:'review',status:'PASS',dur:'32 分 41 秒',ago:'3 小时前',
+     task:'四项已定的小修复', summary:'四项均已修复并各带测试', evidence:'c81d0f2 等 4 个提交'}),
+  J({id:'gate281-batch',p:'a04',repo:'Zc_A04_Wms_Backend',role:'tester',batch:'a04-1004',model:'pi:glm-5.3-flash-en2',st:'accepted',status:'PASS',dur:'5 时 00 分',ago:'今天 09:10',gate:'pass',
+     task:'合并批次的合入前集成测试', summary:'回归 86 条：通过 84，失败 0，阻塞 2', evidence:'runs/gate281/verdict.json',decisions:[['09:30','主管','验收','阻塞 2 条为已知环境限制']]}),
+  J({id:'client-p3a-config-api-r2',p:'ad',repo:'client',role:'dev',batch:'client-3',model:'pi:glm-5.2-en2',st:'running',status:null,turn:2,dur:'4 分',ago:'刚刚',
+     task:'三期-A：配置中心的服务端接口', now:'edit agent_dispatch/definitions.py',decisions:[['20:09','主管','续派','模板读写与派工实际行为不一致，返工']]}),
+  J({id:'client-p4r-mcp-research-r2',p:'ad',repo:'client-app',role:'dev',batch:'client-3',model:'pi:glm-5.2-en2',st:'accepted',status:'PASS',dur:'8 分 40 秒',ago:'今天 20:12',gate:'pass',
+     task:'四期前置调研：按作业注入 MCP 与技能', summary:'pi 用扩展 + 临时 agent 目录，OpenCode 用环境变量配置，均不改工程文件', evidence:'docs/design/mcp-injection-research.md',decisions:[['20:14','主管','验收','抽查源码依据属实']]}),
+];
+const BATCH_NOTE = {'move-bugs':'移库计划 4 个 BUG：分析 → 修复 → PDA 配合 → 回归','c2-381-verify':'381 版本出库主流程验证','label-print':'发料标签打印：后端接口 + 页面','a04-1004':'A04 10-04 合并批次：修复 → 集成测试 → 发版','code-review':'A04 基础资料功能项代码复核','client-3':'客户端三期：配置中心接口与四期调研'};
+const MCPS = [
+  {id:'playwright-pallet / box / pda',type:'本地命令',cmd:'npx @playwright/mcp --port …',desc:'三个浏览器通道',from:'Zc_Wms_Test_V2/.pi/mcp.json'},
+  {id:'pw-lx01 ~ lx04',type:'本地命令',cmd:'npx @playwright/mcp --port …',desc:'立库工位浏览器',from:'Zc_Wms_Test_V2/.pi/mcp.json'},
+  {id:'DB_225_33306（只读）',type:'本地命令',cmd:'mysql-mcp --host 10.0.225.* --user ro_**** --password ••••••',desc:'测试库只读查询',from:'~/.pi/agent/mcp.json'},
+  {id:'DB_144_23306_WMS_DB',type:'本地命令',cmd:'mysql-mcp --host 10.0.144.* --password ••••••',desc:'A04 144 环境库',from:'~/.pi/agent/mcp.json'},
+  {id:'agentmemory',type:'远程地址',cmd:'http://127.0.0.1:3111/mcp',desc:'跨会话记忆',from:'~/.pi/agent/mcp.json'}];
+const SKILLS = [
+  {id:'at-run',dir:'~/.cc-switch/skills/at-run',desc:'按场景剧本执行自动化测试并出判定文件'},
+  {id:'at-playbook-author',dir:'~/.cc-switch/skills/at-playbook-author',desc:'编写与维护场景剧本'},
+  {id:'vault-os',dir:'~/.claude/skills/vault-os',desc:'文档库规范与体检'},
+  {id:'zentao-api',dir:'~/.claude/skills/zentao-api',desc:'禅道 BUG / 需求 / 任务读写'},
+  {id:'ego-browser',dir:'~/.agents/skills/ego-browser',desc:'通用浏览器操作'}];
+/* 生效范围：glob=全局默认；mx[项目][列][条目] = 'on' | 'off'（缺省为继承） */
+const SCOPE = {
+  mcp:{glob:{'agentmemory':1}, mx:{c2:{_p:{'DB_225_33306（只读）':'on'}, tester:{'playwright-pallet / box / pda':'on','pw-lx01 ~ lx04':'on'}, 'frontend-dev':{'DB_225_33306（只读）':'off'}},
+        a04:{_p:{'DB_144_23306_WMS_DB':'on'}, tester:{'playwright-pallet / box / pda':'on'}}, ad:{}}},
+  skill:{glob:{'ego-browser':1}, mx:{c2:{tester:{'at-run':'on','at-playbook-author':'on'}, 'backend-dev':{'vault-os':'on','ego-browser':'off'}, _p:{'zentao-api':'on'}},
+        a04:{tester:{'at-run':'on'}}, ad:{}}}
+};
+const TOOLS = [{id:'pi',ver:'1.0.2',on:true,note:'MCP 用扩展注入，技能用 --skill'},{id:'opencode',ver:'2.0.22',on:true,note:'MCP 与技能用环境变量配置注入'},{id:'codex',ver:'—',on:false,note:'未安装'}];
+const MODELS = [
+  {id:'pi:glm-5.2-en2',tool:'pi',on:true,jobs:64,pass:88,avg:'19 分',redo:14,err:3},
+  {id:'pi:glm-5.3',tool:'pi',on:true,jobs:41,pass:90,avg:'16 分',redo:10,err:1},
+  {id:'pi:glm-5.3-flash-en2',tool:'pi',on:true,jobs:58,pass:74,avg:'41 分',redo:22,err:6},
+  {id:'oc:glm-5',tool:'opencode',on:true,jobs:17,pass:59,avg:'9 分',redo:35,err:9},
+  {id:'pi:qwen3.7-plus',tool:'pi',on:false,jobs:6,pass:67,avg:'12 分',redo:17,err:2}];
+const BRIEF = {
+  tester:'# 派工单 · {{作业名}}\n\n你是一名{{角色}}，在工程 {{工程}} 里工作，全程使用简体中文。\n\n## 任务\n{{任务}}\n\n## 边界\n- 只认数据库真值，只用只读账号。\n- 不为凑绿放宽断言；剧本对不上时停下来报告。\n- 本次分配的浏览器通道：{{通道}}。\n\n## 报告格式\nSTATUS: PASS | FAIL | BLOCKED | NEEDS_DECISION\nSUMMARY: 一句话结论\nEVIDENCE: 证据文件路径\nQUESTION: 需要决定的事（如有）',
+  _:'# 派工单 · {{作业名}}\n\n你是一名{{角色}}，在工程 {{工程}} 里工作，全程使用简体中文。\n\n## 任务\n{{任务}}\n\n## 边界\n- 先写测试再实现，只提交自己改的路径。\n- 拿不准的事用 NEEDS_DECISION 上报，不要自行决定。\n\n## 报告格式\nSTATUS: PASS | FAIL | BLOCKED | NEEDS_DECISION\nSUMMARY: 一句话结论\nEVIDENCE: 提交号与关键文件'
+};
+
+/* ================= 状态 ================= */
+const S = {proj:'c2', route:'inbox', sel:null, jf:{st:'',role:'',q:''}, tab:'log', batch:null, stat:'model',
+  role:'tester', rtab:'basic', notes:true, menu:false, dark:matchMedia('(prefers-color-scheme: dark)').matches,
+  over:{}, briefs:{}, prefs:{decide:true,failed:true,review:true,tray:true,autostart:true}};
+const $ = s => document.querySelector(s);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const proj = () => PROJECTS.find(p=>p.id===S.proj);
+const pname = id => (PROJECTS.find(p=>p.id===id)||{}).name;
+const jobs = () => JOBS.filter(j=>S.proj==='all'||j.p===S.proj);
+const INBOX = [['decide','等你决定'],['review','待审查'],['failed','失败与中断'],['running','运行中']];
+const todo = (pid) => JOBS.filter(j=>(pid==='all'||j.p===pid)&&['decide','review','failed'].includes(j.st)).length;
+const tag = j => `<span class="tag ${ST[j.st].c}">${ST[j.st].t}</span>`;
+const stTag = s => s?`<span class="tag ${s==='PASS'?'ok':s==='FAIL'?'bad':'warn'}">${s}</span>`:'';
+const note = html => S.notes?`<div class="note"><b>设计说明</b>　${html}</div>`:'';
+function toast(msg){const d=document.createElement('div');d.className='toast';d.textContent=msg;document.body.appendChild(d);setTimeout(()=>d.remove(),2200)}
+
+/* ================= 外壳 ================= */
+const NAV = [['inbox','工作台','1'],['jobs','作业','2'],['batches','批次','3'],['stats','统计','4']];
+const PNAV = [['p-repos','工程'],['p-roles','角色'],['p-mcp','MCP'],['p-skills','技能'],['p-rules','主管规则']];
+const GNAV = [['g-tools','派工工具与模型'],['g-roles','全局角色'],['g-registry','MCP 与技能登记'],['g-prefs','设置']];
+function renderSide(){
+  const p = proj(), n = todo(S.proj);
+  $('#side').innerHTML = `
+    <div class="proj" data-act="menu"><b>${p?esc(p.name):'全部项目'}</b>
+      <small>${p?`${p.repos.length} 个工程 · ${p.roles.length} 个角色`:`${PROJECTS.length} 个项目`}</small><span class="caret">▾</span></div>
+    ${S.menu?`<div class="projmenu">
+      <div data-act="proj" data-id="all"><span>全部项目</span>${todo('all')?`<span class="badge">${todo('all')}</span>`:''}</div>
+      ${PROJECTS.map(x=>`<div data-act="proj" data-id="${x.id}"><span>${esc(x.name)}</span>${todo(x.id)?`<span class="badge">${todo(x.id)}</span>`:''}</div>`).join('')}
+      <div data-act="newproj" style="color:var(--accent)">＋ 新建项目…</div></div>`:''}
+    <div class="nav">
+      ${NAV.map(([r,t,k])=>`<a class="${S.route===r?'on':''}" data-act="go" data-r="${r}">${t}${r==='inbox'&&n?`<span class="badge">${n}</span>`:`<kbd>⌘${k}</kbd>`}</a>`).join('')}
+      <h6>项目设置</h6>
+      ${p?PNAV.map(([r,t])=>`<a class="${S.route===r?'on':''}" data-act="go" data-r="${r}">${t}</a>`).join(''):'<div class="hint">先选一个项目</div>'}
+      <h6>全局</h6>
+      ${GNAV.map(([r,t])=>`<a class="${S.route===r?'on':''}" data-act="go" data-r="${r}">${t}</a>`).join('')}
+    </div>
+    <div class="sidefoot"><span class="dot"></span>服务已连接 · 127.0.0.1:8765</div>`;
+}
+function renderTop(){
+  const t = [...NAV,...PNAV,...GNAV].find(x=>x[0]===S.route)[1];
+  const scope = S.route.startsWith('g-')?'全局':(proj()?proj().name:'全部项目');
+  $('#top').innerHTML = `<h1>${t}</h1><span class="sub">${esc(scope)}</span><span class="sp"></span>
+    <div class="search" data-act="palette">⌕ 搜索作业 <kbd style="margin-left:auto">⌘K</kbd></div>
+    <button class="btn ghost" data-act="theme" title="亮色 / 暗色">${S.dark?'☾':'☀'}</button>
+    <button class="btn pri" data-act="dispatch">＋ 派工</button>`;
+}
+
+/* ================= 作业条目与详情 ================= */
+function item(j){
+  const r = ROLES[j.role];
+  const line3 = j.st==='decide'?`<div class="r3" style="color:var(--warn)">${esc(j.question)}</div>`
+    : j.st==='failed'?`<div class="r3" style="color:var(--bad)">${esc(j.reason)}</div>`
+    : j.st==='running'?`<div class="r3" style="color:var(--muted)">正在：${esc(j.now)}</div>`
+    : j.st==='review'?`<div class="r3">${stTag(j.status)} <span style="color:var(--muted)">${j.gate==='pass'?'闸门通过':'未跑闸门'}</span></div>`:'';
+  return `<div class="item ${S.sel===j.id?'on':''}" data-act="sel" data-id="${j.id}">
+    <div class="r1"><b>${esc(j.id)}</b>${tag(j)}</div>
+    <div class="r2">${esc(r.title)} · ${S.proj==='all'?esc(pname(j.p))+' / ':''}${esc(j.repo)} · ${esc(j.st==='running'?'已跑 '+j.dur:j.ago)}</div>${line3}</div>`;
+}
+function history(j){
+  const base = [['工具','tool','read 派工单与相关文件'],['回复','say','已理解任务，开始执行'],['工具','tool','bash git status'],
+    ['工具','tool', j.role==='tester'?'playwright-pallet.browser_navigate 登录页':'edit '+(j.evidence||'源文件').split(' · ').pop()],
+    ['工具','tool', j.role==='tester'?'DB 只读查询：核对库存真值':'bash 运行测试 → 通过']];
+  if(j.st==='running') base.push(['工具','tool',j.now]);
+  else if(j.st==='failed') base.push(['错误','err',j.reason]);
+  else base.push(['回复','say',`STATUS: ${j.status} ｜ ${j.summary||''}`]);
+  return `<div class="log">${base.map((x,i)=>`<span class="t">[${String(18+Math.floor(i/3)).padStart(2,'0')}:${String(31+i*2).padStart(2,'0')}]</span> <span class="k ${x[1]}">${x[0]}</span> ${esc(x[2])}`).join('\n')}${j.st==='running'?'\n<span class="t">… 实时滚动中</span>':''}</div>`;
+}
+function briefText(tpl, v){return tpl.replace(/\{\{(.+?)\}\}/g,(m,k)=>v[k]!=null?v[k]:m)}
+function briefOf(pid, role){return S.briefs[pid+'/'+role] ?? (BRIEF[role]||BRIEF._)}
+function detail(j){
+  const r = ROLES[j.role];
+  let head = '';
+  if(j.st==='decide') head = `<div class="card decide"><h3>执行者的问题 <span class="tag warn">等你决定</span></h3>
+      <div class="q">${esc(j.question)}</div>
+      <label class="f"><span>你的答复（会作为续派内容原样发给执行者）</span><textarea id="ans" rows="3" placeholder="例如：可以清库，只清 AT_ 前缀的数据，清完重跑。"></textarea></label>
+      <div class="acts"><button class="btn pri" data-act="answer" data-id="${j.id}">发送答复并续派</button>
+        <button class="btn" data-act="markdone" data-id="${j.id}">只标记为已处理</button>
+        <button class="btn danger" data-act="dlg" data-kind="reject" data-id="${j.id}">驳回作业…</button></div></div>`;
+  if(j.st==='failed') head = `<div class="card fail"><h3>失败原因 <span class="tag bad">运行失败</span></h3><div>${esc(j.reason)}</div>
+      <div class="acts"><button class="btn pri" data-act="dlg" data-kind="redo" data-id="${j.id}">换名重派…</button>
+        ${j.mode==='tmux'?`<button class="btn" data-act="dlg" data-kind="reply" data-id="${j.id}">从中断处继续…</button>`:''}
+        <button class="btn danger" data-act="dlg" data-kind="reject" data-id="${j.id}">驳回…</button></div></div>`;
+  const concl = j.status ? `<div class="card"><h3>结论 ${stTag(j.status)} ${j.gate==='pass'?'<span class="tag ok">闸门通过</span>':'<span class="tag">未跑闸门</span>'}</h3>
+      <dl class="kv"><dt>摘要</dt><dd>${esc(j.summary)}</dd><dt>证据</dt><dd><span class="link">${esc(j.evidence)}</span></dd></dl>
+      ${j.st==='review'?`<div class="acts"><button class="btn pri" data-act="dlg" data-kind="accept" data-id="${j.id}">验收…</button>
+        <button class="btn" data-act="dlg" data-kind="reply" data-id="${j.id}">返工（续派）…</button>
+        <button class="btn danger" data-act="dlg" data-kind="reject" data-id="${j.id}">驳回…</button>
+        ${j.gate?'':`<button class="btn" data-act="gate" data-id="${j.id}">跑闸门</button>`}
+        ${j.role!=='tester'?'<button class="btn ghost" data-act="tip" data-msg="原型：这里打开 git diff 视图">查看改动</button>':''}</div>`:''}</div>` : '';
+  const run = j.st==='running' ? `<div class="card"><h3>正在进行 <span class="tag run">运行中 ${esc(j.dur)}</span></h3><div style="font-family:var(--mono);font-size:12px">${esc(j.now)}</div>
+      <div class="acts">${j.mode==='tmux'?'<button class="btn" data-act="tip" data-msg="原型：打开终端并接入执行者界面（tmux attach）">接入界面</button><button class="btn" data-act="tip" data-msg="原型：人工接手后主管不再往里派工">人工接手</button>':''}
+        <button class="btn" data-act="dlg" data-kind="reply" data-id="${j.id}">补充说明…</button>
+        <button class="btn danger" data-act="dlg" data-kind="stop" data-id="${j.id}">叫停…</button></div></div>` : '';
+  const tabs = [['log','过程'],['files','产物'],['brief','派工单'],['dec','裁决记录']];
+  let body = '';
+  if(S.tab==='log') body = history(j);
+  if(S.tab==='files') body = j.evidence?`<div class="tbl"><table><tr><th>文件</th><th>说明</th></tr>
+      <tr><td><span class="link">${esc(j.evidence)}</span></td><td>执行者报告的证据</td></tr>
+      <tr><td><span class="link">~/.agent-dispatch/jobs/${esc(j.id)}/result.md</span></td><td>结论原文</td></tr>
+      <tr><td><span class="link">~/.agent-dispatch/jobs/${esc(j.id)}/run.log</span></td><td>完整输出</td></tr></table></div>`:'<div class="empty">还没有产物</div>';
+  if(S.tab==='brief') body = `<pre class="doc">${esc(briefText(briefOf(j.p,j.role),{作业名:j.id,角色:r.title,工程:j.repo,任务:j.task,通道:j.channels}))}</pre>`;
+  if(S.tab==='dec') body = j.decisions.length?`<div class="tbl"><table><tr><th>时间</th><th>谁</th><th>裁决</th><th>依据</th></tr>${j.decisions.map(d=>`<tr>${d.map(x=>`<td>${esc(x)}</td>`).join('')}</tr>`).join('')}</table></div>`:'<div class="empty">还没有裁决</div>';
+  return `<div class="dh"><h2>${esc(j.id)}</h2>${tag(j)}${stTag(j.status)}</div>
+    <div class="meta">${esc(r.title)} · ${esc(pname(j.p))} / ${esc(j.repo)} · ${esc(j.model)} · 第 ${j.turn} 轮 · ${esc(j.dur)} · 批次 <span class="link" data-act="tobatch" data-id="${j.batch}">${esc(j.batch)}</span> · ${j.mode}${j.channels!=='—'?' · 通道 '+esc(j.channels):''}</div>
+    <div class="card" style="padding:9px 13px"><span style="color:var(--muted)">任务　</span>${esc(j.task)}</div>
+    ${head}${run}${concl}
+    <div class="tabs">${tabs.map(([k,t])=>`<a class="${S.tab===k?'on':''}" data-act="tab" data-k="${k}">${t}</a>`).join('')}</div>${body}`;
+}
+function paneFor(list){
+  const j = JOBS.find(x=>x.id===S.sel && list.includes(x)) || list[0];
+  if(j) S.sel = j.id;
+  return j;
+}
+
+/* ================= 页面 ================= */
+const V = {};
+V.inbox = () => {
+  const all = jobs(); const shown = INBOX.flatMap(([k])=>all.filter(j=>j.st===k));
+  const j = paneFor(shown);
+  const left = INBOX.map(([k,t])=>{const g=all.filter(x=>x.st===k); if(!g.length) return '';
+    const extra = k==='review'?`<span style="font-weight:400">· 闸门已过 ${g.filter(x=>x.gate==='pass').length}</span>`:'';
+    return `<div class="grp">${t} · ${g.length} ${extra}</div>${g.map(item).join('')}`}).join('');
+  return `<div class="split"><div class="list">${left||'<div class="empty">没有需要你处理的事 🎉</div>'}</div>
+    <div class="pane">${j?detail(j):'<div class="empty">工作台已清空</div>'}
+    ${note('首页是收件箱而不是作业总表：按「等你决定 → 待审查 → 失败与中断 → 运行中」排序。选中一条，右侧最上面就是这件事要你做的决定；处理完（验收 / 驳回 / 答复）条目自动离开工作台。可以试着点「验收…」或发送一个答复。')}</div></div>`;
+};
+V.jobs = () => {
+  const f = S.jf; let list = jobs().filter(j=>(!f.st||j.st===f.st)&&(!f.role||j.role===f.role)&&(!f.q||(j.id+j.task+j.batch).includes(f.q)));
+  const j = paneFor(list);
+  const roles = [...new Set(jobs().map(x=>x.role))];
+  return `<div class="split"><div class="list">
+    <div class="filters">
+      <button class="chip ${!f.st?'on':''}" data-act="fst" data-v="">全部 ${jobs().length}</button>
+      ${Object.entries(ST).map(([k,v])=>{const n=jobs().filter(x=>x.st===k).length;return n?`<button class="chip ${f.st===k?'on':''}" data-act="fst" data-v="${k}">${v.t} ${n}</button>`:''}).join('')}
+      <select data-chg="frole" style="padding:1px 6px;font-size:12px"><option value="">全部角色</option>${roles.map(r=>`<option value="${r}" ${f.role===r?'selected':''}>${ROLES[r].title}</option>`).join('')}</select>
+    </div>
+    ${list.map(item).join('')||'<div class="empty">没有符合条件的作业</div>'}</div>
+    <div class="pane">${j?detail(j):'<div class="empty">选一个作业查看详情</div>'}
+    ${note('左边列表、右边详情，切换作业不跳页、不丢筛选。详情首屏只有三样：结论（含闸门）、下一步操作、过程；元数据压成标题下的一行。验收 / 返工 / 驳回各自弹出独立的小表单，写明后果。')}</div></div>`;
+};
+V.batches = () => {
+  const groups = {}; jobs().forEach(j=>(groups[j.batch]=groups[j.batch]||[]).push(j));
+  const names = Object.keys(groups); if(!names.includes(S.batch)) S.batch = names[0];
+  const cnt = (g,ks)=>g.filter(x=>ks.includes(x.st)).length;
+  const left = names.map(n=>{const g=groups[n], t=g.length;
+    return `<div class="item ${S.batch===n?'on':''}" data-act="batch" data-id="${n}"><div class="r1"><b>${esc(n)}</b><span class="tag">${cnt(g,['accepted'])}/${t} 已验收</span></div>
+      <div class="r2">${esc(BATCH_NOTE[n]||'')}</div>
+      <div class="bar" style="margin-top:6px"><i class="ok" style="width:${cnt(g,['accepted'])/t*100}%"></i><i class="warn" style="width:${cnt(g,['decide','review'])/t*100}%"></i><i class="run" style="width:${cnt(g,['running'])/t*100}%"></i><i class="bad" style="width:${cnt(g,['failed','rejected'])/t*100}%"></i></div></div>`}).join('');
+  const g = (groups[S.batch]||[]).slice().reverse();
+  const cls = j=>({accepted:'ok',running:'run',failed:'bad',rejected:'bad',decide:'warn',review:'warn'}[j.st]||'');
+  const right = g.length?`<h2 class="pt">${esc(S.batch)}</h2><p class="pd">${esc(BATCH_NOTE[S.batch]||'')} · ${[...new Set(g.map(x=>x.repo))].length} 个工程 · ${g.length} 个作业</p>
+    <div class="flow">${g.map((j,i)=>`<div class="step"><div class="rail"><b class="${cls(j)}">${i+1}</b>${i<g.length-1?'<i></i>':''}</div>
+      <div class="card" data-act="tojob" data-id="${j.id}"><div class="row"><b>${esc(j.id)}</b>${tag(j)}${stTag(j.status)}<span style="margin-left:auto;color:var(--muted)">${esc(ROLES[j.role].title)} · ${esc(j.repo)} · ${esc(j.dur)}</span></div>
+        <div style="color:var(--muted);margin-top:3px">${esc(j.summary||j.question||j.reason||j.task)}</div></div></div>`).join('')}</div>`:'<div class="empty">这个项目还没有批次</div>';
+  return `<div class="split"><div class="list">${left}</div><div class="pane">${right}
+    ${note('批次 = 一件跨工程的事。左边看每件事的整体进度（绿 已验收 / 黄 等处理 / 紫 运行中 / 红 失败或驳回），右边按派出顺序列出每一步，点任意一步跳到该作业详情。')}</div></div>`;
+};
+V.stats = () => {
+  const tabs = [['model','模型'],['role','角色'],['case','用例判定']];
+  const bar = (p)=>`<div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i class="${p>=85?'ok':p>=70?'warn':'bad'}" style="width:${p}%"></i></div><span style="width:34px;text-align:right">${p}%</span></div>`;
+  let body = '';
+  if(S.stat==='model') body = `<div class="tbl"><table><tr><th>模型</th><th>工具</th><th>作业数</th><th style="width:230px">一次通过率</th><th>平均耗时</th><th>返工率</th><th>服务商报错</th></tr>
+    ${MODELS.map(m=>`<tr><td><b>${m.id}</b> ${m.on?'':'<span class="tag">已停用</span>'}</td><td>${m.tool}</td><td>${m.jobs}</td><td>${bar(m.pass)}</td><td>${m.avg}</td><td>${m.redo}%</td><td>${m.err>5?`<span class="tag bad">${m.err} 次</span>`:m.err+' 次'}</td></tr>`).join('')}</table></div>`;
+  if(S.stat==='role') body = `<div class="tbl"><table><tr><th>角色</th><th>作业数</th><th style="width:230px">验收率</th><th>平均轮次</th><th>平均耗时</th><th>最常见的驳回原因</th></tr>
+    ${[['backend-dev',52,92,1.4,'21 分','缺回归测试'],['frontend-dev',18,89,1.3,'15 分','类型检查超基线'],['tester',61,71,1.7,'48 分','环境抖动（登录失效）'],['reviewer',9,100,1.0,'12 分','—'],['deployer',11,82,1.0,'18 分','发后核对未通过']]
+      .map(r=>`<tr><td><b>${ROLES[r[0]].title}</b></td><td>${r[1]}</td><td>${bar(r[2])}</td><td>${r[3]}</td><td>${r[4]}</td><td>${r[5]}</td></tr>`).join('')}</table></div>`;
+  if(S.stat==='case') body = `<div class="tbl"><table><tr><th>批次</th><th>用例数</th><th style="width:260px">判定分布</th><th>通过</th><th>失败</th><th>阻塞</th><th></th></tr>
+    ${[['c2-381-verify',38,31,4,3],['move-bugs',16,12,4,0],['a04-1004',86,84,0,2]].map(c=>`<tr><td><b>${c[0]}</b></td><td>${c[1]}</td>
+      <td><div class="bar"><i class="ok" style="width:${c[2]/c[1]*100}%"></i><i class="bad" style="width:${c[3]/c[1]*100}%"></i><i class="warn" style="width:${c[4]/c[1]*100}%"></i></div></td>
+      <td>${c[2]}</td><td>${c[3]?`<span class="tag bad">${c[3]}</span>`:0}</td><td>${c[4]?`<span class="tag warn">${c[4]}</span>`:0}</td><td><span class="link" data-act="tip" data-msg="原型：展开失败与阻塞用例的逐条清单和证据路径">逐条查看</span></td></tr>`).join('')}</table></div>`;
+  return `<div class="page"><div class="row" style="margin-bottom:4px"><div class="tabs" style="flex:1;margin:0 0 12px">${tabs.map(([k,t])=>`<a class="${S.stat===k?'on':''}" data-act="stat" data-k="${k}">${t}</a>`).join('')}</div>
+    <select><option>最近 7 天</option><option>最近 30 天</option><option>全部</option></select></div>${body}
+    ${note('复盘用：哪个模型一次通过率低、返工多、服务商报错多，一眼能看出该不该调模型池的比例；角色页看哪个岗位的说明书需要改；用例判定页汇总每个批次的通过 / 失败 / 阻塞。')}</div>`;
+};
+
+/* ---------- 项目设置 ---------- */
+V['p-repos'] = () => { const p = proj();
+  return `<div class="page"><h2 class="pt">工程</h2><p class="pd">项目里的每个代码仓库。角色通过「负责的工程」指到这里；通道是该工程里可被独占的资源（浏览器、工位）。</p>
+    <div class="tbl"><table><tr><th>工程 ID</th><th>名称</th><th>目录</th><th>通道</th><th>被哪些角色引用</th><th></th></tr>
+    ${p.repos.map(r=>{const used=p.roles.filter(x=>ROLES[x].repos.split(' / ').includes(r.id));return `<tr><td><b>${r.id}</b></td><td>${esc(r.name)}</td><td style="font-family:var(--mono);font-size:12px">${esc(r.cwd)}</td><td>${esc(r.channels)}</td>
+      <td>${used.map(x=>`<span class="tag">${ROLES[x].title}</span>`).join(' ')||'<span style="color:var(--faint)">无</span>'}</td>
+      <td style="text-align:right"><span class="link" data-act="tip" data-msg="原型：弹出编辑工程表单（目录、通道、通道命名空间）">编辑</span>　<span class="link" style="color:${used.length?'var(--faint)':'var(--bad)'}" data-act="tip" data-msg="${used.length?'还被角色引用，不能删除：先改这些角色负责的工程':'原型：二次确认后删除'}">删除</span></td></tr>`}).join('')}</table></div>
+    <button class="btn" data-act="tip" data-msg="原型：弹出新增工程表单">＋ 添加工程</button>
+    <div class="card" style="margin-top:16px"><h3>项目信息</h3><dl class="kv" style="grid-template-columns:90px 1fr"><dt>显示名</dt><dd>${esc(p.name)}</dd><dt>项目 ID</dt><dd>${p.id}</dd><dt>默认角色</dt><dd>${ROLES[p.defRole].title}</dd><dt>定义文件</dt><dd style="font-family:var(--mono);font-size:12px">~/.agent-dispatch/projects/${p.id}/project.json <span class="link" data-act="tip" data-msg="原型：复制等价的命令行">在命令行中查看</span></dd></dl></div>
+    ${note('工程仍被角色引用时不能删除，按钮直接说明原因。每页右上都有「在命令行中查看」，强调命令行和文件才是唯一真相，客户端只是界面。')}</div>`;
+};
+function roleFields(pid, rid){
+  const r = ROLES[rid], own = r.own===pid;
+  const base = [['title','称呼',r.title],['repos','负责的工程',r.repos],['mode','运行方式',r.mode],['channels','默认占用通道',rid==='tester'?'全部':'无'],
+    ['timeout','单轮超时',r.timeout+' 分钟'],['statuses','报告状态取值',r.statuses],['pool','模型池',r.pool.map(x=>x[0]+' ×'+x[1]).join(' · ')]];
+  const preset = pid==='c2'&&rid==='tester' ? {repos:'test',mode:'tmux',channels:'全部',timeout:'120 分钟'} : (rid!=='dev'?{repos:r.repos}:{});
+  return base.map(([k,label,gv])=>{
+    const key = pid+'/'+rid+'/'+k; let ov = key in S.over ? S.over[key] : (own?gv:preset[k]);
+    return {k,label,gv, val: ov!=null?ov:gv, src: own?'项目专属':(ov!=null?'本项目覆盖':'继承自全局'), own};
+  });
+}
+V['p-roles'] = () => { const p = proj(); if(!p.roles.includes(S.role)) S.role = p.roles[0];
+  const r = ROLES[S.role], rid = S.role, fs = roleFields(p.id, rid);
+  const rt = [['basic','基本'],['brief','岗位说明书'],['pool','模型池'],['mcp','MCP'],['skill','技能'],['gate','闸门']];
+  let body = '';
+  if(S.rtab==='basic') body = `<div class="tbl"><table><tr><th style="width:150px">设置</th><th>值</th><th style="width:260px">来源</th></tr>
+    ${fs.map(f=>`<tr><td>${f.label}</td><td><b>${esc(f.val)}</b></td><td><span class="src ${f.src==='继承自全局'?'g':'p'}">${f.src}</span>
+      ${f.own?`　<span class="link" data-act="fedit" data-k="${f.k}" data-label="${f.label}" data-v="${esc(f.val)}">修改</span>`
+       : f.src==='本项目覆盖'?`　<span class="link" data-act="fedit" data-k="${f.k}" data-label="${f.label}" data-v="${esc(f.val)}">修改</span>　<span class="link" data-act="freset" data-k="${f.k}">恢复继承</span>`
+       : `　<span class="link" data-act="fedit" data-k="${f.k}" data-label="${f.label}" data-v="${esc(f.val)}">为本项目单独配置</span>`}</td></tr>`).join('')}</table></div>`;
+  if(S.rtab==='brief'){ const key=p.id+'/'+rid, custom = key in S.briefs;
+    const vars = {作业名:rid+'-1004-1830',角色:r.title,工程:p.repos[0].name,任务:'（示例）跑 移库计划-端到端流程',通道:'pallet、box、pda'};
+    body = `<div class="row" style="margin-bottom:8px"><span class="src ${custom?'p':'g'}">${custom?'本项目覆盖':(r.own?'项目专属':'继承自全局')}</span>
+      ${custom?'<span class="link" data-act="breset">恢复继承</span>':''}<span style="margin-left:auto;color:var(--muted)">插入变量：</span>
+      ${Object.keys(vars).map(v=>`<button class="btn sm" data-act="bvar" data-v="${v}">{{${v}}}</button>`).join('')}</div>
+      <div class="dgrid"><div><textarea id="brief" rows="22" style="font:12px/1.65 var(--mono)">${esc(briefOf(p.id,rid))}</textarea>
+        <div class="acts"><button class="btn pri" data-act="bsave">保存${custom||r.own?'':'为本项目的说明书'}</button></div></div>
+      <div><div style="color:var(--muted);font-size:12px;margin-bottom:4px">预览：执行者实际收到的内容（示例任务）</div><pre class="doc" id="bprev" data-vars='${esc(JSON.stringify(vars))}'>${esc(briefText(briefOf(p.id,rid),vars))}</pre></div></div>`; }
+  if(S.rtab==='pool'){ const sum = r.pool.reduce((a,x)=>a+x[1],0);
+    body = `<div class="row" style="margin-bottom:8px"><span class="src g">继承自全局</span><span class="link" data-act="tip" data-msg="原型：复制全局模型池到本项目后可单独调整">为本项目单独配置</span></div>
+    <div class="tbl"><table><tr><th>模型</th><th>比例</th><th style="width:300px">被选中的概率</th><th>状态</th></tr>
+    ${r.pool.map(x=>`<tr><td><b>${x[0]}</b></td><td>×${x[1]}</td><td><div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i class="run" style="width:${x[1]/sum*100}%"></i></div>${Math.round(x[1]/sum*100)}%</div></td><td><span class="tag ok">可用</span></td></tr>`).join('')}</table></div>
+    <p class="pd">主管派工时不指定模型，工具按这里的比例自动选；被选中的模型报额度错误时自动换下一个。</p>`; }
+  if(S.rtab==='mcp'||S.rtab==='skill'){ const kind = S.rtab, items = kind==='mcp'?MCPS:SKILLS;
+    const rows = items.map(it=>({it, e:eff(kind,p.id,rid,it.id)})).filter(x=>x.e.on);
+    body = `<div class="tbl"><table><tr><th>${kind==='mcp'?'MCP 服务':'技能'}</th><th>说明</th><th>为什么启用</th></tr>
+      ${rows.map(x=>`<tr><td><b>${esc(x.it.id)}</b></td><td>${esc(x.it.desc)}</td><td><span class="src ${x.e.from==='全局默认'?'g':'p'}">${x.e.from}</span></td></tr>`).join('')||'<tr><td colspan="3" style="color:var(--faint)">这个角色派工时不带任何'+(kind==='mcp'?' MCP':'技能')+'</td></tr>'}</table></div>
+      <span class="link" data-act="go" data-r="${kind==='mcp'?'p-mcp':'p-skills'}">去生效范围矩阵里调整 →</span>
+      ${kind==='mcp'?`<div class="card" style="margin-top:14px"><h3>派工时实际下发（预览）</h3><pre class="doc">${esc(injectPreview(p.id,rid))}</pre></div>`:''}`; }
+  if(S.rtab==='gate') body = `<div class="tbl"><table><tr><th style="width:44px"></th><th>闸门项</th><th>级别</th><th>来源</th></tr>
+    ${[['进程正常结束（退出码 0）','硬性',1],['结论含 STATUS','硬性',1],[rid==='tester'?'run 目录下有判定文件 verdict.json':'有新的提交且只改了自己的路径','硬性',1],[rid==='tester'?'报告里没有「与预期不符 / 预期已过时」字样':'全量测试通过','提示',rid==='tester'?1:0]]
+      .map(g=>`<tr><td><button class="sw ${g[2]?'on':''}" data-act="swtoggle"></button></td><td>${g[0]}</td><td><span class="tag ${g[1]==='硬性'?'bad':'warn'}">${g[1]}</span></td><td><span class="src g">继承自全局</span></td></tr>`).join('')}</table></div>
+    <p class="pd">闸门只检查「文件在不在、格式对不对」，通过不等于合格，验收前仍要看证据。</p>`;
+  return `<div class="page"><div class="two"><div><div class="rolelist">${p.roles.map(x=>`<div class="item ${x===rid?'on':''}" data-act="role" data-id="${x}"><div class="r1"><b>${ROLES[x].title}</b></div><div class="r2">${x} · ${ROLES[x].own?'项目专属':'全局角色'}</div></div>`).join('')}</div>
+      <button class="btn" style="margin-top:10px;width:100%" data-act="tip" data-msg="原型：新建项目专属角色，或从全局角色里挑一个加入本项目">＋ 添加角色</button></div>
+    <div><div class="dh"><h2 class="pt">${r.title}</h2><span class="tag">${rid}</span><span style="margin-left:auto" class="link" data-act="tip" data-msg="agent-dispatch roles show ${rid} --project ${p.id}">在命令行中查看</span></div>
+      <p class="pd">${esc(r.desc)}</p>
+      <div class="tabs">${rt.map(([k,t])=>`<a class="${S.rtab===k?'on':''}" data-act="rtab" data-k="${k}">${t}</a>`).join('')}</div>${body}
+      ${note('每一项都标明来源。「本项目覆盖」可一键恢复继承；「继承自全局」可一键为本项目单独配置——试试点「恢复继承」。岗位说明书页左边编辑、右边实时预览执行者会收到的完整派工单。')}</div></div></div>`;
+};
+/* 生效范围计算：角色 → 项目 → 全局 */
+function eff(kind, pid, col, id){
+  const sc = SCOPE[kind], mx = sc.mx[pid]||{};
+  const g = !!sc.glob[id], pv = (mx._p||{})[id], pOn = pv?pv==='on':g;
+  if(col==='_g') return {on:g, mark:g?'on':'off', from:'全局默认'};
+  if(col==='_p') return {on:pOn, mark: pv==='on'?'on':pv==='off'?'x':(g?'inh':'off'), from: pv?'本项目':'全局默认'};
+  const rv = (mx[col]||{})[id], on = rv?rv==='on':pOn;
+  return {on, mark: rv==='on'?'on':rv==='off'?'x':(pOn?'inh':'off'), from: rv?'本角色':(pv?'本项目':'全局默认')};
+}
+function injectPreview(pid, rid){
+  const on = MCPS.filter(m=>eff('mcp',pid,rid,m.id).on).map(m=>m.id), sk = SKILLS.filter(s=>eff('skill',pid,rid,s.id).on);
+  return `# 执行者是 pi 时\nPI_CODING_AGENT_DIR=/tmp/ad-job-<作业名>/agent \\\n  pi -e /tmp/ad-job-<作业名>/mcp-extension.js \\   # 注册：${on.join('、')||'（无）'}\n     --no-skills ${sk.map(s=>'--skill '+s.dir).join(' ')||''}\n\n# 执行者是 OpenCode 时\nOPENCODE_CONFIG_CONTENT='{"mcp":{…${on.length} 个启用，工程自带但本次不要的写成完整定义 + enabled:false…},\n  "skills":{"paths":[${sk.map(s=>'"'+s.dir+'"').join(', ')}]}}' opencode run --standalone\n\n# 作业结束后删除 /tmp/ad-job-<作业名>/，不改工程目录里的任何文件`;
+}
+function matrix(kind){ const p = proj(), items = kind==='mcp'?MCPS:SKILLS;
+  const cols = [['_g','全局默认'],['_p','本项目'],...p.roles.map(r=>[r,ROLES[r].title])];
+  const sym = {on:'',inh:'',off:'',x:'✕'};
+  return `<div class="page"><h2 class="pt">${kind==='mcp'?'MCP':'技能'} · 生效范围</h2>
+    <p class="pd">先在「全局 → MCP 与技能登记」里登记，再在这里决定哪一层启用。派工时按本次作业的角色注入，不改工程里的文件。</p>
+    <div class="tbl"><table class="mx"><tr><th>${kind==='mcp'?'MCP 服务':'技能'}</th>${cols.map(c=>`<th>${c[1]}</th>`).join('')}</tr>
+    ${items.map(it=>`<tr><td><b>${esc(it.id)}</b><div style="color:var(--muted);font-size:12px">${esc(it.desc)}</div></td>
+      ${cols.map(c=>{const e=eff(kind,p.id,c[0],it.id);return `<td><button class="cell ${e.mark}" title="${e.on?'生效':'不生效'} · 来自${e.from}" data-act="cell" data-kind="${kind}" data-col="${c[0]}" data-id="${esc(it.id)}">${sym[e.mark]}</button></td>`}).join('')}</tr>`).join('')}</table></div>
+    <div class="legend"><span><i class="cell on"></i>在这一层明确启用</span><span><i class="cell inh"></i>继承上一层的启用</span><span><i class="cell off"></i>未启用</span><span><i class="cell x">✕</i>在这一层明确关闭</span><span>点击圆点切换：继承 → 启用 → 关闭</span></div>
+    ${kind==='mcp'?`<div class="card"><h3>怎么下发给执行者 <span class="tag ok">调研已完成</span></h3>
+      <div class="tbl" style="margin:0"><table><tr><th>执行者</th><th>MCP</th><th>技能</th><th>做不到的</th></tr>
+      <tr><td><b>pi</b> 1.0.2</td><td>用 <code>-e</code> 加载一个临时扩展注册 MCP；配合临时 agent 目录隔离你全局的 MCP</td><td><code>--no-skills --skill &lt;目录&gt;</code>，可严格控制</td><td>不换 agent 目录就关不掉全局 MCP</td></tr>
+      <tr><td><b>OpenCode</b> 2.0.22</td><td>环境变量传入配置新增；关闭工程自带的要写同名完整定义 + enabled:false</td><td>配置里的 <code>skills.paths</code></td><td>无法排除全局技能，只能追加</td></tr></table></div></div>`:''}
+    ${note('和模型池同一个思路：登记一次，逐层启用。实心 = 这一层明确启用，空心 = 继承，红叉 = 这一层明确关闭。例如「测试工程师带浏览器，后端开发不带」只需在角色列点一下。鼠标停在圆点上能看到「来自哪一层」。')}</div>`;
+}
+V['p-mcp'] = () => matrix('mcp');
+V['p-skills'] = () => matrix('skill');
+V['p-rules'] = () => { const p = proj();
+  return `<div class="page"><h2 class="pt">主管规则</h2><p class="pd">主管会话读到的本项目专属规则（附在 <code>agent-dispatch role</code> 输出末尾）：各角色怎么用、哪些事必须问用户。</p>
+    <div class="dgrid"><div><textarea rows="16" style="font:12.5px/1.7 var(--mono)">${esc(p.rules)}</textarea>
+      <div class="acts"><button class="btn pri" data-act="tip" data-msg="已保存（原型）">保存</button><span style="color:var(--muted);align-self:center">保存到 ~/.agent-dispatch/projects/${p.id}/supervisor.md</span></div></div>
+    <div><div class="card"><h3>通用规则（只读，来自 SUPERVISOR.md）</h3><div style="color:var(--muted)">必须问用户：清库或清理数据；改环境配置；重启服务；修改或放宽断言、剧本、验收标准；强制验收。<br><br>禁止：自己下场执行；为了让结果变绿而改判据；隐瞒失败；对同一作业无限续派。</div></div>
+      <div class="card"><h3>本项目可派的角色</h3>${p.roles.map(r=>`<div>• <b>${ROLES[r].title}</b> <span style="color:var(--muted)">→ ${ROLES[r].repos}</span></div>`).join('')}</div></div></div>
+    ${note('左边是可编辑的项目专属规则，右边并排放只读的通用规则和可派角色，让你看到主管实际读到的全貌。')}</div>`;
+};
+
+/* ---------- 全局 ---------- */
+V['g-tools'] = () => `<div class="page"><h2 class="pt">派工工具</h2><p class="pd">本机可用的执行者程序。停用后，模型池里属于它的模型都不会被选中。</p>
+  <div class="tbl"><table><tr><th style="width:50px"></th><th>工具</th><th>版本</th><th>MCP / 技能下发方式</th><th>状态</th></tr>
+  ${TOOLS.map(t=>`<tr><td><button class="sw ${t.on?'on':''}" data-act="swtoggle"></button></td><td><b>${t.id}</b></td><td>${t.ver}</td><td>${t.note}</td><td>${t.ver==='—'?'<span class="tag">未安装</span>':'<span class="tag ok">可用</span>'}</td></tr>`).join('')}</table></div>
+  <h2 class="pt" style="margin-top:20px">模型登记</h2><p class="pd">登记一次，各角色的模型池从这里挑。</p>
+  <div class="tbl"><table><tr><th style="width:50px"></th><th>短名</th><th>工具</th><th>用在哪些角色</th><th>最近 7 天</th><th></th></tr>
+  ${MODELS.map(m=>{const used=Object.entries(ROLES).filter(([k,r])=>r.pool.some(x=>x[0]===m.id)).map(([k,r])=>r.title);return `<tr><td><button class="sw ${m.on?'on':''}" data-act="swtoggle"></button></td><td><b>${m.id}</b></td><td>${m.tool}</td><td>${used.map(u=>`<span class="tag">${u}</span>`).join(' ')||'<span style="color:var(--faint)">未使用</span>'}</td><td>${m.jobs} 个作业 · 通过率 ${m.pass}%</td><td><span class="link" data-act="go" data-r="stats">看统计</span></td></tr>`}).join('')}</table></div>
+  <div class="row"><button class="btn" data-act="tip" data-msg="原型：从 pi / OpenCode 的配置里导入模型">从工具导入…</button><button class="btn" data-act="tip" data-msg="原型：手工登记一个模型">＋ 登记模型</button></div>
+  ${note('把原来「模型与角色」一页到底的长页面拆开：这里只管工具和模型的登记与启停；每个角色的模型池在角色页里配。')}</div>`;
+V['g-roles'] = () => `<div class="page"><h2 class="pt">全局角色</h2><p class="pd">所有项目都能用的岗位。项目可以在自己那一层覆盖任意字段或岗位说明书。</p>
+  <div class="tbl"><table><tr><th>角色</th><th>说明</th><th>模型池</th><th>运行方式</th><th>来源</th><th>被哪些项目覆盖</th></tr>
+  ${Object.entries(ROLES).filter(([k,r])=>!r.own).map(([k,r])=>`<tr><td><b>${r.title}</b><div style="color:var(--muted);font-size:12px">${k}</div></td><td>${esc(r.desc)}</td><td>${r.pool.map(x=>x[0]+' ×'+x[1]).join('<br>')}</td><td>${r.mode}</td>
+    <td><span class="src g">${k==='deployer'?'本机全局':'随工具发布'}</span></td><td>${k==='tester'?'<span class="tag acc">WMS_ZC_C2</span>':'<span style="color:var(--faint)">无</span>'}</td></tr>`).join('')}</table></div>
+  <button class="btn" data-act="tip" data-msg="原型：新建一个本机全局角色">＋ 新建全局角色</button>
+  ${note('「随工具发布」的角色不能删除，修改时写到本机全局这一层（~/.agent-dispatch/roles），升级工具不会被覆盖。')}</div>`;
+V['g-registry'] = () => `<div class="page"><h2 class="pt">MCP 登记</h2><p class="pd">在这里登记一次，再到各项目的「MCP」矩阵里决定谁启用。密码等敏感信息只存本机文件，界面上遮罩显示。</p>
+  <div class="tbl"><table><tr><th>名称</th><th>类型</th><th>命令 / 地址</th><th>导入自</th><th>全局默认启用</th></tr>
+  ${MCPS.map(m=>`<tr><td><b>${esc(m.id)}</b><div style="color:var(--muted);font-size:12px">${esc(m.desc)}</div></td><td>${m.type}</td><td style="font-family:var(--mono);font-size:12px">${esc(m.cmd)}</td><td style="font-size:12px;color:var(--muted)">${esc(m.from)}</td><td><button class="sw ${SCOPE.mcp.glob[m.id]?'on':''}" data-act="swtoggle"></button></td></tr>`).join('')}</table></div>
+  <div class="row" style="margin-bottom:22px"><button class="btn" data-act="import">从现有配置导入…</button><button class="btn" data-act="tip" data-msg="原型：手工登记一个 MCP 服务">＋ 登记 MCP</button></div>
+  <h2 class="pt">技能登记</h2><p class="pd">技能是一个带 SKILL.md 的目录；说明取自它的描述。</p>
+  <div class="tbl"><table><tr><th>名称</th><th>说明</th><th>目录</th><th>全局默认启用</th></tr>
+  ${SKILLS.map(s=>`<tr><td><b>${s.id}</b></td><td>${esc(s.desc)}</td><td style="font-family:var(--mono);font-size:12px">${esc(s.dir)}</td><td><button class="sw ${SCOPE.skill.glob[s.id]?'on':''}" data-act="swtoggle"></button></td></tr>`).join('')}</table></div>
+  <button class="btn" data-act="import">扫描技能目录…</button>
+  ${note('迁移第一步只做「导入 + 展示」：确认这里看到的和你手工配在工程里的一致之后，再逐个角色切换到由 agent-dispatch 下发，不会一次性替换现有配置。')}</div>`;
+V['g-prefs'] = () => { const sw=(k,t,d)=>`<tr><td style="width:50px"><button class="sw ${S.prefs[k]?'on':''}" data-act="pref" data-k="${k}"></button></td><td><b>${t}</b><div style="color:var(--muted);font-size:12px">${d}</div></td></tr>`;
+  return `<div class="page" style="max-width:760px"><h2 class="pt">通知</h2><p class="pd">点通知直接打开那个作业。</p>
+  <div class="tbl"><table>${sw('decide','待你决定','执行者或主管提出需要你决定的问题时')}${sw('failed','作业失败或意外中断','运行失败、超时、进程异常退出')}${sw('review','作业待审查','默认只在没有主管会话盯着时提醒')}${sw('tray','菜单栏显示待处理数量','图标上显示「待你决定」的数量，下拉列出最近要处理的事')}</table></div>
+  <h2 class="pt">服务</h2><p class="pd">客户端只是界面，关掉窗口不影响任何作业。</p>
+  <div class="tbl"><table><tr><td style="width:150px">服务地址</td><td><input type="text" value="http://127.0.0.1:8765" style="width:260px"></td></tr>
+    <tr><td>agent-dispatch 路径</td><td><input type="text" placeholder="留空则自动查找" style="width:260px"> <span style="color:var(--muted)">当前：~/.local/bin/agent-dispatch</span></td></tr>
+    ${sw('autostart','打开客户端时自动拉起服务','发现服务没在跑就执行 agent-dispatch web start')}</table></div>
+  <h2 class="pt">外观</h2>
+  <div class="row"><button class="btn ${!S.dark?'pri':''}" data-act="settheme" data-v="light">亮色</button><button class="btn ${S.dark?'pri':''}" data-act="settheme" data-v="dark">暗色</button><span style="color:var(--muted)">默认跟随系统</span></div></div>`;
+};
+
+/* ================= 弹层 ================= */
+const DLG = {
+  accept:{t:'验收',f:'验收备注（写复核依据）',ph:'例如：闸门通过；抽查 3 条用例的库存真值与报告一致',btn:'验收',c:'作业标为「已验收」并离开工作台；tmux 方式的作业同时释放通道。',req:false,to:'accepted'},
+  reply:{t:'返工 / 续派',f:'要求（原样发给执行者，它记得上下文）',ph:'例如：缺判定文件 verdict.json，补齐后重新报告',btn:'发送并续派',c:'在同一会话里开始下一轮。同一作业续派 3 轮仍未解决时建议停下来。',req:true,to:'running'},
+  reject:{t:'驳回',f:'驳回原因（必填）',ph:'例如：结论与证据文件对不上',btn:'驳回',c:'作业不再续派，通道释放。要重跑需另起一个名字。',req:true,to:'rejected',danger:true},
+  stop:{t:'叫停',f:'原因（可选）',ph:'',btn:'叫停',c:'立即终止执行者进程并释放通道，已做的改动留在工作目录里。',req:false,to:'stopped',danger:true},
+  redo:{t:'换名重派',f:'新作业名',ph:'',btn:'派出',c:'用同样的任务和角色新派一个作业；原作业标为已驳回。',req:true,to:'rejected'}
+};
+function openDlg(kind, id){ const d = DLG[kind];
+  $('#layer').innerHTML = `<div class="mask" data-act="close"><div class="dlg"><header>${d.t} · ${esc(id)}</header><div class="body">
+    <div class="conseq">后果：${d.c}</div>
+    <label class="f"><span>${d.f}</span>${kind==='redo'?`<input type="text" id="dv" value="${esc(id.replace(/-r?\d+$/,''))}-r2">`:`<textarea id="dv" rows="3" placeholder="${d.ph}"></textarea>`}</label></div>
+    <footer><button class="btn" data-act="close">取消</button><button class="btn ${d.danger?'danger':'pri'}" data-act="dlgok" data-kind="${kind}" data-id="${id}">${d.btn}</button></footer></div></div>`;
+  setTimeout(()=>$('#dv')&&$('#dv').focus(),30);
+}
+const D = {};
+function openDispatch(){
+  const p = proj()||PROJECTS[0];
+  Object.assign(D,{p:p.id, role:p.defRole, task:'', batch:(jobs()[0]||{}).batch||'', name:'', timeout:ROLES[p.defRole].timeout});
+  drawDispatch();
+}
+function pickModel(r){const sum=r.pool.reduce((a,x)=>a+x[1],0);return r.pool.map(x=>`${x[0]} ${Math.round(x[1]/sum*100)}%`).join(' / ')}
+function dPreview(){ const p=PROJECTS.find(x=>x.id===D.p), r=ROLES[D.role];
+  const name = D.name || `${D.role}-1004-1830`;
+  return briefText(briefOf(D.p,D.role),{作业名:name,角色:r.title,工程:(p.repos.find(x=>r.repos.split(' / ').includes(x.id))||p.repos[0]).name,任务:D.task||'（在左边写任务）',通道:D.role==='tester'?'pallet、box、pda':'无'});
+}
+function drawDispatch(){ const p=PROJECTS.find(x=>x.id===D.p), r=ROLES[D.role];
+  const batches=[...new Set(JOBS.filter(j=>j.p===D.p).map(j=>j.batch))];
+  const busy = D.role==='tester' && JOBS.some(j=>j.p===D.p&&j.st==='running'&&j.channels!=='—');
+  $('#layer').innerHTML = `<div class="mask" data-act="close"><div class="dlg wide"><header>派工<span style="margin-left:auto;font-weight:400;color:var(--muted)">绕过主管直接派一个作业</span></header>
+    <div class="body"><div class="dgrid"><div>
+      <label class="f"><span>① 项目</span><select data-chg="dproj">${PROJECTS.map(x=>`<option value="${x.id}" ${x.id===D.p?'selected':''}>${x.name}</option>`).join('')}</select></label>
+      <div style="color:var(--muted);font-size:12px;margin-bottom:3px">② 选角色</div>
+      <div class="rolecards">${p.roles.map(x=>`<div class="rc ${x===D.role?'on':''}" data-act="drole" data-id="${x}"><b>${ROLES[x].title}</b>
+        <small>负责 ${ROLES[x].repos} · ${ROLES[x].pool.map(m=>m[0]).join('、')} · ${ROLES[x].mode}</small></div>`).join('')}</div>
+      <label class="f"><span>③ 任务</span><textarea id="dtask" rows="4" placeholder="只写任务本身；身份、边界、报告格式由岗位说明书提供">${esc(D.task)}</textarea></label>
+      <div class="row"><label class="f" style="flex:1"><span>批次</span><select>${batches.map(b=>`<option>${b}（最近使用）</option>`).join('')}<option>新建批次…</option></select></label>
+        <label class="f" style="flex:1"><span>作业名（可改）</span><input type="text" id="dname" value="${esc(D.name)}" placeholder="${D.role}-1004-1830"></label></div>
+      <details><summary style="cursor:pointer;color:var(--muted)">高级</summary><div class="row" style="margin-top:8px">
+        <label class="f"><span>通道</span><select><option>${D.role==='tester'?'全部':'无'}</option></select></label>
+        <label class="f"><span>运行方式</span><select><option>跟随角色（${r.mode}）</option><option>headless</option><option>tmux</option></select></label>
+        <label class="f"><span>单轮超时（分）</span><input type="number" value="${r.timeout}" style="width:90px"></label></div></details>
+    </div><div><div style="color:var(--muted);font-size:12px;margin-bottom:4px">派工单预览（执行者实际收到的内容）</div><pre class="doc" id="dprev" style="max-height:440px">${esc(dPreview())}</pre></div></div></div>
+    <footer><span class="info">通道检查：${busy?'<span style="color:var(--warn)">pallet、box、pda 正被 move-repro-r5 占用，派出后会排队</span>':'<span style="color:var(--ok)">全部空闲</span>'} · 模型：按比例选 ${pickModel(r)}</span>
+      <button class="btn" data-act="close">取消</button><button class="btn pri" data-act="dgo">派出</button></footer></div></div>`;
+}
+function openPalette(){
+  $('#layer').innerHTML = `<div class="mask" data-act="close" style="align-items:flex-start;padding-top:14vh"><div class="dlg pal"><input id="pq" type="text" placeholder="搜索作业名、任务、批次…（全部项目）"><div class="res" id="pres"></div></div></div>`;
+  const draw=()=>{const q=$('#pq').value.trim();$('#pres').innerHTML=JOBS.filter(j=>!q||(j.id+j.task+j.batch).includes(q)).slice(0,8).map(j=>`<div class="item" data-act="tojob" data-id="${j.id}"><div class="r1"><b>${esc(j.id)}</b>${tag(j)}</div><div class="r2">${esc(pname(j.p))} · ${esc(j.task)}</div></div>`).join('')||'<div class="empty">没有找到</div>'};
+  $('#pq').addEventListener('input',draw); draw(); $('#pq').focus();
+}
+function openImport(){
+  $('#layer').innerHTML = `<div class="mask" data-act="close"><div class="dlg" style="width:620px"><header>从现有配置导入</header><div class="body">
+    <div class="conseq">只读取、不修改这些文件。导入后在登记表里出现，默认不启用。</div>
+    <div class="tbl"><table><tr><th style="width:36px"></th><th>位置</th><th>发现</th></tr>
+    ${[['~/.pi/agent/mcp.json','3 个 MCP（已登记 3）'],['Zc_Wms_Test_V2/.pi/mcp.json','7 个 MCP（已登记 7）'],['Zc_Wms_Test_V2/opencode.json','7 个 MCP（与上一项同名，合并）'],['~/.claude/skills','12 个技能（新 10）'],['~/.cc-switch/skills','4 个技能（新 2）'],['Zc_Wms_Test_V2/.agents/skills','2 个技能（已登记 2）']]
+      .map(r=>`<tr><td><input type="checkbox" checked></td><td style="font-family:var(--mono);font-size:12px">${r[0]}</td><td>${r[1]}</td></tr>`).join('')}</table></div></div>
+    <footer><button class="btn" data-act="close">取消</button><button class="btn pri" data-act="close" data-toast="已导入 12 项（原型）">导入选中项</button></footer></div></div>`;
+}
+function openField(k,label,v){
+  $('#layer').innerHTML = `<div class="mask" data-act="close"><div class="dlg"><header>${esc(label)} · 为本项目单独配置</header><div class="body">
+    <div class="conseq">写到本项目这一层，不影响其它项目；随时可以「恢复继承」回到全局的值。</div>
+    <label class="f"><span>${esc(label)}</span><input type="text" id="fv" value="${esc(v)}"></label></div>
+    <footer><button class="btn" data-act="close">取消</button><button class="btn pri" data-act="fsave" data-k="${k}">保存</button></footer></div></div>`;
+  setTimeout(()=>$('#fv').select(),30);
+}
+const closeLayer = () => $('#layer').innerHTML='';
+
+/* ================= 渲染与事件 ================= */
+function render(){
+  document.documentElement.dataset.theme = S.dark?'dark':'light';
+  if(S.proj==='all' && S.route.startsWith('p-')) S.route='inbox';
+  renderSide(); renderTop(); $('#view').innerHTML = V[S.route]();
+}
+function setJob(id, st, dec){ const j=JOBS.find(x=>x.id===id); j.st=st; if(dec) j.decisions.push(['刚刚','你',...dec]);
+  if(st==='running'){j.turn++; j.now='收到续派内容，继续执行…'; j.dur='0 分'; j.status=null}
+}
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-act]');
+  if(!el){ if(S.menu){S.menu=false;renderSide()} return; }
+  const a = el.dataset.act, d = el.dataset;
+  if(a==='close'){ if(e.target!==el && !el.matches('button')) return; if(d.toast) toast(d.toast); return closeLayer(); }
+  if(a==='menu'){S.menu=!S.menu; return renderSide()}
+  if(a==='proj'){S.proj=d.id; S.menu=false; S.sel=null; return render()}
+  if(a==='newproj'){S.menu=false; renderSide(); return toast('原型：弹出新建项目表单（ID、显示名、工程目录）')}
+  if(a==='go'){S.route=d.r; S.menu=false; return render()}
+  if(a==='sel'){S.sel=d.id; S.tab='log'; return render()}
+  if(a==='tab'){S.tab=d.k; return render()}
+  if(a==='fst'){S.jf.st=d.v; return render()}
+  if(a==='batch'){S.batch=d.id; return render()}
+  if(a==='tobatch'){S.batch=d.id; S.route='batches'; return render()}
+  if(a==='tojob'){const j=JOBS.find(x=>x.id===d.id); closeLayer(); if(S.proj!=='all'&&S.proj!==j.p) S.proj=j.p; S.route='jobs'; S.jf={st:'',role:'',q:''}; S.sel=d.id; return render()}
+  if(a==='stat'){S.stat=d.k; return render()}
+  if(a==='role'){S.role=d.id; return render()}
+  if(a==='rtab'){S.rtab=d.k; return render()}
+  if(a==='theme'){S.dark=!S.dark; return render()}
+  if(a==='settheme'){S.dark=d.v==='dark'; return render()}
+  if(a==='notes'){S.notes=!S.notes; return render()}
+  if(a==='tip') return toast(d.msg);
+  if(a==='swtoggle') return el.classList.toggle('on');
+  if(a==='pref'){S.prefs[d.k]=!S.prefs[d.k]; return render()}
+  if(a==='dispatch') return openDispatch();
+  if(a==='palette') return openPalette();
+  if(a==='import') return openImport();
+  if(a==='dlg') return openDlg(d.kind, d.id);
+  if(a==='dlgok'){ const k=d.kind, v=$('#dv').value.trim(), c=DLG[k];
+    if(c.req && !v){ $('#dv').style.borderColor='var(--bad)'; return toast('这一项必填'); }
+    setJob(d.id, c.to, [c.t, v||'—']);
+    if(k==='redo'){ const o=JOBS.find(x=>x.id===d.id); JOBS.unshift(J({...o,id:v,st:'running',status:null,now:'刚派出，正在读派工单',dur:'0 分',ago:'刚刚',decisions:[],reason:null})); S.sel=v; }
+    closeLayer(); render(); return toast(k==='redo'?`已派出 ${v}`:`${d.id} 已${c.t}`); }
+  if(a==='answer'){ const v=$('#ans').value.trim(); if(!v){$('#ans').style.borderColor='var(--bad)';return toast('先写答复')} setJob(d.id,'running',['答复并续派',v]); render(); return toast('答复已发给执行者，作业继续运行'); }
+  if(a==='markdone'){ setJob(d.id,'review',['标记已处理','—']); render(); return toast('已标记为已处理，作业转入待审查'); }
+  if(a==='gate'){ JOBS.find(x=>x.id===d.id).gate='pass'; render(); return toast('闸门通过：进程正常结束、结论含 STATUS'); }
+  if(a==='cell'){ if(d.col==='_g') return toast('全局默认在「全局 → MCP 与技能登记」里改');
+    const mx=SCOPE[d.kind].mx[S.proj]=SCOPE[d.kind].mx[S.proj]||{}, c=mx[d.col]=mx[d.col]||{}, cur=c[d.id];
+    if(!cur) c[d.id]='on'; else if(cur==='on') c[d.id]='off'; else delete c[d.id]; return render(); }
+  if(a==='fedit') return openField(d.k, d.label, d.v);
+  if(a==='fsave'){ S.over[S.proj+'/'+S.role+'/'+d.k]=$('#fv').value; closeLayer(); render(); return toast('已保存到本项目这一层'); }
+  if(a==='freset'){ S.over[S.proj+'/'+S.role+'/'+d.k]=null; render(); return toast('已恢复继承全局的值'); }
+  if(a==='bsave'){ S.briefs[S.proj+'/'+S.role]=$('#brief').value; render(); return toast('岗位说明书已保存'); }
+  if(a==='breset'){ delete S.briefs[S.proj+'/'+S.role]; render(); return toast('已恢复继承全局的岗位说明书'); }
+  if(a==='bvar'){ const t=$('#brief'), s=t.selectionStart; t.value=t.value.slice(0,s)+'{{'+d.v+'}}'+t.value.slice(t.selectionEnd); t.focus(); t.dispatchEvent(new Event('input',{bubbles:true})); return; }
+  if(a==='drole'){ D.task=$('#dtask').value; D.name=$('#dname').value; D.role=d.id; return drawDispatch(); }
+  if(a==='dgo'){ const task=$('#dtask').value.trim(); if(!task){$('#dtask').style.borderColor='var(--bad)';return toast('先写任务')}
+    const p=PROJECTS.find(x=>x.id===D.p), r=ROLES[D.role], name=$('#dname').value.trim()||`${D.role}-1004-1830`;
+    JOBS.unshift(J({id:name,p:D.p,repo:(p.repos.find(x=>r.repos.split(' / ').includes(x.id))||p.repos[0]).name,role:D.role,batch:D.batch||'adhoc',model:r.pool[0][0],st:'running',status:null,dur:'0 分',ago:'刚刚',mode:r.mode,task,now:'刚派出，正在读派工单'}));
+    closeLayer(); S.proj=D.p; S.route='inbox'; S.sel=name; render(); return toast(`已派出 ${name}`); }
+});
+document.addEventListener('change', e => { const k=e.target.dataset.chg;
+  if(k==='frole'){S.jf.role=e.target.value; render()}
+  if(k==='dproj'){D.task=$('#dtask').value; D.p=e.target.value; D.role=PROJECTS.find(x=>x.id===D.p).defRole; drawDispatch()}
+});
+document.addEventListener('input', e => {
+  if(e.target.id==='dtask'||e.target.id==='dname'){ D.task=$('#dtask').value; D.name=$('#dname').value; $('#dprev').textContent=dPreview(); }
+  if(e.target.id==='brief'){ const pv=$('#bprev'); pv.textContent=briefText(e.target.value, JSON.parse(pv.dataset.vars)); }
+});
+document.addEventListener('keydown', e => {
+  if(e.key==='Escape') return closeLayer();
+  const mod = e.metaKey||e.ctrlKey; if(!mod) return;
+  if(e.key==='k'){e.preventDefault(); openPalette()}
+  if(e.key==='j'){e.preventDefault(); openDispatch()}
+  const i='1234'.indexOf(e.key); if(i>=0 && e.key.length===1){e.preventDefault(); S.route=NAV[i][0]; render()}
+});
+render();
+</script>
+</body>
+</html>
