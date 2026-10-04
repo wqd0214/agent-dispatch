@@ -55,6 +55,30 @@ agent-dispatch roles -P c2         # 这个项目可派的角色；roles show te
 
 解析顺序：全局角色 → 项目的 `defaults` → 项目角色，后者逐项覆盖前者。同一个工程的通道由该工程的所有角色共用。
 
+## 模型、模型池与派工工具
+
+派工只认角色，模型由角色的**模型池**按比例自动选择，主管不用也不能指定。
+
+```bash
+agent-dispatch models import                    # 把本机 pi 和 OpenCode 的模型都登记进来（短名如 pi:glm-5.3、oc:glm-5）
+agent-dispatch models                           # 登记表：状态、用在哪些角色
+agent-dispatch roles pool tester -P c2 pi:glm-5.3=70 oc:glm-5=30   # 项目角色的模型池：按 7:3
+agent-dispatch roles pool tester --global pi:glm-5.3=1             # 全局角色的模型池：项目里没单独配置的都沿用它
+agent-dispatch models disable oc:glm-5          # 停用某个模型：所有模型池自动跳过它
+agent-dispatch backends disable opencode        # 停用某个派工工具：新派工不再用它
+```
+
+- **配比**按「项目 + 角色」的派工历史严格执行：每次选「目标占比 × (已派数 + 1) − 已派数」最大的那个，长期严格贴合比例。
+- **配置了模型池的角色**，派工时传 `--model` 或 `--backend` 会被拒绝；没配模型池的角色仍按角色里写的模型或后端默认模型。
+- **服务商报错**（额度用尽、限流、鉴权、计费）时，该模型自动暂停一段时间（默认 30 分钟，`models.json` 的 `cooldown_min`）。
+  如果是作业第 1 轮、还没执行过任何操作，自动换池里另一个模型重新派出；已经动过手的不自动重派，以免重复操作，交给主管决定。
+- **派工工具停用后**：不走模型池的派工直接被拒；模型池里属于它的模型被跳过；进行中的作业不受影响，续派仍可进行。
+- 以上都可以在网页的「模型与角色」页操作：派工工具开关、各角色（全局与各项目）的模型池和实际配比、模型登记表与使用统计。
+  网页的写操作只接受本机页面发出的请求。
+
+配置文件：`~/.agent-dispatch/models.json`（登记表）、`model-health.json`（暂停记录）、`settings.json`（派工工具开关）。
+全局角色的模型池写在 `~/.agent-dispatch/roles/<角色>.json`，不改随工具发布的文件。
+
 ## 快速开始
 
 ```bash
@@ -102,7 +126,7 @@ agent-dispatch start demo --cwd ~/some/repo -b pi "把 README 里的错别字改
 agent-dispatch log <作业> -f          # 实时输出（工具调用、回复）
 agent-dispatch history <作业> --full  # 逐步的工具入参与返回
 agent-dispatch attach <作业>          # tmux 方式：接进界面，可直接打字；Ctrl-b d 退出，不影响作业
-agent-dispatch web start --open       # 只读网页总览，后台运行并打开浏览器；web stop 停止，web status 查看
+agent-dispatch web start --open       # 网页总览，后台运行并打开浏览器；web stop 停止，web status 查看
 agent-dispatch web                    # 同上，但在前台运行（Ctrl-C 关闭）
 agent-dispatch status --watch         # 终端里的总览
 
@@ -111,7 +135,7 @@ agent-dispatch reply <作业> "…"       # 在同一会话里续派
 agent-dispatch take <作业>            # 人工接手：主管不再往里派；用完 release
 ```
 
-网页是只读的旁观者，关掉不影响任何作业。它按批次列出作业、通道占用、等你决定的事项，
+网页的作业部分是只读的旁观者，「模型与角色」页可以修改配置；关掉网页不影响任何作业。它按批次列出作业、通道占用、等你决定的事项，
 并把各作业 run 目录里的 `verdicts.json` 汇总成用例判定表。
 
 作业按「项目 → 工程 → 批次」归类，网页顶部可以逐级筛选，选中项目后还会列出它的角色。

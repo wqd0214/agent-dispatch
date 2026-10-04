@@ -127,16 +127,23 @@ def model_page():
                            "avg_seconds": int(st["seconds"] / st["settled"]) if st["settled"] else None,
                            "provider_failures": provider_failures.get(alias, 0)})
     model_rows.sort(key=lambda m: (not m["used_by"], not m["enabled"], m["backend"], m["alias"]))
-    roles = []
+    def role_row(project, role, counts):
+        return {"project": project["id"] if project else "", "project_name": project["name"] if project else "全局角色",
+                "role": role["role"], "title": role["title"], "repos": role["repos"], "pool": role.get("model_pool") or [],
+                "pool_source": role.get("pool_source"), "usage": counts,
+                "fallback": role.get("model") or (role.get("models") or {}).get(role.get("backend") or "")
+                or f"{role.get('backend') or '-'} 的默认模型"}
+
+    roles = [role_row(None, role, models.usage("", role["role"], any_project=True)) for role in definitions.list_roles(None)]
     for project in definitions.list_projects():
-        for role in definitions.list_roles(project):
-            counts = models.usage(project["id"], role["role"])
-            roles.append({"project": project["id"], "project_name": project["name"], "role": role["role"], "title": role["title"],
-                          "repos": role["repos"], "pool": role.get("model_pool") or [], "usage": counts,
-                          "fallback": role.get("model") or (role.get("models") or {}).get(role.get("backend") or "")
-                          or f"{role.get('backend') or '-'} 的默认模型"})
+        roles += [role_row(project, role, models.usage(project["id"], role["role"])) for role in definitions.list_roles(project)]
+    tools = [{"name": name, "enabled": backends.enabled(name), "default_model": backend.get("default_model"),
+              "models": sum(1 for m in registry["models"].values() if m["backend"] == name)}
+             for name, backend in sorted(backends.load_all().items())]
+    for row in model_rows:
+        row["backend_enabled"] = backends.enabled(row["backend"])
     return {"cooldown_min": registry["cooldown_min"], "models": model_rows, "roles": roles,
-            "backends": sorted(backends.load_all())}
+            "backends": [t["name"] for t in tools], "tools": tools}
 
 
 def list_run_files(run_dir):
@@ -260,8 +267,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[:2] == ["api", "models"]:
                 models.update(parts[2], enabled=data.get("enabled"), note=data.get("note"))
                 return self.send_json({"ok": True})
+            if len(parts) == 3 and parts[:2] == ["api", "backends"]:
+                backends.set_enabled(parts[2], bool(data.get("enabled")))
+                return self.send_json({"ok": True})
             if parts == ["api", "pools"]:
-                project = definitions.load_project(data.get("project", ""))
+                project = definitions.load_project(data["project"]) if data.get("project") else None
                 pool = data.get("pool") or []
                 definitions.set_pool(project, data.get("role", ""), pool or None)
                 return self.send_json({"ok": True})

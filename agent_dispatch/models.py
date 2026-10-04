@@ -192,7 +192,7 @@ def all_pools():
             out.append(("", role["role"], role["model_pool"]))
     for project in definitions.list_projects():
         for role in definitions.list_roles(project):
-            if role.get("model_pool") and role["scope"] != "全局":
+            if role.get("pool_source") == "项目":
                 out.append((project["id"], role["role"], role["model_pool"]))
     return out
 
@@ -213,11 +213,12 @@ def check_pool(pool):
         seen.add(alias)
 
 
-def usage(project_id, role_id):
-    """这个角色历史上每个模型派过多少个作业（自动换模型前的尝试也算，它确实占用了那个模型）。"""
+def usage(project_id, role_id, any_project=False):
+    """这个角色历史上每个模型派过多少个作业（自动换模型前的尝试也算，它确实占用了那个模型）。
+    配比按「项目 + 角色」分别保持；any_project=True 时汇总所有项目（网页上看全局角色用）。"""
     counts = {}
     for job in store.all_jobs():
-        if job.get("role") != role_id or (job.get("project_id") or "") != (project_id or ""):
+        if job.get("role") != role_id or (not any_project and (job.get("project_id") or "") != (project_id or "")):
             continue
         for attempt in job.get("model_attempts") or []:
             counts[attempt["model"]] = counts.get(attempt["model"], 0) + 1
@@ -239,6 +240,8 @@ def candidates(pool, exclude=()):
             skipped[alias] = "不在登记表里"
         elif not model.get("enabled", True):
             skipped[alias] = "已停用"
+        elif not backends.enabled(model["backend"]):
+            skipped[alias] = f"派工工具 {model['backend']} 已停用"
         elif alias in paused:
             skipped[alias] = f"暂停中（{paused[alias]['reason'][:60]}）"
         else:

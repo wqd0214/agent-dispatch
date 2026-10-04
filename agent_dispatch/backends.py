@@ -30,6 +30,37 @@ def load_all():
         return json.load(f)
 
 
+def settings_path():
+    from . import store
+    return os.path.join(store.HOME, "settings.json")
+
+
+def _settings():
+    try:
+        with open(settings_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def enabled(name):
+    """派工工具（后端）是否可用。没配置过的默认可用。"""
+    return (_settings().get("backends") or {}).get(name, {}).get("enabled", True)
+
+
+def set_enabled(name, flag):
+    from . import store
+    get(name)
+    data = _settings()
+    data.setdefault("backends", {}).setdefault(name, {})["enabled"] = bool(flag)
+    store.write_text(settings_path(), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def require_enabled(name):
+    if not enabled(name):
+        raise DispatchError(f"派工工具 {name} 已停用，不能用它派工。启用：网页「模型与角色」，或 agent-dispatch backends enable {name}")
+
+
 def get(name):
     backends = load_all()
     if name not in backends:

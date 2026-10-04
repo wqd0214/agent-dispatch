@@ -22,7 +22,9 @@ from . import backends, store
 from .store import DispatchError
 
 PROJECTS_DIR = os.path.join(store.HOME, "projects")
-GLOBAL_ROLE_DIRS = [os.path.join(store.HOME, "roles"), os.path.join(backends.ROOT, "roles")]
+LOCAL_ROLE_DIR = os.path.join(store.HOME, "roles")         # 本机的全局角色，或对随工具发布的角色的覆盖
+SHIPPED_ROLE_DIR = os.path.join(backends.ROOT, "roles")    # 随工具发布的全局角色
+GLOBAL_ROLE_DIRS = [LOCAL_ROLE_DIR, SHIPPED_ROLE_DIR]
 
 
 def _read_json(path):
@@ -156,8 +158,17 @@ def _role_ids(dirs):
     return ids
 
 
+def _global_role(role_id):
+    """全局角色 = 随工具发布的定义，再叠加本机 ~/.agent-dispatch/roles 里的同名覆盖。"""
+    shipped, shipped_brief = _find_role([SHIPPED_ROLE_DIR], role_id)
+    local, local_brief = _find_role([LOCAL_ROLE_DIR], role_id)
+    if shipped is None and local is None:
+        return None, None
+    return {**(shipped or {}), **(local or {})}, local_brief or shipped_brief
+
+
 def _merged_role(project, role_id):
-    global_role, global_brief = _find_role(GLOBAL_ROLE_DIRS, role_id)
+    global_role, global_brief = _global_role(role_id)
     project_role, project_brief = _find_role(_project_role_dirs(project), role_id)
     if global_role is None and project_role is None:
         return None
@@ -165,7 +176,8 @@ def _merged_role(project, role_id):
     merged.pop("brief_template", None)
     repos = merged.pop("repos", None) or ([merged["repo"]] if merged.get("repo") else [])
     merged.pop("repo", None)
-    merged.update(role=role_id, title=merged.get("title") or role_id, repos=repos,
+    pool_source = "项目" if (project_role or {}).get("model_pool") else ("全局" if (global_role or {}).get("model_pool") else None)
+    merged.update(role=role_id, title=merged.get("title") or role_id, repos=repos, pool_source=pool_source,
                   _brief_path=project_brief or global_brief,
                   scope="全局" if project_role is None else ("项目覆盖全局" if global_role else "项目专属"))
     return merged
@@ -265,7 +277,7 @@ QUESTION: 仅 BLOCKED / NEEDS_DECISION 时填写
 
 def add_role(role_id, project=None, title=None, description=None, repos=None, backend=None, mode=None):
     store.check_name(role_id)
-    directory = _project_role_dirs(project)[0] if project else GLOBAL_ROLE_DIRS[0]
+    directory = _project_role_dirs(project)[0] if project else LOCAL_ROLE_DIR
     path = os.path.join(directory, f"{role_id}.json")
     if os.path.exists(path):
         raise DispatchError(f"角色已存在：{path}")
@@ -284,7 +296,8 @@ def add_role(role_id, project=None, title=None, description=None, repos=None, ba
         data["backend"] = backend
     if mode:
         data["mode"] = mode
-    inherits = project is not None and _find_role(GLOBAL_ROLE_DIRS, role_id)[0] is not None
+    base = _global_role(role_id)[0] if project else _find_role([SHIPPED_ROLE_DIR], role_id)[0]
+    inherits = base is not None
     if not inherits:  # 全新角色给一套完整的起点；覆盖全局角色时只写要改的项
         data = {"title": title or role_id, "description": description or "（一句话说明这个角色做什么）",
                 "backend": "opencode", "mode": "headless", "channels": "none", "timeout_min": 60,
@@ -296,14 +309,14 @@ def add_role(role_id, project=None, title=None, description=None, repos=None, ba
 
 
 def set_pool(project, role_ref, pool):
-    """把模型池写进项目的角色定义（没有项目角色文件时建一个只含覆盖项的）。pool 为空表示去掉模型池。"""
+    """写模型池。project 为 None 时写全局角色（~/.agent-dispatch/roles，不改随工具发布的文件）；
+    否则写项目的角色定义。没有对应文件时建一个只含覆盖项的。pool 为空表示去掉这一层的模型池。"""
     from . import models
-    if not project:
-        raise DispatchError("模型池要配置在项目的角色上：加 --project，或在项目的工程目录里执行")
     role_id = find_role_id(project, role_ref)
     if pool:
         models.check_pool(pool)
-    path = os.path.join(_project_role_dirs(project)[0], f"{role_id}.json")
+    directory = _project_role_dirs(project)[0] if project else LOCAL_ROLE_DIR
+    path = os.path.join(directory, f"{role_id}.json")
     data = _read_json(path) or {}
     if pool:
         data["model_pool"] = [{"model": e["model"], "weight": e["weight"]} for e in pool]
@@ -313,4 +326,3 @@ def set_pool(project, role_ref, pool):
         data.pop("model_pool", None)
     _write_json(path, data)
     return path
-

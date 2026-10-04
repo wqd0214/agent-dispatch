@@ -305,9 +305,40 @@ async function loadModels() {
   const data = await api('/api/models');
   renderModels(data);
 }
+let modelFilter = {text: '', backend: '', used: false};
+function modelRow(m) {
+  const note = h('input', {class: 'field', value: m.note, placeholder: '备注', style: 'width:120px'});
+  note.addEventListener('change', () => act(() => send('POST', '/api/models/' + encodeURIComponent(m.alias), {note: note.value}), '备注已保存'));
+  const state = !m.enabled ? chip('停用') : !m.backend_enabled ? chip(m.backend + ' 已停用', 'red') : m.paused ? chip('暂停中', 'amber') : chip('可用', 'green');
+  return h('tr', {},
+    h('td', {}, h('b', {}, m.alias), h('div', {class: 'small muted'}, m.id)), h('td', {class: 'small'}, m.backend),
+    h('td', {class: 'nowrap'}, state, m.paused ? h('div', {class: 'small muted', title: m.paused.reason}, `至 ${new Date(m.paused.until * 1000).toLocaleTimeString()}`) : null),
+    h('td', {class: 'small'}, m.used_by.length ? m.used_by.map(u => `${u.project || '全局'}:${u.role}=${u.weight}`).join('、') : h('span', {class: 'muted'}, '-')),
+    h('td', {}, m.jobs || h('span', {class: 'muted'}, '0')), h('td', {}, pct(m.pass, m.settled)), h('td', {class: 'nowrap'}, duration(m.avg_seconds)),
+    h('td', {}, m.provider_failures ? chip(m.provider_failures, 'red') : h('span', {class: 'muted'}, '0')), h('td', {}, note),
+    h('td', {class: 'nowrap'},
+      m.paused ? h('button', {class: 'btn small', onclick: () => act(() => send('POST', `/api/models/${encodeURIComponent(m.alias)}/resume`), '已恢复')}, '恢复') : null, ' ',
+      h('button', {class: 'btn small', onclick: () => act(() => send('POST', '/api/models/' + encodeURIComponent(m.alias), {enabled: !m.enabled}), m.enabled ? '已停用' : '已启用')}, m.enabled ? '停用' : '启用'), ' ',
+      h('button', {class: 'btn small danger', onclick: () => confirm(`从登记表删除 ${m.alias}？`) && act(() => send('DELETE', '/api/models/' + encodeURIComponent(m.alias)), '已删除')}, '删除')));
+}
 function renderModels(data) {
   const nodes = [];
   const enabledModels = data.models.filter(m => m.enabled);
+  // 派工工具开关
+  nodes.push(h('h2', {}, '派工工具', h('small', {}, '停用后：新派工不会再用它，模型池里属于它的模型自动跳过；进行中的作业不受影响')),
+    h('div', {class: 'panel'}, h('table', {}, h('thead', {}, h('tr', {}, ['工具', '状态', '默认模型', '登记的模型', ''].map(x => h('th', {}, x)))),
+      h('tbody', {}, data.tools.map(t => h('tr', {}, h('td', {}, h('b', {}, t.name)), h('td', {}, t.enabled ? chip('可用', 'green') : chip('已停用', 'red')),
+        h('td', {class: 'small'}, h('code', {}, t.default_model || '-')), h('td', {}, t.models),
+        h('td', {}, h('button', {class: 'btn small' + (t.enabled ? ' danger' : ''), onclick: () => act(() => send('POST', '/api/backends/' + encodeURIComponent(t.name), {enabled: !t.enabled}), t.enabled ? `已停用 ${t.name}` : `已启用 ${t.name}`)}, t.enabled ? '停用' : '启用'))))))));
+  // 角色的模型池
+  nodes.push(h('h2', {}, '角色的模型池', h('small', {}, '派工只认角色：按比例从池子里选模型，历史上严格贴合比例；停用或暂停的模型自动跳过。项目里没配模型池的角色沿用全局角色的')));
+  const projects = [...new Set(data.roles.map(r => r.project))];
+  if (!projects.length) nodes.push(h('div', {class: 'panel empty'}, '还没有定义角色。'));
+  for (const pid of projects) {
+    const roles = data.roles.filter(r => r.project === pid);
+    nodes.push(h('h2', {class: 'project'}, roles[0].project_name, h('small', {}, pid ? `（${pid}）` : '（所有项目共用，项目可以覆盖）')),
+      h('div', {class: 'panel'}, roles.map(r => roleCard(r, enabledModels, data.models))));
+  }
   // 模型登记表
   const form = {alias: h('input', {class: 'field', placeholder: '短名，如 pi:glm-flash'}), backend: h('select', {class: 'field'}, data.backends.map(b => h('option', {value: b}, b))),
     id: h('input', {class: 'field', placeholder: '后端里的模型 ID，如 provider/model', style: 'min-width:280px'}), note: h('input', {class: 'field', placeholder: '备注（可选）'})};
@@ -317,31 +348,26 @@ function renderModels(data) {
       h('span', {class: 'muted small'}, '或手动添加：'), form.alias, form.backend, form.id, form.note,
       h('button', {class: 'btn', onclick: () => act(() => send('POST', '/api/models', {alias: form.alias.value, backend: form.backend.value, id: form.id.value, note: form.note.value}), '已添加')}, '添加')));
   if (!data.models.length) nodes.push(h('div', {class: 'panel empty'}, '还没有登记模型。点「从 pi / OpenCode 导入」把本机可用的模型都登记进来。'));
-  else nodes.push(h('div', {class: 'panel'}, h('table', {}, h('thead', {}, h('tr', {}, ['短名', '后端', '模型 ID', '状态', '用在哪些角色', '作业', '通过率', '平均耗时', '服务商报错', '备注', ''].map(x => h('th', {}, x)))),
-    h('tbody', {}, data.models.map(m => {
-      const note = h('input', {class: 'field', value: m.note, placeholder: '备注', style: 'width:140px'});
-      note.addEventListener('change', () => act(() => send('POST', '/api/models/' + encodeURIComponent(m.alias), {note: note.value}), '备注已保存'));
-      const state = !m.enabled ? chip('停用') : m.paused ? chip('暂停中', 'amber') : chip('可用', 'green');
-      return h('tr', {},
-        h('td', {class: 'nowrap'}, h('b', {}, m.alias)), h('td', {class: 'small'}, m.backend), h('td', {class: 'small'}, h('code', {}, m.id)),
-        h('td', {class: 'nowrap'}, state, m.paused ? h('div', {class: 'small muted', title: m.paused.reason}, `至 ${new Date(m.paused.until * 1000).toLocaleTimeString()} · ${m.paused.reason.slice(0, 30)}`) : null),
-        h('td', {class: 'small'}, m.used_by.length ? m.used_by.map(u => `${u.project}:${u.role}=${u.weight}`).join('、') : h('span', {class: 'muted'}, '-')),
-        h('td', {}, m.jobs || h('span', {class: 'muted'}, '0')), h('td', {}, pct(m.pass, m.settled)), h('td', {class: 'nowrap'}, duration(m.avg_seconds)),
-        h('td', {}, m.provider_failures ? chip(m.provider_failures, 'red') : h('span', {class: 'muted'}, '0')), h('td', {}, note),
-        h('td', {class: 'nowrap'},
-          m.paused ? h('button', {class: 'btn small', onclick: () => act(() => send('POST', `/api/models/${encodeURIComponent(m.alias)}/resume`), '已恢复')}, '恢复') : null, ' ',
-          h('button', {class: 'btn small', onclick: () => act(() => send('POST', '/api/models/' + encodeURIComponent(m.alias), {enabled: !m.enabled}), m.enabled ? '已停用' : '已启用')}, m.enabled ? '停用' : '启用'), ' ',
-          h('button', {class: 'btn small danger', onclick: () => confirm(`从登记表删除 ${m.alias}？`) && act(() => send('DELETE', '/api/models/' + encodeURIComponent(m.alias)), '已删除')}, '删除')));
-    })))));
-
-  // 角色的模型池
-  nodes.push(h('h2', {}, '角色的模型池', h('small', {}, '派工只认角色：按比例从池子里选模型，历史上严格贴合比例；停用或暂停的模型自动跳过')));
-  const projects = [...new Set(data.roles.map(r => r.project))];
-  if (!projects.length) nodes.push(h('div', {class: 'panel empty'}, '还没有定义项目和角色。'));
-  for (const pid of projects) {
-    const roles = data.roles.filter(r => r.project === pid);
-    nodes.push(h('h2', {class: 'project'}, roles[0].project_name, h('small', {}, `（${pid}）`)), h('div', {class: 'panel'}, roles.map(r => roleCard(r, enabledModels, data.models))));
+  else {
+    const search = h('input', {class: 'field', placeholder: '搜索短名、模型 ID、备注', value: modelFilter.text, style: 'min-width:240px'});
+    const backendSel = h('select', {class: 'field'}, h('option', {value: ''}, '全部工具'), data.backends.map(b => h('option', {value: b, selected: modelFilter.backend === b ? 'selected' : null}, b)));
+    const usedOnly = h('input', {type: 'checkbox', checked: modelFilter.used ? 'checked' : null});
+    const tableBox = h('div', {class: 'panel', style: 'overflow-x:auto'});
+    const draw = () => {
+      modelFilter.text = search.value.trim().toLowerCase(); modelFilter.backend = backendSel.value; modelFilter.used = usedOnly.checked;
+      const list = data.models.filter(m => (!modelFilter.backend || m.backend === modelFilter.backend)
+        && (!modelFilter.used || m.used_by.length || m.jobs)
+        && (!modelFilter.text || (m.alias + ' ' + m.id + ' ' + m.note).toLowerCase().includes(modelFilter.text)));
+      tableBox.replaceChildren(h('table', {}, h('thead', {}, h('tr', {}, ['模型', '工具', '状态', '用在哪些角色', '作业', '通过率', '平均耗时', '服务商报错', '备注', ''].map(x => h('th', {}, x)))),
+        h('tbody', {}, list.length ? list.map(modelRow) : h('tr', {}, h('td', {colspan: '10', class: 'empty'}, '没有符合条件的模型')))));
+      counter.textContent = `显示 ${list.length} / ${data.models.length}`;
+    };
+    const counter = h('span', {class: 'muted small'});
+    search.addEventListener('input', draw); backendSel.addEventListener('change', draw); usedOnly.addEventListener('change', draw);
+    nodes.push(h('div', {class: 'toolbar'}, search, backendSel, h('label', {class: 'small'}, usedOnly, ' 只看用在角色里或派过工的'), counter), tableBox);
+    draw();
   }
+
   main.replaceChildren(...nodes);
 }
 function roleCard(role, enabledModels, allModels) {
@@ -350,7 +376,7 @@ function roleCard(role, enabledModels, allModels) {
   const totalUse = Object.values(role.usage).reduce((a, b) => a + b, 0);
   function draw() {
     const total = rows.reduce((a, r) => a + (Number(r.weight) || 0), 0);
-    box.replaceChildren(
+    box.replaceChildren(...[
       rows.length ? h('div', {class: 'pool-row muted small'}, h('span', {}, '模型'), h('span', {}, '比例'), h('span', {}, '目标'), h('span', {}, '实际派工（历史）'), h('span', {})) : null,
       rows.map((row, i) => {
         const select = h('select', {class: 'field'}, h('option', {value: ''}, '选择模型…'),
@@ -363,6 +389,7 @@ function roleCard(role, enabledModels, allModels) {
           h('span', {class: 'small'}, h('div', {class: 'bar'}, h('span', {style: `width:${totalUse ? used * 100 / totalUse : 0}%`})), `${used} 个 · ${pct(used, totalUse)}`),
           h('button', {class: 'btn small danger', onclick: () => { rows.splice(i, 1); draw(); }}, '移除'));
       }),
+      role.project && role.pool_source === '全局' ? h('div', {class: 'small muted', style: 'margin:6px 0'}, '当前沿用全局角色的模型池。在这里改动并保存，会为本项目单独配置一份。') : null,
       rows.length ? null : h('div', {class: 'small muted', style: 'margin:6px 0'}, `未配置模型池：派工用 ${role.fallback}，主管也可以用 --model 指定。`),
       h('div', {class: 'toolbar'},
         h('button', {class: 'btn small', onclick: () => { rows.push({model: '', weight: 1}); draw(); }}, '+ 添加模型'),
@@ -370,7 +397,9 @@ function roleCard(role, enabledModels, allModels) {
           if (rows.some(r => !r.model)) return toast('有一行还没选模型', true);
           act(() => send('POST', '/api/pools', {project: role.project, role: role.role, pool: rows}), rows.length ? '模型池已保存，下次派工生效' : '已去掉模型池');
         }}, '保存'),
-        role.pool.length ? h('button', {class: 'btn small danger', onclick: () => confirm('去掉这个角色的模型池？') && act(() => send('POST', '/api/pools', {project: role.project, role: role.role, pool: []}), '已去掉模型池')}, '清空模型池') : null));
+        role.pool.length && !(role.project && role.pool_source === '全局') ? h('button', {class: 'btn small danger', onclick: () => confirm(role.project ? '去掉本项目单独配置的模型池？（之后沿用全局角色的，如果有）' : '去掉全局角色的模型池？')
+          && act(() => send('POST', '/api/pools', {project: role.project, role: role.role, pool: []}), '已去掉模型池')}, role.project ? '去掉本项目的模型池' : '清空模型池') : null)
+    ].flat().filter(Boolean));  // replaceChildren 会把 null 当成文字 "null"，先滤掉
   }
   draw();
   return h('div', {class: 'role-card'}, h('div', {}, h('b', {}, role.title), ' ', h('code', {}, role.role),

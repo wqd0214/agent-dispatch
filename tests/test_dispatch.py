@@ -382,6 +382,40 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual((job["state"], job["model_attempts"]), ("failed", []))
         self.assertIn("不自动换模型重派", self.ok("log", "f3", "-n", "100").stdout)
 
+    def test_global_role_pool_and_project_override(self):
+        self.make_project()
+        self.make_pool("dev", "fa=1")  # 先登记模型；dev 是项目专属角色
+        self.ok("roles", "pool", "dev", "-P", "p1", "--clear")
+        # qa 是全局角色：在全局配模型池，项目里没配的就沿用它
+        self.ok("roles", "pool", "qa", "--global", "fb=1")
+        self.assertIn("fb=1", self.ok("roles", "--global").stdout)
+        self.ok("start", "q1", "-P", "p1", "-r", "qa", "--repo", "app", "STATUS: PASS")
+        self.assertEqual(self.job("q1")["model_alias"], "fb")
+        self.ok("wait", "q1", "--timeout", "20")
+        # 项目单独配置的模型池覆盖全局的
+        self.ok("roles", "pool", "qa", "-P", "p1", "fa=1")
+        self.ok("start", "q2", "-P", "p1", "-r", "qa", "--repo", "app", "STATUS: PASS")
+        self.assertEqual(self.job("q2")["model_alias"], "fa")
+        self.ok("wait", "q2", "--timeout", "20")
+        # 全局覆盖写在本机目录里，随工具发布的角色文件不被改动
+        with open(os.path.join(self.home, "roles", "qa.json")) as f:
+            self.assertEqual(json.load(f)["model_pool"], [{"model": "fb", "weight": 1}])
+
+    def test_disabled_backend_is_not_used(self):
+        self.make_project()
+        self.make_pool("dev", "fa=1", "fb=1")
+        self.ok("backends", "disable", "fakepi")
+        self.assertIn("已停用", self.ok("backends").stdout)
+        refused = self.cli("start", "b1", "-P", "p1", "-r", "dev", "x")
+        self.assertIn("没有可用的模型", refused.stderr)
+        self.assertIn("派工工具 fakepi 已停用", refused.stderr)
+        plain = self.cli("start", "b2", "--cwd", self.work, "-b", "fakepi", "x")  # 不走模型池的派工同样被拦
+        self.assertIn("已停用", plain.stderr)
+        self.assertIn("fakepi 已停用", self.ok("models").stdout)
+        self.ok("backends", "enable", "fakepi")
+        self.ok("start", "b3", "--cwd", self.work, "-b", "fakepi", "--channels", "none", "STATUS: PASS")
+        self.ok("wait", "b3", "--timeout", "20")
+
     def test_supervisor_role_doc_includes_project(self):
         self.make_project()
         with open(os.path.join(self.home, "projects", "p1", "supervisor.md"), "w") as f:

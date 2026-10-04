@@ -228,6 +228,7 @@ def cmd_start(a):
             raise DispatchError("没有指定后端：用 --backend，或在角色定义里配置 backend")
         model = (a.model or (profile.get("model") if not a.backend else None)
                  or (profile.get("models") or {}).get(backend_name) or backends.get(backend_name).get("default_model"))
+    backends.require_enabled(backend_name)
     backend = backends.get(backend_name)
     if not model:
         raise DispatchError(f"后端 {backend_name} 没有默认模型，请用 --model 指定")
@@ -300,6 +301,8 @@ def cmd_reply(a):
                    follow=False, turn_started=store.now(), turn_started_ts=now_ts, runner_pid=os.getpid())
         decide(job, "reply", task[:300])
         store.save(job)
+    if not backends.enabled(job["backend"]):
+        store.info(f"注意：派工工具 {job['backend']} 已停用。续派仍在原会话里进行；新派工不会再用它")
     try:
         launch(job, task + (profile.get("reply_suffix") or ""))
     except DispatchError as exc:
@@ -722,7 +725,8 @@ def model_table():
         for entry in pool:
             users.setdefault(entry["model"], []).append(f"{project_id}:{role_id}={entry['weight']}")
     for alias, model in sorted(registry["models"].items()):
-        state = "停用" if not model.get("enabled", True) else (f"暂停至 {time.strftime('%H:%M', time.localtime(paused[alias]['until']))}" if alias in paused else "可用")
+        state = ("停用" if not model.get("enabled", True) else f"{model['backend']} 已停用" if not backends.enabled(model["backend"])
+                 else f"暂停至 {time.strftime('%H:%M', time.localtime(paused[alias]['until']))}" if alias in paused else "可用")
         rows.append((alias, model["backend"], model["id"], state, "、".join(users.get(alias, [])) or "-", model.get("note") or ""))
     return rows
 
@@ -754,6 +758,24 @@ def cmd_models(a):
     elif action == "remove":
         models.remove(a.alias)
     store.info(f"已处理：models {action} {a.alias}")
+    return 0
+
+
+def cmd_backends(a):
+    action = a.action or "list"
+    if action == "list":
+        rows = [("派工工具", "状态", "默认模型", "登记的模型数")]
+        registry = models.load_registry()["models"]
+        for name, backend in sorted(backends.load_all().items()):
+            rows.append((name, "可用" if backends.enabled(name) else "已停用", backend.get("default_model") or "-",
+                         sum(1 for m in registry.values() if m["backend"] == name)))
+        table(rows)
+        return 0
+    if not a.name:
+        raise DispatchError(f"backends {action} 需要工具名，如 opencode")
+    backends.set_enabled(a.name, action == "enable")
+    store.info(f"派工工具 {a.name} 已{'启用' if action == 'enable' else '停用'}" +
+               ("" if action == "enable" else "：新派工不会再用它，模型池里属于它的模型会被跳过；进行中的作业不受影响"))
     return 0
 
 
@@ -816,6 +838,8 @@ def cmd_roles(a):
         return 0
     if action == "pool":
         path = definitions.set_pool(project, a.name, None if a.clear else parse_pool(a.pool))
+        if project is None:
+            store.info("这是全局角色的模型池：各项目里没有自己配置模型池的同名角色都会用它")
         store.info(f"已{'去掉' if a.clear else '更新'}角色 {a.name} 的模型池：{path}")
         return 0
     if action == "add":
@@ -979,6 +1003,10 @@ def build_parser():
     p = add("role", cmd_role, "打印主管角色文档（职责、工作循环、裁决表）；在项目里会附上项目规则和可派的角色")
     p.add_argument("--project", "-P", help="项目 ID 或名称（默认按当前目录识别）")
 
+    p = add("backends", cmd_backends, "派工工具（pi、opencode……）是否可用：列表 / enable <名> / disable <名>")
+    p.add_argument("action", nargs="?", choices=["list", "enable", "disable"])
+    p.add_argument("name", nargs="?")
+
     p = add("models", cmd_models, "模型登记：列表 / import / add / enable / disable / note / resume / remove")
     p.add_argument("action", nargs="?", choices=["list", "import", "add", "enable", "disable", "note", "resume", "remove"])
     p.add_argument("alias", nargs="?", help="模型短名，如 pi:glm-5.3-flash")
@@ -999,7 +1027,7 @@ def build_parser():
     p.add_argument("pool", nargs="*", help="pool：模型池，如 pi:glm-5.3-flash=70 oc:glm-5=30")
     p.add_argument("--clear", action="store_true", help="pool：去掉模型池")
     p.add_argument("--project", "-P", help="项目 ID 或名称（默认按当前目录识别）")
-    p.add_argument("--global", dest="is_global", action="store_true", help="只看 / 新建全局角色")
+    p.add_argument("--global", dest="is_global", action="store_true", help="只看 / 新建全局角色，或配置全局角色的模型池")
     p.add_argument("--title", help="add：角色的称呼，如 后端开发工程师")
     p.add_argument("--description", help="add：一句话说明")
     p.add_argument("--repos", help="add：这个角色负责的工程 ID，逗号分隔")
