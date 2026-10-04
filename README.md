@@ -79,6 +79,31 @@ agent-dispatch backends disable opencode        # 停用某个派工工具：新
 配置文件：`~/.agent-dispatch/models.json`（登记表）、`model-health.json`（暂停记录）、`settings.json`（派工工具开关）。
 全局角色的模型池写在 `~/.agent-dispatch/roles/<角色>.json`，不改随工具发布的文件。
 
+## MCP 服务与技能
+
+MCP 服务和技能各有一张全局登记表，角色用 `mcp` / `skills` 两个可编辑字段引用登记表里的名称。
+登记表可以从现有的 pi / OpenCode 配置导入（只读那些文件，绝不修改）：
+
+```bash
+agent-dispatch mcp import             # 列出候选（来源、是否已登记、同名冲突）
+agent-dispatch mcp import --all       # 导入全部不冲突的候选
+agent-dispatch mcp import shared --source "OpenCode 全局 ~/.config/opencode/opencode.json"   # 同名不同内容的用来源消歧
+agent-dispatch mcp                     # 登记表（敏感信息已遮罩）：被哪些角色用、来源
+agent-dispatch mcp add mydb --command npx --args "-y,@bytebase/dbhub" --env DSN=mysql://...   # 手动登记
+agent-dispatch mcp remove mydb
+agent-dispatch skills import           # 技能同理：候选来自 ~/.claude/skills、~/.pi/agent/skills、~/.agents/skills、各工程的技能目录
+agent-dispatch skills add my-skill ~/skills/my-skill
+```
+
+- 导入来源：MCP 看 `~/.pi/agent/mcp.json`、`~/.config/opencode/opencode.json` 以及各项目工程里的 `.pi/mcp.json`、`opencode.json`；
+  技能看 `~/.claude/skills`、`~/.cc-switch/skills`、`~/.pi/agent/skills`、`~/.agents/skills` 和各工程的 `.agents/skills`、`.pi/skills`、`.claude/skills`（目录里有 SKILL.md 才算技能）。
+- **敏感信息只存本机**：登记表存在 `~/.agent-dispatch/mcp.json`、`skills.json`；env、headers 和 args 里形如密码令牌的内容在命令行与网页接口里一律显示为 `••••`，
+  修改登记时提交遮罩占位则保留原值。
+- **角色字段的语义**：`mcp` / `skills` 字段**不存在 = 不管理**，派工时不注入任何东西，执行者照旧用自己的配置（即现在的行为）；
+  **字段存在（哪怕是空列表）= 由 agent-dispatch 管理**，派工时只带这些。空列表表示「管理，但一个都不带」。
+  字段名称必须已登记；登记表里的名称被角色引用时不能删除。
+- 网页同样提供 `/api/mcp`、`/api/skills` 一套接口（候选、导入、增删改，写操作要求本机页面请求头），角色的 mcp / skills 在配置中心里和其它字段一样分层配置、可恢复继承。
+
 ## 快速开始
 
 ```bash

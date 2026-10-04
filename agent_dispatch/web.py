@@ -8,7 +8,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import backends, cli, definitions, gates, models, store, tmux
+from . import backends, cli, definitions, gates, models, registry, store, tmux
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web.html")
 UI_DIST = os.environ.get("AGENT_DISPATCH_UI_DIST") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_dist")
@@ -344,6 +344,18 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:3] == ["api", "config", "roles"]:
                 project = definitions.load_project(query["project"][0]) if query.get("project") else None
                 return self.send_json(definitions.role_detail(project, parts[3]))
+            if parts == ["api", "mcp"]:
+                return self.send_json({"mcp": [{"name": name, **registry.mask_entry(entry),
+                                                "used_by": registry.used_by("mcp", name)}
+                                               for name, entry in sorted(registry.load_mcp().items())]})
+            if parts == ["api", "mcp", "candidates"]:
+                return self.send_json({"candidates": [dict(c, entry=registry.mask_entry(c["entry"]))
+                                                       for c in registry.mcp_candidates()]})
+            if parts == ["api", "skills"]:
+                return self.send_json({"skills": [{"name": name, **entry, "used_by": registry.used_by("skills", name)}
+                                                   for name, entry in sorted(registry.load_skills().items())]})
+            if parts == ["api", "skills", "candidates"]:
+                return self.send_json({"candidates": registry.skill_candidates()})
             if parts == ["api", "dispatch-options"]:
                 return self.send_json(dispatch_options())
             if parts == ["api", "models"]:
@@ -432,6 +444,26 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[:2] == ["api", "backends"]:
                 backends.set_enabled(parts[2], bool(data.get("enabled")))
                 return self.send_json({"ok": True})
+            if parts == ["api", "mcp"]:
+                if not data.get("name") or not isinstance(data.get("entry"), dict):
+                    raise store.DispatchError("要有 name 和 entry（条目定义）")
+                registry.save_mcp(data["name"].strip(), data["entry"])
+                return self.send_json({"ok": True})
+            if parts == ["api", "mcp", "import"]:
+                selections = data.get("selections") or data.get("names") or []
+                if not isinstance(selections, list) or not selections:
+                    raise store.DispatchError("要有 names（名称数组）或 selections（[{name, source}]）")
+                return self.send_json({"added": registry.import_mcp(selections)})
+            if parts == ["api", "skills"]:
+                if not data.get("name") or not data.get("path"):
+                    raise store.DispatchError("要有 name 和 path（技能目录）")
+                registry.save_skill(data["name"].strip(), data["path"])
+                return self.send_json({"ok": True})
+            if parts == ["api", "skills", "import"]:
+                selections = data.get("selections") or data.get("names") or []
+                if not isinstance(selections, list) or not selections:
+                    raise store.DispatchError("要有 names（名称数组）或 selections（[{name, source}]）")
+                return self.send_json({"added": registry.import_skills(selections)})
             if parts == ["api", "pools"]:
                 project = definitions.load_project(data["project"]) if data.get("project") else None
                 pool = data.get("pool") or []
@@ -518,6 +550,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if len(parts) == 3 and parts[:2] == ["api", "models"]:
                 models.remove(parts[2])
+                return self.send_json({"ok": True})
+            if len(parts) == 3 and parts[0] == "api" and parts[1] in ("mcp", "skills"):
+                (registry.remove_mcp if parts[1] == "mcp" else registry.remove_skill)(parts[2])
                 return self.send_json({"ok": True})
             if len(parts) == 4 and parts[:3] == ["api", "config", "roles"]:
                 project = definitions.load_project(query["project"][0]) if query.get("project") else None

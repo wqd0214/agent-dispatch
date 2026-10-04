@@ -865,6 +865,121 @@ def cmd_projects(a):
     raise DispatchError(f"未知动作 {action}")
 
 
+def mcp_table():
+    from . import registry
+    rows = [("名称", "类型", "命令 / URL", "被哪些角色用", "说明", "来源")]
+    for name, entry in sorted(registry.load_mcp().items()):
+        masked = registry.mask_entry(entry)
+        endpoint = masked.get("url") or " ".join([masked.get("command") or "-"] + (masked.get("args") or []))
+        users = "、".join(f"{u['project'] or '全局'}:{u['role']}" for u in registry.used_by("mcp", name)) or "-"
+        rows.append((name, entry.get("type"), endpoint, users, entry.get("description") or "", entry.get("source") or ""))
+    return rows
+
+
+def cmd_mcp(a):
+    from . import registry
+    action = a.action or "list"
+    if action == "list":
+        if not registry.load_mcp():
+            print("（MCP 登记表是空的。导入现有配置：agent-dispatch mcp import）")
+            return 0
+        table(mcp_table())
+        return 0
+    if action == "import":
+        candidates = registry.mcp_candidates()
+        if not a.all and not a.names:  # 不带参数：列出候选
+            if not candidates:
+                print("（没有在 pi / OpenCode 配置里找到 MCP 服务）")
+                return 0
+            rows = [("名称", "类型", "命令 / URL", "来源", "已登记", "冲突")]
+            for c in candidates:
+                masked = registry.mask_entry(c["entry"])
+                endpoint = masked.get("url") or " ".join([masked.get("command") or ""] + (masked.get("args") or []))
+                rows.append((c["name"], c["entry"].get("type"), endpoint, c["source"],
+                             "是" if c["registered"] else "-", "同名不同内容" if c["conflict"] else ""))
+            table(rows)
+            print("\n导入：agent-dispatch mcp import --all 或 mcp import <名称> [--source <来源>]；同名冲突的要带 --source")
+            return 0
+        if a.all:
+            selections = [c["name"] for c in candidates if not c["conflict"] and not c["registered"]]
+        else:
+            selections = [{"name": n, "source": a.source} for n in a.names]
+        added = registry.import_mcp(selections)
+        store.info(f"新登记 {len(added)} 个 MCP 服务" + (f"：{'、'.join(added)}" if added else "（没有新的）"))
+        return 0
+    if not a.names:
+        raise DispatchError(f"mcp {action} 需要名称")
+    if action == "add":
+        registry.save_mcp(a.names[0], _mcp_entry_from_flags(a))
+    elif action == "remove":
+        registry.remove_mcp(a.names[0])
+    store.info(f"已处理：mcp {action} {a.names[0]}")
+    return 0
+
+
+def _mcp_entry_from_flags(a):
+    entry = {}
+    if a.type:
+        entry["type"] = a.type
+    if a.command:
+        entry["command"] = a.command
+    if a.args:
+        entry["args"] = [arg for group in a.args for arg in group.split(",") if arg]
+    if a.env:
+        entry["env"] = dict(pair.split("=", 1) for pair in a.env)
+    if a.headers:
+        entry["headers"] = dict(pair.split("=", 1) for pair in a.headers)
+    if a.url:
+        entry["url"] = a.url
+    if a.description:
+        entry["description"] = a.description
+    return entry
+
+
+def cmd_skills(a):
+    from . import registry
+    action = a.action or "list"
+    if action == "list":
+        if not registry.load_skills():
+            print("（技能登记表是空的。导入现有配置：agent-dispatch skills import）")
+            return 0
+        rows = [("名称", "目录", "被哪些角色用", "说明", "来源")]
+        for name, entry in sorted(registry.load_skills().items()):
+            users = "、".join(f"{u['project'] or '全局'}:{u['role']}" for u in registry.used_by("skills", name)) or "-"
+            rows.append((name, entry["path"], users, entry.get("description") or "", entry.get("source") or ""))
+        table(rows)
+        return 0
+    if action == "import":
+        candidates = registry.skill_candidates()
+        if not a.all and not a.names:
+            if not candidates:
+                print("（没有在各级技能目录里找到候选）")
+                return 0
+            rows = [("名称", "目录", "说明", "来源", "已登记")]
+            for c in candidates:
+                rows.append((c["name"], c["path"], c["description"], c["source"], "是" if c["registered"] else "-"))
+            table(rows)
+            print("\n导入：agent-dispatch skills import --all 或 skills import <名称> [--source <来源>]；同名多目录的要带 --source")
+            return 0
+        if a.all:
+            selections = [c["name"] for c in candidates if not c["conflict"] and not c["registered"]]
+        else:
+            selections = [{"name": n, "source": a.source} for n in a.names]
+        added = registry.import_skills(selections)
+        store.info(f"新登记 {len(added)} 个技能" + (f"：{'、'.join(added)}" if added else "（没有新的）"))
+        return 0
+    if not a.names:
+        raise DispatchError(f"skills {action} 需要名称")
+    if action == "add":
+        if len(a.names) < 2:
+            raise DispatchError("用法：agent-dispatch skills add <名称> <技能目录>")
+        registry.save_skill(a.names[0], a.names[1])
+    elif action == "remove":
+        registry.remove_skill(a.names[0])
+    store.info(f"已处理：skills {action} {a.names[0]}")
+    return 0
+
+
 def cmd_roles(a):
     action = a.action or "list"
     project = None if a.is_global else current_project(a)
@@ -1076,6 +1191,25 @@ def build_parser():
     p.add_argument("--repo", action="append", metavar="工程名=目录", help="add：登记一个工程，可重复")
     p.add_argument("--channels", help="add-repo：这个工程的浏览器通道，逗号分隔")
 
+    p = add("mcp", cmd_mcp, "MCP 服务登记：list / import [--all | 名称…] / add <名称> / remove <名称>；角色的 mcp 字段引用这里登记的名称")
+    p.add_argument("action", nargs="?", choices=["list", "import", "add", "remove"])
+    p.add_argument("names", nargs="*")
+    p.add_argument("--all", action="store_true", help="import：导入全部不冲突的候选")
+    p.add_argument("--source", help="import：同名候选出现多处时指明来源")
+    p.add_argument("--type", choices=["local", "remote"], help="add：类型（给了 url 默认 remote，否则 local）")
+    p.add_argument("--command", help="add：local 的可执行命令")
+    p.add_argument("--args", action="append", help="add：参数，逗号分隔，可重复")
+    p.add_argument("--env", action="append", metavar="键=值", help="add：环境变量，可重复；只存本机，输出时遮罩")
+    p.add_argument("--headers", action="append", metavar="键=值", help="add：remote 的请求头，可重复；只存本机，输出时遮罩")
+    p.add_argument("--url", help="add：remote 的地址")
+    p.add_argument("--description", help="add：一句话说明")
+
+    p = add("skills", cmd_skills, "技能登记：list / import [--all | 名称…] / add <名称> <目录> / remove <名称>；角色的 skills 字段引用这里登记的名称")
+    p.add_argument("action", nargs="?", choices=["list", "import", "add", "remove"])
+    p.add_argument("names", nargs="*")
+    p.add_argument("--all", action="store_true", help="import：导入全部不冲突的候选")
+    p.add_argument("--source", help="import：同名候选出现多处时指明来源")
+
     p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID> / pool <角色> <模型短名>=<比例> …")
     p.add_argument("action", nargs="?", choices=["list", "show", "add", "pool"])
     p.add_argument("name", nargs="?")
@@ -1102,7 +1236,7 @@ def build_parser():
 
 
 # 可以接收多个位置参数的字段：Python 3.11 及以前的 argparse 不接受「选项之后再跟这些位置参数」，要自己收回来
-TRAILING_LISTS = ("task", "question", "pool", "args", "jobs")
+TRAILING_LISTS = ("task", "question", "pool", "args", "jobs", "names")
 
 
 def main(argv=None):

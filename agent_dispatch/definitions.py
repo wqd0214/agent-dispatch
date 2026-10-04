@@ -374,10 +374,12 @@ def set_pool(project, role_ref, pool):
 
 # ---------- 配置中心：角色字段的分层读写 ----------
 
-# 网页上允许修改的角色字段；brief_template 等内部字段不开放
+# 网页上允许修改的角色字段；brief_template 等内部字段不开放。
+# mcp / skills：字段不存在 = 不管理（派工时不注入，执行者照旧用自己的配置）；
+# 字段存在（哪怕是空列表）= 由 agent-dispatch 管理，派工时只带这些（注入在后续版本实现）。
 EDITABLE_ROLE_FIELDS = {"title", "description", "repos", "backend", "model", "models", "mode", "channels",
                         "timeout_min", "statuses", "gates", "reply_suffix", "runs_root", "backend_args",
-                        "model_pool"}
+                        "model_pool", "mcp", "skills"}
 
 
 def _layers(project, role_id):
@@ -420,6 +422,18 @@ def _check_field_values(project, fields):
     if fields.get("model_pool"):
         from . import models
         models.check_pool(fields["model_pool"])
+    from . import registry  # 延迟导入避免环
+    for key in ("mcp", "skills"):
+        if key not in fields:
+            continue
+        value = fields[key]
+        if not isinstance(value, list) or not all(isinstance(n, str) and n for n in value):
+            raise DispatchError(f"{key} 必须是{' MCP 服务' if key == 'mcp' else '技能'}名称的列表；"
+                                "空列表表示「由 agent-dispatch 管理，一个都不带」")
+        known = registry.load_mcp() if key == "mcp" else registry.load_skills()
+        missing = [n for n in value if n not in known]
+        if missing:
+            raise DispatchError(f"{key} 里的 {'、'.join(missing)} 还没登记。先导入或登记：agent-dispatch {key} import / add")
 
 
 def _layer_dir(project):
