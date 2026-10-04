@@ -552,6 +552,144 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("跑场景A", out)
         self.assertEqual(self.jobs(), [])
 
+    def test_dry_run_json_preview(self):
+        """start --dry-run --json：不派出，给出模型池选中的模型和通道占用情况。"""
+        self.make_project()
+        self.make_pool("dev", "fa=2", "fb=1")
+        # 通道被 r4 占着：预览要列出占用者，且自己不创建作业
+        self.ok("start", "r4", "-P", "p1", "-r", "qa", "--repo", "web", "SLEEP 30")
+        try:
+            result = self.ok("start", "r7", "-P", "p1", "-r", "qa", "--repo", "web",
+                             "--dry-run", "--json", "跑一下")
+            data = json.loads(result.stdout)
+            self.assertEqual(data["job"], "r7")
+            self.assertEqual(data["role"], "qa")
+            self.assertEqual(data["role_title"], "测试工程师")
+            self.assertEqual(data["backend"], "fakepi")
+            self.assertIn("你是测试工程师", data["brief"])
+            self.assertEqual(set(data["channels"]), {"c1", "c2"})
+            self.assertEqual(data["channels_busy"], {"c1": "r4", "c2": "r4"})
+            self.assertNotIn("r7", self.jobs())
+            # 模型池角色给出这次会选中的模型
+            pooled = json.loads(self.ok("start", "r8", "-P", "p1", "-r", "dev",
+                                         "--dry-run", "--json", "跑一下").stdout)
+            self.assertEqual(pooled["model_alias"], "fa")
+            self.assertIn("m-a", pooled["model"])
+            self.assertNotIn("r8", self.jobs())
+            # 不带 --json 的行为不变
+            plain = self.ok("start", "r9", "-P", "p1", "-r", "dev", "--dry-run", "跑一下").stdout
+            self.assertIn("你是", plain)
+        finally:
+            self.ok("stop", "r4")
+
+    def start_web(self):
+        """起一个临时网页服务，返回 (port, 关闭函数)。"""
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        self.ok("web", "start", "--port", port)
+        return port
+
+    def test_web_serves_ui_dist(self):
+        """有 ui_dist 时托管前端页面：前端路由回退到 index.html，静态文件给对 Content-Type，穿越被拒。"""
+        import socket, urllib.error, urllib.request
+        ui = os.path.join(self.tmp, "ui-dist")
+        os.makedirs(os.path.join(ui, "assets"))
+        with open(os.path.join(ui, "index.html"), "w") as f:
+            f.write("<!doctype html><title>新界面</title>")
+        with open(os.path.join(ui, "assets", "app.js"), "w") as f:
+            f.write("console.log(1)")
+        old_env = os.environ.get("AGENT_DISPATCH_UI_DIST")
+        os.environ["AGENT_DISPATCH_UI_DIST"] = ui
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        base = f"http://127.0.0.1:{port}"
+
+        def get(path):
+            request = urllib.request.Request(base + path)
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status, dict(response.headers), response.read()
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, dict(exc.headers), exc.read()
+                finally:
+                    exc.close()
+
+        try:
+            self.ok("web", "start", "--port", port)
+            for path in ("/", "/jobs/abc"):
+                status, headers, body = get(path)
+                self.assertEqual(status, 200, path)
+                self.assertIn("新界面", body.decode())
+                self.assertIn("text/html", headers["Content-Type"])
+                self.assertEqual(headers["Cache-Control"], "no-store")
+            status, headers, body = get("/assets/app.js")
+            self.assertEqual(status, 200)
+            self.assertIn("javascript", headers["Content-Type"])
+            self.assertIn("max-age", headers["Cache-Control"])
+            for path in ("/assets/../../etc/passwd", "/assets/..%2f..%2fetc%2fpasswd"):
+                self.assertEqual(get(path)[0], 404, path)
+            status, headers, body = get("/legacy")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers["Content-Type"])
+            with open(os.path.join(ROOT, "agent_dispatch", "web.html"), "rb") as f:
+                self.assertEqual(body, f.read())
+            with urllib.request.urlopen(base + "/api/overview", timeout=5) as response:
+                self.assertIn("jobs", json.load(response))
+        finally:
+            self.ok("web", "stop")
+            if old_env is None:
+                del os.environ["AGENT_DISPATCH_UI_DIST"]
+            else:
+                os.environ["AGENT_DISPATCH_UI_DIST"] = old_env
+
+    def test_web_preview_and_overview_fields(self):
+        """POST /api/jobs/preview 走子进程 dry-run；总览作业带 updated / ended 字段。"""
+        import socket, urllib.error, urllib.request
+        self.make_project()
+        port = self.start_web()
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None, header=True):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            if header:
+                request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=70) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, json.load(exc)
+                finally:
+                    exc.close()
+
+        try:
+            # 预览接口也要写请求头
+            self.assertEqual(call("POST", "/api/jobs/preview", {"project": "p1", "role": "dev", "task": "x"},
+                                  header=False)[0], 403)
+            status, preview = call("POST", "/api/jobs/preview", {"project": "p1", "role": "dev", "task": "跑一下"})
+            self.assertEqual(status, 200)
+            self.assertIn("后端开发工程师", preview["brief"])
+            self.assertEqual(preview["role"], "dev")
+            self.assertNotIn("preview", self.jobs())
+            status, error = call("POST", "/api/jobs/preview", {"project": "p1", "role": "nope", "task": "x"})
+            self.assertEqual(status, 400)
+            self.assertIn("没有角色", error["error"])
+            # 总览作业补 updated / ended
+            self.ok("start", "ov1", "-P", "p1", "-r", "dev", "STATUS: PASS")
+            self.ok("wait", "ov1", "--timeout", "20")
+            with urllib.request.urlopen(base + "/api/overview", timeout=5) as response:
+                overview = json.load(response)
+            job = next(j for j in overview["jobs"] if j["name"] == "ov1")
+            self.assertTrue(job["updated"])
+            self.assertTrue(job["ended"])
+        finally:
+            self.ok("web", "stop")
+
 
 class OpencodeReaderTest(unittest.TestCase):
     """会话读取：大输出要读全；读不成要返回 None 而不是「空会话」。"""
