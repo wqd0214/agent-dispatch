@@ -86,6 +86,37 @@ export const configApi = {
     del(`/api/config/roles/${encodeURIComponent(roleId)}${projectQuery(project)}`),
 }
 
+// ---------- MCP / 技能登记表与项目配置 ----------
+import type { CandidateGroup, McpEntry, SkillEntry } from './types'
+
+export const mcpApi = {
+  page: () => getJson<{ mcp: McpEntry[] }>('/api/mcp'),
+  save: (id: string, entry: Record<string, unknown>) => post('/api/mcp', { name: id, entry }),
+  remove: (id: string) => del(`/api/mcp/${encodeURIComponent(id)}`),
+  candidates: () => getJson<{ candidates: CandidateGroup[] }>('/api/mcp/candidates'),
+  importIds: (names: string[]) => post<{ added: string[] }>('/api/mcp/import', { names }),
+}
+
+export const skillApi = {
+  page: () => getJson<{ skills: SkillEntry[] }>('/api/skills'),
+  save: (id: string, path: string, skillName?: string) => post('/api/skills', { name: id, path, skill_name: skillName }),
+  remove: (id: string) => del(`/api/skills/${encodeURIComponent(id)}`),
+  candidates: () => getJson<{ candidates: CandidateGroup[] }>('/api/skills/candidates'),
+  importIds: (names: string[]) => post<{ added: string[] }>('/api/skills/import', { names }),
+}
+
+export const projectApi = {
+  add: (body: { id: string; name?: string; repos?: Record<string, string> }) => post('/api/config/projects', body),
+  update: (id: string, body: { name?: string; default_role?: string }) =>
+    post(`/api/config/projects/${encodeURIComponent(id)}`, body),
+  addRepo: (id: string, body: { id: string; cwd: string; channels?: string[]; channel_namespace?: string }) =>
+    post(`/api/config/projects/${encodeURIComponent(id)}/repos`, body),
+  removeRepo: (id: string, repoId: string) =>
+    del(`/api/config/projects/${encodeURIComponent(id)}/repos/${encodeURIComponent(repoId)}`),
+  saveSupervisor: (id: string, text: string) =>
+    post(`/api/config/projects/${encodeURIComponent(id)}/supervisor`, { text }),
+}
+
 export const modelApi = {
   page: () => getJson<ModelPage>('/api/models'),
   importFrom: (backend: string) => post<{ added: string[] }>('/api/models/import', { backend }),

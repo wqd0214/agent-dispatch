@@ -205,3 +205,46 @@ export interface ModelPage {
   backends: string[]
   tools: ToolInfo[]
 }
+
+// ---------- MCP 与技能登记表（/api/mcp、/api/skills）----------
+
+export interface RegistryUser { project: string; role: string }
+
+/** 接口给的 MCP 条目已是遮罩后的：改时原样提交 •••• 即保留原值 */
+export interface McpEntry {
+  id: string
+  name: string
+  type?: 'local' | 'remote'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  description?: string
+  sources?: string[]
+  used_by: RegistryUser[]
+}
+
+export interface SkillEntry {
+  id: string
+  name: string
+  path: string
+  paths?: string[]
+  description?: string
+  sources?: string[]
+  used_by: RegistryUser[]
+}
+
+export interface CandidateVariant {
+  id: string
+  name: string
+  registered: boolean
+  source: string
+  sources?: string[]
+  path?: string
+  description?: string
+  diff?: Record<string, unknown>
+  entry?: Record<string, unknown>
+}
+
+export interface CandidateGroup { name: string; conflict: boolean; variants: CandidateVariant[] }

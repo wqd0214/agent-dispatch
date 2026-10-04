@@ -4,13 +4,16 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { configApi, modelApi } from '../api'
+import { configApi, modelApi, mcpApi, skillApi } from '../api'
 import type { ConfigOverview, ModelPage, PoolEntry, RoleDetail } from '../types'
-import { fieldOverridden, hasOwnLayer, poolRows, summarizeRole } from '../lib/roles'
+import { fieldOverridden, hasOwnLayer, inheritLabel, poolRows, projectRoleRows, summarizeRole } from '../lib/roles'
 import { useCurrentProject } from '../composables/useProject'
+import { useRouter } from 'vue-router'
+import DefineProject from '../components/DefineProject.vue'
 
 const { selected: projectId } = useCurrentProject()
 const route = useRoute()
+const router = useRouter()
 
 const config = ref<ConfigOverview | null>(null)
 const modelsPage = ref<ModelPage | null>(null)
@@ -29,8 +32,9 @@ async function reloadDetail() {
   if (!roleId.value) { detail.value = null; return }
   loading.value = true
   try {
-    detail.value = await configApi.roleDetail(roleId.value, projectId.value)
+    detail.value = await configApi.roleDetail(roleId.value, detailProject.value)
     syncForm()
+    fallbackDirty.value = false
   } catch (e) {
     detail.value = null
     ElMessage.error(msg(e))
@@ -43,13 +47,13 @@ function saved() {
   ElMessage.success('已保存，下次派工生效')
 }
 
-const roles = computed(() => {
-  if (!config.value) return [] as { id: string; title: string; description: string }[]
-  return projectId.value
-    ? config.value.projects.find(p => p.id === projectId.value)?.roles ?? []
-    : config.value.roles
-})
-const project = computed(() => config.value?.projects.find(p => p.id === projectId.value) ?? null)
+const roleRows = computed(() => projectRoleRows(config.value, projectId.value))
+const roles = computed(() => roleRows.value.rows)
+const projectDefined = computed(() => roleRows.value.defined)
+const project = computed(() => projectDefined.value
+  ? config.value?.projects.find(p => p.id === projectId.value) ?? null : null)
+// 项目没定义过时，详情按全局层读（读得到继承的全局配置），写入也一样写全局层
+const detailProject = computed(() => projectDefined.value ? projectId.value : '')
 const repoOptions = computed(() => (project.value?.repos ?? []).map(r => ({ value: r.id, label: r.name })))
 function repoName(id: string): string {
   return project.value?.repos.find(r => r.id === id)?.name ?? id
@@ -57,6 +61,7 @@ function repoName(id: string): string {
 
 watch(roleId, reloadDetail)
 watch(projectId, () => { roleId.value = roles.value[0]?.id ?? '' })
+watch(detailProject, () => { roleId.value = roles.value[0]?.id ?? '' })
 watch(() => route.query.role, q => {
   if (typeof q === 'string' && roles.value.some(r => r.id === q)) roleId.value = q
 })
@@ -101,18 +106,43 @@ async function saveBasic() {
   if (!Object.keys(fields).length) return
   saving.value = true
   try {
-    await configApi.setRoleFields(roleId.value, projectId.value, fields)
+    await configApi.setRoleFields(roleId.value, detailProject.value, fields)
     await reloadDetail(); await reloadConfig(); saved()
   } catch (e) { ElMessage.error(msg(e)) } finally { saving.value = false }
 }
 async function resetField(key: string) {
   try {
-    await configApi.resetRoleFields(roleId.value, projectId.value, [key])
+    await configApi.resetRoleFields(roleId.value, detailProject.value, [key])
     await reloadDetail(); await reloadConfig(); saved()
   } catch (e) { ElMessage.error(msg(e)) }
 }
 function sourceOf(key: string): string {
   return detail.value?.fields[key]?.source ?? '未设置'
+}
+
+// 项目视图下选中继承自全局的角色：只读展示，点「为本项目单独配置」后才在项目层写入
+const inheritedHere = computed(() => !!projectId.value && projectDefined.value && detail.value?.scope === '全局')
+async function ownLayer() {
+  if (!detail.value) return
+  saving.value = true
+  try {
+    await configApi.addRole({ id: roleId.value, project: projectId.value, title: detail.value.title })
+    await reloadDetail(); await reloadConfig()
+    ElMessage.success('已在项目层创建这一角色的单独配置，现在可以改了')
+  } catch (e) { ElMessage.error(msg(e)) } finally { saving.value = false }
+}
+async function restoreInherit() {
+  await deleteRole()
+  await reloadDetail()
+}
+
+// ---------- MCP / 技能（只展示选中条目和来源层，勾选去对应页做）----------
+const regNames = { mcp: ref<Record<string, string>>({}), skills: ref<Record<string, string>>({}) }
+void mcpApi.page().then(r => { regNames.mcp.value = Object.fromEntries(r.mcp.map(e => [e.id, e.name])) }).catch(() => {})
+void skillApi.page().then(r => { regNames.skills.value = Object.fromEntries(r.skills.map(e => [e.id, e.name])) }).catch(() => {})
+function regField(key: 'mcp' | 'skills'): string[] | null {
+  const f = detail.value?.fields[key]
+  return f === undefined ? null : (f.value as string[])
 }
 
 // ---------- 模型池 ----------
@@ -142,7 +172,7 @@ async function savePool() {
     .map(([model, weight]) => ({ model, weight }))
   saving.value = true
   try {
-    await modelApi.savePool(roleId.value, projectId.value, entries.length ? entries : null)
+    await modelApi.savePool(roleId.value, detailProject.value, entries.length ? entries : null)
     await reloadDetail(); await reloadModels(); saved()
   } catch (e) { ElMessage.error(msg(e)) } finally { saving.value = false }
 }
@@ -152,7 +182,7 @@ async function saveFallback() {
 async function doSetFields(fields: Record<string, unknown>) {
   saving.value = true
   try {
-    await configApi.setRoleFields(roleId.value, projectId.value, fields)
+    await configApi.setRoleFields(roleId.value, detailProject.value, fields)
     fallbackDirty.value = false
     await reloadDetail(); saved()
   } catch (e) { ElMessage.error(msg(e)) } finally { saving.value = false }
@@ -166,13 +196,13 @@ watch(detail, syncBrief)
 async function saveBrief() {
   saving.value = true
   try {
-    await configApi.setBrief(roleId.value, projectId.value, briefText.value)
+    await configApi.setBrief(roleId.value, detailProject.value, briefText.value)
     await reloadDetail(); saved()
   } catch (e) { ElMessage.error(msg(e)) } finally { saving.value = false }
 }
 async function resetBrief() {
   try {
-    await configApi.resetBrief(roleId.value, projectId.value)
+    await configApi.resetBrief(roleId.value, detailProject.value)
     await reloadDetail(); saved()
   } catch (e) { ElMessage.error(msg(e)) }
 }
@@ -204,10 +234,11 @@ async function deleteRole() {
     await ElMessageBoxConfirm()
   } catch { return }
   try {
-    await configApi.deleteRole(roleId.value, projectId.value)
+    await configApi.deleteRole(roleId.value, detailProject.value)
     ElMessage.success('已删除这一层')
     await reloadConfig()
-    roleId.value = roles.value[0]?.id ?? ''
+    if (!roles.value.some(r => r.id === roleId.value)) roleId.value = roles.value[0]?.id ?? ''
+    else await reloadDetail()
   } catch (e) { ElMessage.error(msg(e)) }
 }
 async function ElMessageBoxConfirm() {
@@ -217,51 +248,58 @@ async function ElMessageBoxConfirm() {
 </script>
 
 <template>
+  <div class="page">
+  <DefineProject v-if="projectId && !projectDefined" :project-id="projectId" @defined="reloadConfig" />
   <div class="roles">
     <div class="list">
       <div class="list-head">
-        <span>{{ projectId ? project?.name : '全局角色' }}</span>
-        <el-button size="small" type="primary" @click="openCreate">新建角色</el-button>
+        <span>{{ projectId ? (project?.name ?? projectId) : '全局角色' }}</span>
+        <el-button v-if="projectDefined" size="small" type="primary" @click="openCreate">新建角色</el-button>
       </div>
       <div v-for="r in roles" :key="r.id" class="item" :class="{ sel: r.id === roleId }" @click="roleId = r.id">
-        <div class="t">{{ r.title }}</div>
+        <div class="t">{{ r.title }}
+          <el-tag v-if="inheritLabel(r.scope, !!projectId)" size="small" type="info">{{ inheritLabel(r.scope, !!projectId) }}</el-tag>
+        </div>
         <div class="sub mono">{{ r.id }}</div>
       </div>
       <div v-if="!roles.length" class="sub empty">还没有角色</div>
     </div>
     <div class="panel" v-loading="loading">
       <template v-if="detail">
+        <el-alert v-if="inheritedHere" type="info" :closable="false" show-icon class="hint" title="这个角色继承自全局，下面是全局的配置（只读）">
+          <el-button size="small" type="primary" :loading="saving" @click="ownLayer">为本项目单独配置</el-button>
+        </el-alert>
         <div class="sum">{{ summarizeRole(detail, repoName) }}</div>
 
         <h3>基本</h3>
         <el-form label-width="110px" class="form">
           <el-form-item label="称呼">
-            <el-input v-model="basic.title" />
+            <el-input v-model="basic.title" :disabled="inheritedHere" />
             <span class="src sub">来源：{{ sourceOf('title') }}</span><el-button v-if="fieldOverridden(detail, 'title')" link size="small" @click="resetField('title')">恢复继承</el-button>
           </el-form-item>
           <el-form-item label="说明">
-            <el-input v-model="basic.description" type="textarea" :rows="2" />
+            <el-input v-model="basic.description" type="textarea" :rows="2" :disabled="inheritedHere" />
             <span class="src sub">来源：{{ sourceOf('description') }}</span><el-button v-if="fieldOverridden(detail, 'description')" link size="small" @click="resetField('description')">恢复继承</el-button>
           </el-form-item>
           <el-form-item label="负责的工程">
-            <el-select v-if="projectId" v-model="basic.repos" multiple placeholder="留空表示全部工程">
+            <el-select v-if="project" v-model="basic.repos" multiple placeholder="留空表示全部工程" :disabled="inheritedHere">
               <el-option v-for="r in repoOptions" :key="r.value" :value="r.value" :label="r.label" />
             </el-select>
             <span v-else class="sub">全局角色不绑定具体工程</span>
             <span class="src sub">来源：{{ sourceOf('repos') }}</span><el-button v-if="fieldOverridden(detail, 'repos')" link size="small" @click="resetField('repos')">恢复继承</el-button>
           </el-form-item>
           <el-form-item label="运行方式">
-            <el-select v-model="basic.mode" style="width: 160px">
+            <el-select v-model="basic.mode" style="width: 160px" :disabled="inheritedHere">
               <el-option value="headless" label="headless" /><el-option value="tmux" label="tmux" />
             </el-select>
             <span class="src sub">来源：{{ sourceOf('mode') }}</span><el-button v-if="fieldOverridden(detail, 'mode')" link size="small" @click="resetField('mode')">恢复继承</el-button>
           </el-form-item>
           <el-form-item label="单轮超时">
-            <el-input-number v-model="basic.timeout_min" :min="1" :step="10" /> 分钟
+            <el-input-number v-model="basic.timeout_min" :min="1" :step="10" :disabled="inheritedHere" /> 分钟
             <span class="src sub">来源：{{ sourceOf('timeout_min') }}</span><el-button v-if="fieldOverridden(detail, 'timeout_min')" link size="small" @click="resetField('timeout_min')">恢复继承</el-button>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :disabled="!basicDirty" :loading="saving" @click="saveBasic">保存基本设置</el-button>
+            <el-button type="primary" :disabled="inheritedHere || !basicDirty" :loading="saving" @click="saveBasic">保存基本设置</el-button>
           </el-form-item>
         </el-form>
 
@@ -275,7 +313,7 @@ async function ElMessageBoxConfirm() {
           </div>
           <div v-for="m in g.models" :key="m.alias" class="pool-row" :class="{ off: !m.enabled }">
             <el-checkbox :model-value="m.alias in poolChecked && poolChecked[m.alias] > 0"
-              :disabled="!m.enabled"
+              :disabled="!m.enabled || inheritedHere"
               @update:model-value="(on: boolean) => { if (on) poolChecked[m.alias] = 1; else delete poolChecked[m.alias] }">
               {{ m.alias }}
             </el-checkbox>
@@ -288,7 +326,7 @@ async function ElMessageBoxConfirm() {
           </div>
         </div>
         <div v-if="!modelsPage?.models.length" class="sub">还没有登记模型。到「全局 → 工具与模型」页导入或登记。</div>
-        <el-button type="primary" :loading="saving" class="save" @click="savePool">
+        <el-button type="primary" :loading="saving" class="save" :disabled="inheritedHere" @click="savePool">
           {{ hasPool ? '保存模型池' : '保存为模型池' }}
         </el-button>
 
@@ -314,14 +352,33 @@ async function ElMessageBoxConfirm() {
 
         <h3>岗位说明书</h3>
         <div class="sub brief-src">来源：{{ detail.brief.source || '无' }}<template v-if="detail.brief.path"> · {{ detail.brief.path }}</template></div>
-        <el-input v-model="briefText" type="textarea" :rows="10" class="mono" @input="briefDirty = true" />
+        <el-input v-model="briefText" type="textarea" :rows="10" class="mono" :disabled="inheritedHere" @input="briefDirty = true" />
         <div class="btns">
-          <el-button type="primary" :disabled="!briefDirty" :loading="saving" @click="saveBrief">保存岗位说明书</el-button>
-          <el-button :disabled="detail.brief.source !== '项目' && detail.brief.source !== '本机全局'"
+          <el-button type="primary" :disabled="inheritedHere || !briefDirty" :loading="saving" @click="saveBrief">保存岗位说明书</el-button>
+          <el-button :disabled="inheritedHere || (detail.brief.source !== '项目' && detail.brief.source !== '本机全局')"
             @click="resetBrief">恢复继承</el-button>
         </div>
 
+        <h3>MCP 与技能</h3>
+        <div v-for="key in (['mcp', 'skills'] as const)" :key="key" class="regs">
+          <b>{{ key === 'mcp' ? 'MCP 服务' : '技能' }}</b>
+          <span v-if="regField(key) === null" class="sub">未管理：执行者照旧用它自己的配置</span>
+          <span v-else-if="!regField(key)!.length" class="sub">由 agent-dispatch 管理，一个都不带（来源：{{ sourceOf(key) }}）</span>
+          <template v-else>
+            <el-tag v-for="id in regField(key)!" :key="id" size="small" class="reg-tag"
+              :title="`登记 ID ${id}，下发名 ${regNames[key].value[id] ?? id}`">
+              {{ regNames[key].value[id] ?? id }}
+            </el-tag>
+            <span class="sub">来源：{{ sourceOf(key) }}</span>
+          </template>
+          <el-button link size="small" type="primary"
+            @click="router.push(key === 'mcp' ? '/settings/mcp' : '/settings/skills')">
+            去{{ key === 'mcp' ? ' MCP ' : '技能' }}页调整
+          </el-button>
+        </div>
+
         <div class="danger">
+          <el-button v-if="projectId && detail.scope === '项目覆盖全局'" :loading="saving" @click="restoreInherit">恢复继承全局</el-button>
           <el-button type="danger" plain :disabled="!hasOwnLayer(detail)"
             :title="hasOwnLayer(detail) ? '' : '随工具发布的角色不能删除，只能在项目或本机全局层覆盖'"
             @click="deleteRole">删除这一层</el-button>
@@ -330,6 +387,7 @@ async function ElMessageBoxConfirm() {
       </template>
       <el-empty v-else-if="!loading" description="从左边选一个角色" />
     </div>
+  </div>
 
     <el-dialog v-model="createOpen" title="新建角色" width="480px">
       <el-form label-width="110px">
@@ -339,7 +397,7 @@ async function ElMessageBoxConfirm() {
         <el-form-item label="称呼"><el-input v-model="createForm.title" placeholder="如 运维工程师" /></el-form-item>
         <el-form-item label="说明"><el-input v-model="createForm.description" /></el-form-item>
         <el-form-item v-if="projectId" label="负责的工程">
-          <el-select v-model="createForm.repos" multiple placeholder="留空表示全部工程">
+          <el-select v-if="project" v-model="createForm.repos" multiple placeholder="留空表示全部工程">
             <el-option v-for="r in repoOptions" :key="r.value" :value="r.value" :label="r.label" />
           </el-select>
         </el-form-item>
@@ -363,7 +421,8 @@ async function ElMessageBoxConfirm() {
 </template>
 
 <style scoped>
-.roles { display: grid; grid-template-columns: 240px 1fr; gap: 12px; height: 100%; min-height: 0; }
+.page { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.roles { display: grid; grid-template-columns: 240px 1fr; gap: 12px; flex: 1; min-height: 0; }
 .list { border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-bg-color); padding: 10px; overflow: auto; }
 .list-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; margin-bottom: 8px; }
 .item { border: 1px solid var(--el-border-color); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; cursor: pointer; }
@@ -388,4 +447,6 @@ h4 { margin: 12px 0 6px; font-size: 13px; }
 .empty { padding: 20px 4px; text-align: center; }
 .mono { font-family: var(--el-font-family-mono, monospace); font-size: 12px; }
 .sub { color: var(--el-text-color-secondary); font-size: 12px; }
+.regs { margin-bottom: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.reg-tag { font-family: var(--el-font-family-mono, monospace); }
 </style>

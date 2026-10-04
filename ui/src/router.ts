@@ -14,7 +14,11 @@ export const router = createRouter({
     { path: '/batches', name: 'batches', component: () => import('./views/BatchesView.vue') },
     { path: '/stats', component: () => import('./views/Placeholder.vue'), props: { title: '统计' } },
     { path: '/settings/roles', component: RolesView },
+    { path: '/settings/repos', component: () => import('./views/ReposView.vue') },
+    { path: '/settings/mcp', component: () => import('./views/McpView.vue') },
+    { path: '/settings/skills', component: () => import('./views/SkillsView.vue') },
+    { path: '/settings/supervisor', component: () => import('./views/SupervisorView.vue') },
     { path: '/global/models', component: () => import('./views/GlobalModelsView.vue') },
-    { path: '/settings/:page', component: () => import('./views/Placeholder.vue'), props: route => ({ title: ({ repos: '工程', mcp: 'MCP', skills: '技能', supervisor: '主管规则' } as Record<string, string>)[String(route.params.page)] || '项目设置' }) },
+    { path: '/settings/:page', component: () => import('./views/Placeholder.vue'), props: route => ({ title: '项目设置' }) },
   ],
 })
