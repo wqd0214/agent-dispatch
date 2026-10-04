@@ -71,7 +71,11 @@
     document.getElementById("failed").classList.remove("hidden");
   }
 
+  // 连通性由 Rust 侧检查：页面直接 fetch 网页服务是跨域请求，会被拦截，永远判为连不上
   async function reachable(url) {
+    if (invoke) {
+      try { return await invoke("check_service", { url }); } catch { return false; }
+    }
     try {
       const resp = await fetch(url + "/api/overview", { signal: AbortSignal.timeout(4000) });
       return resp.ok;
@@ -88,7 +92,7 @@
     let started = false;
     for (let i = 0; i < 27; i++) {
       if (await reachable(url)) { location.replace(url + "/"); return; }
-      if (!started && invoke && i === 3) { started = true; invoke("try_start_service").catch(() => {}); }
+      if (!started && invoke && i === 3) { started = true; invoke("try_start_service_cmd").catch(() => {}); }
       await new Promise(r => setTimeout(r, 1500));
     }
     showFailed();

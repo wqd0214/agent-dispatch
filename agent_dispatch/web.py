@@ -257,8 +257,11 @@ def read_log(name, offset):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
+    def log_message(self, fmt, *args):
+        if os.environ.get("AGENT_DISPATCH_ACCESS_LOG"):  # 排障用：记下每个请求和发起方
+            sys.stderr.write(f"[{store.now()}] {self.command} {self.path} {args[1] if len(args) > 1 else ''} "
+                             f"UA={self.headers.get('User-Agent', '-')[:60]}\n")
+            sys.stderr.flush()
 
     def send_body(self, body, content_type, status=200, cache=None):
         self.send_response(status)

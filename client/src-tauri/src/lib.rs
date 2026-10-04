@@ -294,6 +294,13 @@ fn monitor_loop(app: AppHandle, gen: u64) {
 
 // ---------- 命令 ----------
 
+/// 本地页面用它判断服务通不通：页面里直接 fetch 网页服务属于跨域请求，会被内核拦截，必须由 Rust 侧来查
+#[tauri::command]
+async fn check_service(url: String) -> bool {
+    let url = normalize_url(&url);
+    tauri::async_runtime::spawn_blocking(move || overview_reachable(&url)).await.unwrap_or(false)
+}
+
 #[tauri::command]
 fn get_settings(state: State) -> Settings {
     state.settings.lock().unwrap().clone()
@@ -428,7 +435,7 @@ pub fn run() {
             index_url: Mutex::new(None),
             generation: AtomicU64::new(0),
         })
-        .invoke_handler(tauri::generate_handler![get_settings, get_server_url, save_settings, try_start_service_cmd, find_dispatch_path_cmd])
+        .invoke_handler(tauri::generate_handler![get_settings, get_server_url, save_settings, try_start_service_cmd, find_dispatch_path_cmd, check_service])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

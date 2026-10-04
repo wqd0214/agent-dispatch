@@ -32,11 +32,11 @@
     document.getElementById("adpath").value = s.agent_dispatch_path || "";
     document.getElementById("notify").checked = s.notify;
   });
-  invoke("find_dispatch_path").then(p => {
+  invoke("find_dispatch_path_cmd").then(p => {
     document.getElementById("found-path").textContent = p || "（没找到，请手动指定）";
   }).catch(() => {});
   document.getElementById("save").addEventListener("click", async () => {
-    await invoke("save_settings", { url: document.getElementById("url").value.trim(), agentDispatchPath: document.getElementById("adpath").value.trim(), notify: document.getElementById("notify").checked });
+    await invoke("save_settings", { url: document.getElementById("url").value.trim(), agentDispatchPath: document.getElementById("adpath").value.trim(), notifyEnabled: document.getElementById("notify").checked });
     window.close();
   });
   document.getElementById("cancel").addEventListener("click", () => window.close());
