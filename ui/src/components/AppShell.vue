@@ -79,7 +79,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </nav>
       <div class="sec">全局</div>
       <nav class="nav">
-        <a href="/legacy#/models" class="nav-item">派工工具与模型</a>
+        <router-link to="/global/models" class="nav-item" :class="{ on: activeNav === '/global/models' }">工具与模型</router-link>
       </nav>
     </aside>
     <div class="right">

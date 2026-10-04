@@ -120,3 +120,67 @@ export interface JobActionBody {
   job?: string
   task?: string
 }
+
+// ---------- 配置中心与模型登记（/api/config、/api/models）----------
+
+export interface RoleField<T = unknown> { value: T; source: string }
+
+export interface RoleBrief { text: string | null; source: string | null; path: string | null }
+
+export interface RoleDetail {
+  role: string
+  title: string
+  scope: string
+  repos: string[]
+  pool_source: string | null
+  fields: Record<string, RoleField>
+  brief: RoleBrief
+}
+
+export interface ConfigProject {
+  id: string
+  name: string
+  default_role: string | null
+  defaults: Record<string, unknown>
+  supervisor: string
+  repos: { id: string; name: string; cwd: string; channels: string[]; channel_ns: string }[]
+  roles: { id: string; title: string; description: string; repos: string[]; scope: string }[]
+}
+
+export interface ConfigOverview {
+  projects: ConfigProject[]
+  roles: { id: string; title: string; description: string }[]
+}
+
+export interface PoolEntry { model: string; weight: number }
+
+export interface RegisteredModel {
+  alias: string
+  backend: string
+  id: string
+  enabled: boolean
+  note: string
+  paused: { reason: string; until: number } | null
+  used_by: { project: string; role: string; weight: number }[]
+  jobs: number
+  settled: number
+  pass: number
+  failed: number
+  avg_seconds: number | null
+  provider_failures: number
+  backend_enabled: boolean
+}
+
+export interface ToolInfo {
+  name: string
+  enabled: boolean
+  default_model: string | null
+  models: number
+}
+
+export interface ModelPage {
+  cooldown_min: number
+  models: RegisteredModel[]
+  backends: string[]
+  tools: ToolInfo[]
+}

@@ -20,14 +20,14 @@ export function inboxGroupOf(job: JobSummary): InboxGroupKey | null {
   return null
 }
 
-/** 四组固定顺序：等你决定、待审查、失败与中断、运行中；组内按最近活动在前 */
+/** 四组固定顺序：正在执行排第一，其后是等你决定、待审查、失败与中断；组内按最近活动在前 */
 export function inboxGroups(jobs: JobSummary[]): InboxGroup[] {
-  const buckets: Record<InboxGroupKey, JobSummary[]> = { decide: [], review: [], broken: [], running: [] }
+  const buckets: Record<InboxGroupKey, JobSummary[]> = { running: [], decide: [], review: [], broken: [] }
   for (const job of jobs) {
     const key = inboxGroupOf(job)
     if (key) buckets[key].push(job)
   }
-  const titles: Record<InboxGroupKey, string> = { decide: '等你决定', review: '待审查', broken: '失败与中断', running: '运行中' }
+  const titles: Record<InboxGroupKey, string> = { running: '正在执行', decide: '等你决定', review: '待审查', broken: '失败与中断' }
   return (Object.keys(buckets) as InboxGroupKey[]).map(key => ({ key, title: titles[key], jobs: sortJobs(buckets[key]) }))
 }
 

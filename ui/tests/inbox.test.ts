@@ -40,10 +40,15 @@ describe('inboxGroups', () => {
       job({ name: 'review-old', state: 'done', updated: '2026-10-01 10:00:00' }),
       job({ name: 'ok', state: 'accepted' }),
     ])
-    expect(groups.map(g => g.key)).toEqual(['decide', 'review', 'broken', 'running'])
-    expect(groups.map(g => g.jobs.length)).toEqual([1, 2, 1, 1])
-    expect(groups[1].jobs.map(j => j.name)).toEqual(['review-new', 'review-old'])
-    expect(groups.map(g => g.title)).toEqual(['等你决定', '待审查', '失败与中断', '运行中'])
+    expect(groups.map(g => g.key)).toEqual(['running', 'decide', 'review', 'broken'])
+    expect(groups.map(g => g.jobs.length)).toEqual([1, 1, 2, 1])
+    expect(groups[2].jobs.map(j => j.name)).toEqual(['review-new', 'review-old'])
+    expect(groups.map(g => g.title)).toEqual(['正在执行', '等你决定', '待审查', '失败与中断'])
+  })
+  it('没有正在执行的单时该组仍在（长度为 0），供界面显示占位行', () => {
+    const groups = inboxGroups([job({ state: 'done' })])
+    expect(groups[0].key).toBe('running')
+    expect(groups[0].jobs).toEqual([])
   })
   it('全空时四组都空', () => {
     expect(inboxGroups([]).every(g => g.jobs.length === 0)).toBe(true)
