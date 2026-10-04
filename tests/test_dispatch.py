@@ -201,6 +201,9 @@ class DispatchTest(unittest.TestCase):
             self.assertIn("第 2 轮", f.read())  # 同一个进程接着干，不是重启
         history = self.ok("history", "t1").stdout
         self.assertEqual(history.count("工具 bash"), 2)
+        # 界面实际用的模型与指定的不同：要被发现并记下来
+        self.assertEqual(job["model_actual"], "fake/other")
+        self.assertIn("实际使用的模型是 fake/other", self.ok("log", "t1").stdout)
         # 驳回后关闭界面并释放通道
         self.ok("reject", "t1", "--reason", "测试")
         self.assertNotEqual(subprocess.run(["tmux", "has-session", "-t", "=ad-t1"], capture_output=True).returncode, 0)
@@ -387,6 +390,16 @@ class OpencodeReaderTest(unittest.TestCase):
 
     def test_missing_session_is_empty(self):
         self.assertEqual(self.read("import sys; sys.exit(1)"), ([], False))
+
+    def test_provider_error_is_readable(self):
+        script = ("import json\n"
+                  "print(json.dumps({'messages': [{'type': 'user', 'text': 'go'},"
+                  "{'type': 'assistant', 'time': {}, 'error': {'type': 'provider.quota', 'message': 'quota exceeded'}, 'content': []},"
+                  "{'type': 'idle', 'outcome': 'failed'}]}))")
+        items, idle = self.read(script)
+        self.assertTrue(idle)
+        self.assertEqual([item.get("message") for item in items if item["kind"] == "error"],
+                         ["quota exceeded", "回合结束，结果：failed"])
 
     def test_unfinished_assistant_message_is_not_idle(self):
         script = ("import json\n"

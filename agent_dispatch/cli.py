@@ -391,7 +391,8 @@ def print_job_detail(job):
     print(f"状态      {STATE_LABEL.get(job['state'], job['state'])}   STATUS={job.get('status') or '-'}   第 {job['turn']} 轮   耗时 {elapsed(job)}")
     if job.get("reason"):
         print(f"原因      {job['reason']}")
-    print(f"后端      {job['backend']}  {job['model']}")
+    print(f"后端      {job['backend']}  {job['model']}"
+          + (f"   ⚠ 实际用的是 {job['model_actual']}" if job.get("model_actual") else ""))
     print(f"目录      {job['cwd']}")
     print(f"通道      {','.join(job.get('channels') or []) or '-'}")
     print(f"会话      {job.get('session_id') or '（尚未取得）'}")

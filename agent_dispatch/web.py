@@ -47,7 +47,7 @@ def summarize(job):
     return {
         "name": job["name"], "batch": job.get("batch") or "", "profile": job.get("profile"),
         "group": group, "project": project, "role": job.get("role"), "role_title": job.get("role_title"),
-        "backend": job.get("backend"), "model": job.get("model"), "state": state,
+        "backend": job.get("backend"), "model": job.get("model"), "model_actual": job.get("model_actual"), "state": state,
         "state_label": cli.STATE_LABEL.get(state, state), "status": job.get("status"), "turn": job.get("turn"),
         "seconds": int(max(0, end - start)) if start else None, "channels": job.get("channels") or [],
         "task": job.get("task", ""), "needs_user": job.get("needs_user"), "reason": job.get("reason"),

@@ -173,7 +173,8 @@ function jobTable(rows) {
       h('td', {}, statusChip(j)),
       h('td', {}, j.gate_ok === true ? chip('通过', 'green') : j.gate_ok === false ? chip('未通过', 'red') : h('span', {class: 'muted'}, '-')),
       h('td', {}, j.turn), h('td', {class: 'nowrap'}, duration(j.seconds)),
-      h('td', {class: 'nowrap'}, j.backend, j.mode === 'tmux' ? ' · tmux' : '', h('div', {class: 'muted small'}, j.model)),
+      h('td', {class: 'nowrap'}, j.backend, j.mode === 'tmux' ? ' · tmux' : '', h('div', {class: 'muted small'}, j.model),
+        j.model_actual ? h('div', {class: 'small', style: 'color:var(--amber)'}, '⚠ 实际：' + j.model_actual) : null),
       h('td', {class: 'small nowrap', title: j.channels.join(', ')}, j.channels.length > 3 ? j.channels.length + ' 个通道' : j.channels.join(', ') || '-'),
       h('td', {}, h('div', {class: 'task', title: j.task}, j.task),
         j.activity ? h('div', {class: 'activity', title: j.activity}, j.activity) : j.reason ? h('div', {class: 'small', style: 'color:var(--red)'}, j.reason) : null))))));
@@ -284,7 +285,7 @@ function renderJob(v, d) {
       h('dt', {}, '任务'), h('dd', {}, d.task),
       d.role_title ? [h('dt', {}, '角色'), h('dd', {}, d.role_title, ' ', h('code', {}, d.role))] : null,
       h('dt', {}, '进度'), h('dd', {}, `第 ${d.turn} 轮 · ${duration(d.seconds)}`, d.reason ? h('span', {style: 'color:var(--red)'}, ' · ' + d.reason) : null),
-      h('dt', {}, '后端'), h('dd', {}, `${d.backend} · ${d.model}`),
+      h('dt', {}, '后端'), h('dd', {}, `${d.backend} · ${d.model}`, d.model_actual ? h('span', {style: 'color:var(--amber)'}, ` · ⚠ 实际用的是 ${d.model_actual}`) : null),
       h('dt', {}, '通道'), h('dd', {}, d.channels.join(', ') || '-'),
       h('dt', {}, '工作目录'), h('dd', {}, h('code', {}, d.cwd)),
       h('dt', {}, '会话'), h('dd', {}, d.session_id ? h('code', {}, d.session_id) : '（尚未取得）'),

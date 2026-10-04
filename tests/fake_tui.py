@@ -26,6 +26,7 @@ def message(role, **fields):
 
 if not os.path.exists(path):
     append({"type": "session", "id": session, "cwd": os.getcwd()})
+    append({"type": "model_change", "provider": "fake", "modelId": os.environ.get("FAKE_TUI_MODEL", "other")})
 
 turn = 0
 while True:

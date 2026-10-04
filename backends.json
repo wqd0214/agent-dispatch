@@ -17,7 +17,7 @@
     "default_model": "alibaba-coding-plan-cn/qwen3.7-plus",
     "argv": ["opencode", "run", "--format", "json", "--auto", "--model", "{model}", "--session", "{session}", "{extra}", "{task}"],
     "resume_argv": ["opencode", "run", "--format", "json", "--auto", "--model", "{model}", "--session", "{session}", "{extra}", "{task}"],
-    "interactive_argv": ["opencode", "--session", "{session}", "--auto", "{extra}", "--prompt", "{task}"],
+    "interactive_argv": ["env", "OPENCODE_CONFIG_CONTENT={\"model\": \"{model}\"}", "opencode", "--standalone", "--session", "{session}", "--auto", "{extra}", "--prompt", "{task}"],
     "session_reader": {"argv": ["opencode", "session", "export", "{session}"]},
     "attach": "opencode --session {session}"
   }

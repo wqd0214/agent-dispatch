@@ -86,6 +86,13 @@ class Recorder:
             self.errors.append(event["message"])
             self.say(f"错误  {clip(event['message'], 1000)}")
 
+    def cause(self):
+        """最能说明问题的那条错误：优先取具体报错，而不是泛泛的「回合结束，结果：failed」。"""
+        if not self.errors:
+            return ""
+        specific = [e for e in self.errors if not e.startswith("回合结束")]
+        return "：" + (specific or self.errors)[-1][:300]
+
     def close(self):
         self.events.close()
         self.log.close()
@@ -175,7 +182,7 @@ def run_headless(name, job, backend, task):
     kill_child()  # 智能体退出后，清掉可能残留的子进程
 
     final = state.get("final") or ""
-    last_error = f"：{recorder.errors[-1]}" if recorder.errors else ""
+    last_error = recorder.cause()
     if flags["timed_out"]:
         result = ("failed", f"超过 {job['timeout_min']} 分钟被终止")
     elif flags["stopped"]:
@@ -242,7 +249,7 @@ def run_tmux(name, job, backend, task):
             tmux.kill(session)
             result = ("stopped", "被叫停")
         elif received and idle:
-            result = ("done", None) if recorder.final or following else ("failed", "智能体没有给出任何回复" + (f"：{recorder.errors[-1]}" if recorder.errors else ""))
+            result = ("done", None) if recorder.final or following else ("failed", "智能体没有给出任何回复" + recorder.cause())
         elif gone:
             result = ("failed", "tmux 会话已结束（界面被关闭或崩溃），回合没有完成")
         elif deadline and time.time() > deadline:
@@ -256,6 +263,10 @@ def run_tmux(name, job, backend, task):
             continue
         break
 
+    actual = backends.session_model(backend, job)
+    if actual and actual != job["model"]:
+        recorder.say(f"⚠ 实际使用的模型是 {actual}，与指定的 {job['model']} 不一致")
+        store.update(name, model_actual=actual)
     final = recorder.final
     if following and not final:  # 跟进期间没有新回复：结论取会话里最后一条回复
         final = next((item["text"] for item in reversed(items) if item["kind"] == "text"), "")

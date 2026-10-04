@@ -177,18 +177,7 @@ def _ms(start, end):
 
 
 def read_session_pi(backend, job):
-    pattern = os.path.expanduser(backend["session_reader"]["glob"].replace("{session}", job["session_id"]))
-    real = os.path.realpath(job["cwd"])
-    path = None
-    for candidate in sorted(glob.glob(pattern), reverse=True):
-        try:
-            with open(candidate, encoding="utf-8") as f:
-                head = json.loads(f.readline())
-        except (OSError, ValueError):
-            continue
-        if os.path.realpath(head.get("cwd", "")) == real:
-            path = candidate
-            break
+    path = _pi_session_path(backend, job)
     if not path:
         return [], False
     items, calls, idle = [], {}, False
@@ -245,7 +234,7 @@ def read_session_opencode(backend, job):
             items.append({"kind": "user", "text": message.get("text") or ""})
             idle = False
         elif kind == "assistant":
-            if not (message.get("time") or {}).get("completed"):
+            if not (message.get("time") or {}).get("completed") and not message.get("error"):
                 break  # 还在生成的消息下次再读，保证条目只增不改
             idle = False
             texts = []
@@ -260,7 +249,9 @@ def read_session_opencode(backend, job):
             if texts:
                 items.append({"kind": "text", "text": "\n".join(texts)})
             if message.get("error"):
-                items.append({"kind": "error", "message": json.dumps(message["error"], ensure_ascii=False)})
+                error = message["error"]
+                text = error.get("message") if isinstance(error, dict) else None
+                items.append({"kind": "error", "message": text or json.dumps(error, ensure_ascii=False)})
         elif kind == "idle":
             idle = True
             if message.get("outcome") not in (None, "succeeded"):
@@ -269,3 +260,45 @@ def read_session_opencode(backend, job):
 
 
 SESSION_READERS = {"pi": read_session_pi, "opencode": read_session_opencode}
+
+
+def _pi_session_path(backend, job):
+    pattern = os.path.expanduser(backend["session_reader"]["glob"].replace("{session}", job["session_id"]))
+    real = os.path.realpath(job["cwd"])
+    for candidate in sorted(glob.glob(pattern), reverse=True):
+        try:
+            with open(candidate, encoding="utf-8") as f:
+                if os.path.realpath(json.loads(f.readline()).get("cwd", "")) == real:
+                    return candidate
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def session_model(backend, job):
+    """会话里实际用的模型（provider/model）；读不到返回 None。用来发现「指定的模型没生效」。"""
+    if not backend.get("session_reader") or not job.get("session_id"):
+        return None
+    if backend["format"] == "pi":
+        path = _pi_session_path(backend, job)
+        model = None
+        for line in open(path, encoding="utf-8", errors="replace") if path else []:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if entry.get("type") == "model_change":
+                model = f"{entry.get('provider')}/{entry.get('modelId')}"
+        return model
+    if backend["format"] == "opencode":
+        argv = [token.replace("{session}", job["session_id"]) for token in backend["session_reader"]["argv"]]
+        with tempfile.TemporaryFile() as out:
+            subprocess.run(argv, cwd=job["cwd"], env=dict(os.environ, PWD=job["cwd"]), stdout=out,
+                           stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            out.seek(0)
+            try:
+                model = json.loads(out.read().decode("utf-8", errors="replace"))["info"]["model"]
+                return f"{model['providerID']}/{model['id']}"
+            except (ValueError, KeyError, TypeError):
+                return None
+    return None
