@@ -243,6 +243,9 @@ def cmd_start(a):
     task = read_task(a)
     if not task:
         raise DispatchError("任务为空（用位置参数、-f 文件或标准输入传入）")
+    for followed in a.follows or []:  # 关联：这张单是因为那张单才派的
+        if not store.exists(followed):
+            raise DispatchError(f"--follows 的作业不存在：{followed}")
     channels = pick_channels(profile, a.channels)
     mode = a.mode or profile.get("mode") or "headless"
     session_id = backends.initial_session(backend, a.job)
@@ -283,7 +286,7 @@ def cmd_start(a):
         "cwd": cwd, "session_id": session_id, "state": "running", "status": None,
         "dispatcher": who,
         "mode": mode, "tmux": "ad-" + a.job.replace(".", "_") if mode == "tmux" else None,
-        "turn": 1, "channels": channels, "task": task,
+        "turn": 1, "channels": channels, "task": task, "follows": a.follows or [],
         "timeout_min": a.timeout if a.timeout is not None else profile.get("timeout_min"),
         "backend_args": backend_args(profile, backend_name),
         "created": store.now(), "created_ts": now_ts, "turn_started": store.now(), "turn_started_ts": now_ts,
@@ -300,6 +303,11 @@ def cmd_start(a):
     who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
     picked_note = f"（按模型池选中 {model_alias}）" if model_alias else ""
     store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model}{picked_note} 通道={','.join(channels) or '无'}")
+    if a.batch:
+        meta = store.register_batch(a.batch, a.batch_title, a.batch_reason, job["dispatcher"])
+        if not (meta or {}).get("title"):
+            store.info(f"⚠ 这个批次还没有事项标题：请补上 agent-dispatch batch {a.batch} --title \"<事项标题>\" --reason \"<为什么派这批单>\""
+                       "（或下次派工时带 --batch-title / --batch-reason）")
     store.info(f"等结果：agent-dispatch wait {a.job}    看输出：agent-dispatch log {a.job} -f"
                + (f"    接进界面：agent-dispatch attach {a.job}" if mode == "tmux" else ""))
     return 0
@@ -402,6 +410,46 @@ def cmd_wait(a):
     return 0
 
 
+def cmd_batches(a):
+    """按事项（批次）汇总：每个事项一行，谁派的、各状态数量、最近活动。"""
+    rows_data = store.batch_rows(a.project)
+    if not rows_data:
+        print("（暂无事项。派工时用 --batch 归组，并带 --batch-title / --batch-reason 说明事项）")
+        return 0
+    rows = [("事项", "原因", "派工者", "执行中", "待审查", "已完成", "失败", "最近活动", "批次")]
+    for r in rows_data:
+        c, d = r["counts"], r["dispatcher"]
+        who = d["kind"] + (f"（{d['title']}）" if d.get("title") else "")
+        rows.append((r["title"] or f"（未命名 {r['id']}）", r["reason"] or "-", who,
+                     c["running"], c["review"], c["done"], c["failed"], r["activity"] or "-", r["id"]))
+    table(rows)
+    return 0
+
+
+def cmd_batch(a):
+    """查看一个事项：标题、原因、派工者和它名下的全部作业；也可事后补标题和原因。"""
+    jobs = [j for j in store.all_jobs() if j.get("batch") == a.batch]
+    meta = store.load_batch(a.batch)
+    if not jobs and not meta:
+        raise DispatchError(f"没有这个批次：{a.batch}")
+    if a.title or a.reason:
+        meta = store.register_batch(a.batch, a.title, a.reason)
+        store.info(f"已更新事项 {a.batch} 的信息")
+    dispatcher = (meta or {}).get("dispatcher") or store.batch_dispatcher_row(jobs)
+    print(f"事项      {(meta or {}).get('title') or f'（未命名）'}   批次 {a.batch}")
+    print(f"原因      {(meta or {}).get('reason') or '-'}")
+    print(f"派工者    {dispatcher['kind']}  {dispatcher.get('title') or dispatcher.get('session_id') or ''}")
+    if not jobs:
+        print("（这个批次还没有作业）")
+        return 0
+    for job in sorted(jobs, key=lambda j: (j.get("created") or "", j["name"])):
+        line = "  " + summary_line(job)
+        if job.get("follows"):
+            line += f"  （因 {'、'.join(job['follows'])} 而派）"
+        print(line)
+    return 0
+
+
 def cmd_sessions(a):
     """按派工会话汇总：一次会话派了几张单、各是什么状态。"""
     rows_data = store.session_rows()
@@ -441,6 +489,14 @@ def print_status_table(batch=None, group=None, project=None):
 
 def print_job_detail(job):
     print(f"作业      {job['name']}" + (f"   批次 {job['batch']}" if job.get("batch") else ""))
+    if job.get("batch"):
+        meta = store.load_batch(job["batch"]) or {}
+        print(f"事项      {meta.get('title') or '（未命名）'}" + (f"：{meta['reason']}" if meta.get("reason") else ""))
+    if job.get("follows"):
+        print(f"因…而派  {'、'.join(job['follows'])}")
+    followers = [j["name"] for j in store.all_jobs() if job["name"] in (j.get("follows") or [])]
+    if followers:
+        print(f"后续      {'、'.join(followers)}")
     print(f"项目      {' / '.join(part for part in store.project_of(job) if part) or '-'}"
           + (f"   角色 {job['role_title']}（{job['role']}）" if job.get("role") else ""))
     print(f"状态      {STATE_LABEL.get(job['state'], job['state'])}   STATUS={job.get('status') or '-'}   第 {job['turn']} 轮   耗时 {elapsed(job)}")
@@ -1103,7 +1159,11 @@ def build_parser():
     p.add_argument("--profile", "-p", help="早先的 profile 名（已被 --project/--role 取代）")
     p.add_argument("--backend", "-b", help="后端：pi / opencode …（默认取角色定义）")
     p.add_argument("--model", "-m", help="模型（默认取角色定义或后端默认）")
-    p.add_argument("--batch", help="批次名：同一次请求派出的作业用同一个批次")
+    p.add_argument("--batch", help="批次名：同一次请求派出的作业用同一个批次（即一个事项）")
+    p.add_argument("--batch-title", dest="batch_title", help="事项标题：这个批次是因为要办什么事")
+    p.add_argument("--batch-reason", dest="batch_reason", help="事项原因：为什么派这批单")
+    p.add_argument("--follows", action="append", default=[], metavar="作业名",
+                   help="这张单是因为那张单才派的（重派、按复核意见修复、接着上一步），可重复")
     p.add_argument("--channels", help="浏览器通道：逗号分隔，或 all / none（默认取 profile）")
     p.add_argument("--cwd", help="工作目录（默认取 profile）")
     p.add_argument("--file", "-f", help="从文件读任务文本")
@@ -1116,6 +1176,14 @@ def build_parser():
 
     p = add("sessions", cmd_sessions, "按派工会话汇总：派了几张单、各是什么状态")
     p.add_argument("--project", "-P", help="只看这个项目的会话（项目 ID）")
+
+    p = add("batches", cmd_batches, "按事项汇总：每个批次一行，标题、原因、谁派的、各状态数量")
+    p.add_argument("--project", "-P", help="只看这个项目的事项（项目 ID）")
+
+    p = add("batch", cmd_batch, "查看一个事项（批次）；事后补 --title / --reason")
+    p.add_argument("batch", help="批次名")
+    p.add_argument("--title", help="补上或修改事项标题")
+    p.add_argument("--reason", help="补上或修改事项原因")
 
     p = add("wait", cmd_wait, "限时等待作业落定；超时返回码 3，只表示还在跑")
     p.add_argument("jobs", nargs="*")
@@ -1238,7 +1306,7 @@ def build_parser():
     p.add_argument("--backend", help="add：默认后端")
     p.add_argument("--mode", choices=["headless", "tmux"], help="add：默认运行方式")
 
-    p = add("web", cmd_web, "只读的本地网页总览：web start 后台运行，web stop 停止；不带动作则在前台运行")
+    p = add("web", cmd_web, "本地网页总览与配置：web start 后台运行，web stop 停止；不带动作则在前台运行")
     p.add_argument("action", nargs="?", choices=["start", "stop", "status"], help="start 后台启动 / stop 停止 / status 查看；省略则前台运行")
     p.add_argument("--open", action="store_true", help="同时在浏览器里打开")
     p.add_argument("--host", default="127.0.0.1")

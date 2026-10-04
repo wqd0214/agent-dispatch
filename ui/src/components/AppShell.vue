@@ -64,7 +64,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <router-link v-for="item in [
           { key: '/dashboard', label: '工作台' },
           { key: '/jobs', label: '作业' },
-          { key: '/batches', label: '批次' },
+          { key: '/batches', label: '事项' },
           { key: '/stats', label: '统计' },
         ]" :key="item.key" :to="item.key" class="nav-item" :class="{ on: activeNav === item.key }">
           <span>{{ item.label }}</span>
@@ -79,7 +79,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </nav>
       <div class="sec">全局</div>
       <nav class="nav">
-        <a href="/legacy#/models" class="nav-item">派工工具与模型</a>
+        <router-link to="/global/models" class="nav-item" :class="{ on: activeNav === '/global/models' }">工具与模型</router-link>
       </nav>
     </aside>
     <div class="right">

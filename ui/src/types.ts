@@ -27,6 +27,10 @@ export interface JobSummary {
   updated: string
   ended: string | null
   activity: string
+  batch_title?: string
+  batch_reason?: string
+  follows?: string[]
+  dispatcher?: { kind: string; session_id: string; title: string | null } | null
 }
 
 export interface RoleDef {
@@ -51,7 +55,7 @@ export interface Overview {
   home: string
   jobs: JobSummary[]
   cases: { tc: string; verdict: string; evidence: string; note: string; job: string; batch: string; group: string; project: string; run: string }[]
-  channels: { group: string; project: string; profile: string; table: unknown }[]
+  channels: { group: string; project: string; profile: string; table: Record<string, string | null> }[]
   definitions: ProjectDef[]
 }
 
@@ -84,6 +88,19 @@ export interface Gate {
 
 export interface RunFile { path: string; size: number }
 
+export interface BatchSummary {
+  id: string
+  title: string
+  reason: string
+  created: string | null
+  dispatcher: { kind: string; session_id: string; title: string }
+  counts: { total: number; running: number; review: number; done: number; failed: number }
+  activity: string
+  jobs: string[]
+}
+
+export interface BatchesData { now: string; batches: BatchSummary[] }
+
 export interface JobDetail extends JobSummary {
   cwd: string
   session_id: string | null
@@ -99,6 +116,7 @@ export interface JobDetail extends JobSummary {
   run_dir: string | null
   run_files: RunFile[]
   job_dir: string
+  followed_by?: string[]
 }
 
 export interface LogChunk { offset: number; text: string }
@@ -117,6 +135,73 @@ export interface JobActionBody {
   role?: string
   repo?: string
   batch?: string
+  batch_title?: string
+  batch_reason?: string
+  follows?: string[]
   job?: string
   task?: string
+}
+
+// ---------- 配置中心与模型登记（/api/config、/api/models）----------
+
+export interface RoleField<T = unknown> { value: T; source: string }
+
+export interface RoleBrief { text: string | null; source: string | null; path: string | null }
+
+export interface RoleDetail {
+  role: string
+  title: string
+  scope: string
+  repos: string[]
+  pool_source: string | null
+  fields: Record<string, RoleField>
+  brief: RoleBrief
+}
+
+export interface ConfigProject {
+  id: string
+  name: string
+  default_role: string | null
+  defaults: Record<string, unknown>
+  supervisor: string
+  repos: { id: string; name: string; cwd: string; channels: string[]; channel_ns: string }[]
+  roles: { id: string; title: string; description: string; repos: string[]; scope: string }[]
+}
+
+export interface ConfigOverview {
+  projects: ConfigProject[]
+  roles: { id: string; title: string; description: string }[]
+}
+
+export interface PoolEntry { model: string; weight: number }
+
+export interface RegisteredModel {
+  alias: string
+  backend: string
+  id: string
+  enabled: boolean
+  note: string
+  paused: { reason: string; until: number } | null
+  used_by: { project: string; project_name: string; role: string; role_title: string; weight: number }[]
+  jobs: number
+  settled: number
+  pass: number
+  failed: number
+  avg_seconds: number | null
+  provider_failures: number
+  backend_enabled: boolean
+}
+
+export interface ToolInfo {
+  name: string
+  enabled: boolean
+  default_model: string | null
+  models: number
+}
+
+export interface ModelPage {
+  cooldown_min: number
+  models: RegisteredModel[]
+  backends: string[]
+  tools: ToolInfo[]
 }

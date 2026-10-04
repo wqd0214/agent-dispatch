@@ -661,11 +661,10 @@ class DispatchTest(unittest.TestCase):
             self.assertIn("max-age", headers["Cache-Control"])
             for path in ("/assets/../../etc/passwd", "/assets/..%2f..%2fetc%2fpasswd"):
                 self.assertEqual(get(path)[0], 404, path)
+            # 旧页面（/legacy）已删除：只剩前端路由回退，送新界面的 index.html
             status, headers, body = get("/legacy")
             self.assertEqual(status, 200)
-            self.assertIn("text/html", headers["Content-Type"])
-            with open(os.path.join(ROOT, "agent_dispatch", "web.html"), "rb") as f:
-                self.assertEqual(body, f.read())
+            self.assertIn("新界面", body.decode())
             with urllib.request.urlopen(base + "/api/overview", timeout=5) as response:
                 self.assertIn("jobs", json.load(response))
         finally:
@@ -1051,6 +1050,150 @@ class ConfigApiTest(DispatchTest):
             self.assertEqual(call("POST", "/api/config/projects/p1/supervisor", {"text": "p1 规则"})[0], 200)
             self.assertEqual(next(p for p in call("GET", "/api/config")[1]["projects"]
                                   if p["id"] == "p1")["supervisor"], "p1 规则")
+        finally:
+            self.ok("web", "stop")
+
+
+class BatchTopicTest(DispatchTest):
+    """事项：批次的标题/原因登记、follows 关联、batches/batch 命令与网页接口。"""
+
+    SUP = {"AGENT_DISPATCH_SESSION": "s-batch", "AGENT_DISPATCH_SESSION_KIND": "pi"}
+
+    def read_batch_file(self, batch):
+        with open(os.path.join(self.home, "batches", f"{batch}.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_batch_title_registered_and_not_cleared(self):
+        self.ok("start", "bt1", "-p", "t", "--batch", "fix-01", "--batch-title", "修复登录超时",
+                "--batch-reason", "用户反馈登录偶发超时", "STATUS: PASS", env_extra=self.SUP)
+        data = self.read_batch_file("fix-01")
+        self.assertEqual((data["id"], data["title"], data["reason"]),
+                         ("fix-01", "修复登录超时", "用户反馈登录偶发超时"))
+        self.assertEqual(data["dispatcher"]["session_id"], "s-batch")
+        # 第二张单不带标题：不清空
+        self.ok("start", "bt2", "-p", "t", "--batch", "fix-01", "--channels", "none", "SLEEP 30",
+                env_extra=self.SUP)
+        self.assertEqual(self.read_batch_file("fix-01")["title"], "修复登录超时")
+        # 带了新值就更新
+        self.ok("stop", "bt2")
+        self.ok("start", "bt3", "-p", "t", "--batch", "fix-01", "--batch-title", "修复登录超时（扩展）",
+                "STATUS: PASS", env_extra=self.SUP)
+        self.assertEqual(self.read_batch_file("fix-01")["title"], "修复登录超时（扩展）")
+        self.ok("wait", "bt3", "--timeout", "20")
+
+    def test_batch_without_title_reminds_but_succeeds(self):
+        result = self.ok("start", "bn1", "-p", "t", "--batch", "no-title", "STATUS: PASS")
+        self.assertIn("--batch-title", result.stderr)
+        self.assertIn("no-title", result.stderr)
+        # 有标题的批次不再提醒
+        result = self.ok("start", "bn2", "-p", "t", "--batch", "titled", "--batch-title", "T",
+                         "--channels", "none", "SLEEP 30")
+        self.assertNotIn("--batch-title", result.stderr)
+        self.ok("stop", "bn1")
+        self.ok("stop", "bn2")
+
+    def test_follows_validated_and_stored(self):
+        self.assertEqual(self.cli("start", "f1", "-p", "t", "--follows", "nope", "STATUS: PASS").returncode, 2)
+        self.ok("start", "f0", "-p", "t", "STATUS: PASS", env_extra=self.SUP)
+        self.ok("wait", "f0", "--timeout", "20")
+        self.ok("start", "f1", "-p", "t", "--follows", "f0", "STATUS: PASS")
+        self.assertEqual(self.job("f1")["follows"], ["f0"])
+        self.ok("wait", "f0", "--timeout", "20")
+        self.ok("wait", "f1", "--timeout", "20")
+
+    def test_batches_and_batch_commands(self):
+        self.ok("start", "bb1", "-p", "t", "--batch", "bb", "--batch-title", "出库回归", "STATUS: PASS")
+        self.ok("start", "bb2", "-p", "t", "--batch", "bb", "--channels", "none", "SLEEP 30")
+        self.ok("wait", "bb1", "--timeout", "20")
+        listing = self.ok("batches").stdout
+        self.assertIn("出库回归", listing)
+        self.assertIn("bb", listing)
+        # 不存在的批次报错
+        self.assertEqual(self.cli("batch", "bb2x", "--title", "x").returncode, 2)
+        self.ok("batch", "bb", "--reason", "回归出库场景")
+        data = self.read_batch_file("bb")
+        self.assertEqual((data["title"], data["reason"]), ("出库回归", "回归出库场景"))
+        detail = self.ok("batch", "bb").stdout
+        self.assertIn("出库回归", detail)
+        self.assertIn("bb1", detail)
+        self.ok("stop", "bb2")
+
+    def test_api_batches_and_post(self):
+        import socket, urllib.error, urllib.request
+        self.ok("start", "ab1", "-p", "t", "--batch", "ab", "--batch-title", "接口事项",
+                "SLEEP 30", env_extra=self.SUP)
+        self.ok("start", "ab2", "-p", "t", "--batch", "ab", "--follows", "ab1", "--channels", "none",
+                "SLEEP 30", env_extra=self.SUP)
+        # 历史批次：没有登记文件也不报错，标题为空
+        os.makedirs(os.path.join(self.home, "jobs", "legacy9"))
+        with open(os.path.join(self.home, "jobs", "legacy9", "job.json"), "w") as f:
+            json.dump({"name": "legacy9", "profile": "t", "state": "done", "batch": "old-batch",
+                       "cwd": self.work, "turn": 1, "created": "2024-01-01 00:00:00"}, f)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+
+        def call(method, path, body=None, header=True):
+            request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method,
+                                             data=json.dumps(body or {}).encode() if body else None)
+            request.add_header("Content-Type", "application/json")
+            if header:
+                request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, json.load(exc)
+                finally:
+                    exc.close()
+
+        try:
+            self.ok("web", "start", "--port", port)
+            status, data = call("GET", "/api/batches", header=False)
+            self.assertEqual(status, 200)
+            rows = {r["id"]: r for r in data["batches"]}
+            self.assertIn("ab", rows)
+            self.assertIn("old-batch", rows)  # 历史批次不报错
+            self.assertEqual(rows["old-batch"]["title"], "")
+            row = rows["ab"]
+            self.assertEqual(row["title"], "接口事项")
+            self.assertEqual(row["dispatcher"]["kind"], "pi")
+            self.assertEqual(row["counts"]["running"], 2)
+            self.assertEqual(row["counts"]["review"], 0)
+            self.assertEqual(row["jobs"], ["ab1", "ab2"])
+            # 总览作业带 batch_title / follows / dispatcher
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/overview", timeout=5) as response:
+                overview = json.load(response)
+            job = next(j for j in overview["jobs"] if j["name"] == "ab2")
+            self.assertEqual(job["batch_title"], "接口事项")
+            self.assertEqual(job["follows"], ["ab1"])
+            self.assertEqual(job["dispatcher"]["session_id"], "s-batch")
+            # 改标题要走写校验
+            self.assertEqual(call("POST", "/api/batches/ab", {"title": "改后"}, header=False)[0], 403)
+            status, _ = call("POST", "/api/batches/ab", {"title": "改后", "reason": "r"})
+            self.assertEqual(status, 200)
+            self.assertEqual(self.read_batch_file("ab")["title"], "改后")
+        finally:
+            self.ok("web", "stop")
+            self.ok("stop", "ab1")
+            self.ok("stop", "ab2")
+
+    def test_web_dispatch_accepts_batch_meta(self):
+        import socket, urllib.request
+        self.make_project()
+        port = self.start_web()
+        try:
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/api/jobs", method="POST",
+                                             data=json.dumps({"project": "p1", "role": "dev", "task": "STATUS: PASS",
+                                                              "batch": "wb1", "batch_title": "网页事项",
+                                                              "batch_reason": "从网页派", "follows": []}).encode())
+            request.add_header("Content-Type", "application/json")
+            request.add_header("X-Agent-Dispatch", "1")
+            with urllib.request.urlopen(request, timeout=70) as response:
+                data = json.load(response)
+            self.assertTrue(data["ok"], data)
+            self.assertEqual(self.read_batch_file("wb1")["title"], "网页事项")
         finally:
             self.ok("web", "stop")
 

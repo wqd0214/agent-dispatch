@@ -4,7 +4,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { api } from '../api'
+import { api, batchApi } from '../api'
 import { debounce } from '../lib/debounce'
 import { useCurrentProject, useProjectScope } from '../composables/useProject'
 import { useSharedOverview } from '../composables/usePolling'
@@ -17,8 +17,11 @@ const { selected: currentProject } = useCurrentProject()
 const overview = useSharedOverview()
 const scope = useProjectScope(() => overview.data.value)
 
+import type { BatchSummary } from '../types'
+
 const options = ref<DispatchOptionProject[] | null>(null)
-const form = reactive({ project: '', role: '', repo: '', task: '', batch: '', job: '' })
+const knownBatches = ref<BatchSummary[]>([])
+const form = reactive({ project: '', role: '', repo: '', task: '', batch: '', batchTitle: '', batchReason: '', job: '' })
 const preview = ref<Record<string, unknown> | null>(null)
 const previewError = ref('')
 const previewing = ref(false)
@@ -38,13 +41,27 @@ const recentBatches = computed(() => {
 })
 
 async function loadOptions() {
-  if (options.value) return
-  try {
-    options.value = (await api.dispatchOptions()).projects
-  } catch (e) {
-    ElMessage.error(`加载派工选项失败：${e instanceof Error ? e.message : e}`)
+  if (!options.value) {
+    try {
+      options.value = (await api.dispatchOptions()).projects
+    } catch (e) {
+      ElMessage.error(`加载派工选项失败：${e instanceof Error ? e.message : e}`)
+    }
+  }
+  if (!knownBatches.value.length) {
+    try {
+      knownBatches.value = (await batchApi.list()).batches
+    } catch { /* 事项列表拿不到也不拦着派工 */ }
   }
 }
+// 选了已有批次时带出它的标题和原因
+watch(() => form.batch, id => {
+  const known = knownBatches.value.find(b => b.id === id)
+  if (known) {
+    form.batchTitle = known.title
+    form.batchReason = known.reason
+  }
+})
 
 function reset() {
   form.project = currentProject.value && projects.value.some(p => p.id === currentProject.value) ? currentProject.value : (projects.value[0]?.id ?? '')
@@ -52,6 +69,8 @@ function reset() {
   form.repo = ''
   form.task = ''
   form.batch = ''
+  form.batchTitle = ''
+  form.batchReason = ''
   form.job = ''
   preview.value = null
   previewError.value = ''
@@ -63,7 +82,7 @@ watch(visible, v => { if (v) void loadOptions().then(reset) }, { immediate: true
 // 预览参数齐了（选了角色、写了任务）才请求；任务输入停顿 500 毫秒
 const body = computed(() => ({
   project: form.project, role: form.role, repo: needRepo.value ? form.repo : (role.value?.repos.length === 1 ? role.value.repos[0] : ''),
-  batch: form.batch, job: form.job, task: form.task,
+  batch: form.batch, batch_title: form.batchTitle, batch_reason: form.batchReason, job: form.job, task: form.task,
 }))
 const ready = computed(() => !!form.project && !!form.role && (!needRepo.value || !!form.repo) && !!form.task.trim())
 
@@ -146,6 +165,16 @@ async function send() {
           <div class="grow">
             <div class="sub">作业名（可选，留空自动生成）</div>
             <el-input v-model="form.job" placeholder="如 tester-1004-1830" size="small" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="grow">
+            <div class="sub">事项标题（这个批次要办什么事）</div>
+            <el-input v-model="form.batchTitle" placeholder="如 修复出库重复记录" size="small" />
+          </div>
+          <div class="grow">
+            <div class="sub">原因（为什么派这批单）</div>
+            <el-input v-model="form.batchReason" placeholder="如 用户反馈出库偶发重复" size="small" />
           </div>
         </div>
       </div>
