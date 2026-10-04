@@ -1231,7 +1231,8 @@ class RunCliStdoutTest(unittest.TestCase):
 
 
 class McpSkillRegistryTest(DispatchTest):
-    """MCP 与技能的登记、导入、遮罩和按角色配置。导入来源全在临时目录，不读真实的 ~/.pi 等配置。"""
+    """MCP 与技能的登记（登记 ID 唯一、name 下发）、导入合并、遮罩和按角色配置。
+    导入来源全在临时目录，不读真实的 ~/.pi 等配置。"""
 
     def setUp(self):
         super().setUp()
@@ -1239,8 +1240,9 @@ class McpSkillRegistryTest(DispatchTest):
         self.fakehome = os.path.join(self.tmp, "userhome")
         pi_mcp = {"mcpServers": {
             "pi-server": {"command": "npx", "args": ["-y", "pkg", "--password", "s3cret"],
-                          "env": {"TOKEN": "tok-123"}},
-            "shared": {"command": "pi-cmd"}}}
+                          "env": {"TOKEN": "tok-123", "NODE_ENV": "production"}},
+            "shared": {"command": "pi-cmd"},
+            "dupe": {"command": "same-cmd"}}}
         os.makedirs(os.path.join(self.fakehome, ".pi", "agent"))
         with open(os.path.join(self.fakehome, ".pi", "agent", "mcp.json"), "w") as f:
             json.dump(pi_mcp, f)
@@ -1251,19 +1253,31 @@ class McpSkillRegistryTest(DispatchTest):
         os.makedirs(os.path.join(self.fakehome, ".config", "opencode"))
         with open(os.path.join(self.fakehome, ".config", "opencode", "opencode.json"), "w") as f:
             json.dump(oc_cfg, f)
-        for rel, desc in ((".claude/skills/demo-skill", "演示技能的说明"), (".pi/agent/skills/pi-skill", None)):
-            directory = os.path.join(self.fakehome, rel)
+        for rel, desc in (((".claude", "skills", "demo-skill"), "演示技能的说明"),
+                          ((".pi", "agent", "skills", "pi-skill"), None),
+                          ((".claude", "skills", "dual"), "甲版本"),
+                          ((".agents", "skills", "dual"), "乙版本")):
+            directory = os.path.join(self.fakehome, *rel)
             os.makedirs(directory)
             text = "# 没有前置说明的技能\n正文\n" if desc is None else f"---\ndescription: {desc}\n---\n# 标题\n"
             with open(os.path.join(directory, "SKILL.md"), "w") as f:
                 f.write(text)
+        # 同内容拷贝（demo-skill 的第二份）与软链接（pi-skill 的别名）：都应合并成一个变体
+        copy_dir = os.path.join(self.fakehome, ".agents", "skills", "demo-skill")
+        os.makedirs(copy_dir)
+        with open(os.path.join(copy_dir, "SKILL.md"), "w") as f:
+            f.write("---\ndescription: 演示技能的说明\n---\n# 标题\n")
+        os.makedirs(os.path.join(self.fakehome, ".cc-switch", "skills"))
+        os.symlink(os.path.join(self.fakehome, ".pi", "agent", "skills", "pi-skill"),
+                   os.path.join(self.fakehome, ".cc-switch", "skills", "pi-skill"))
         os.makedirs(os.path.join(self.fakehome, ".claude", "skills", "noskill"))  # 没有 SKILL.md，不算技能
         with open(os.path.join(self.fakehome, ".claude", "skills", "noskill", "README.md"), "w") as f:
             f.write("x")
         # 项目工程里的来源（make_project 的 app 工程就是 self.work）
         os.makedirs(os.path.join(self.work, ".pi"))
         with open(os.path.join(self.work, ".pi", "mcp.json"), "w") as f:
-            json.dump({"mcpServers": {"proj-mcp": {"command": "proj-cmd", "args": ["--dsn", "mysql://u:pw@h/db"]}}}, f)
+            json.dump({"mcpServers": {"proj-mcp": {"command": "proj-cmd", "args": ["--dsn", "mysql://u:pw@h/db"]},
+                                      "dupe": {"command": "same-cmd"}}}, f)  # dupe 与 pi 全局内容相同：合并
         with open(os.path.join(self.work, "opencode.json"), "w") as f:
             json.dump({"mcp": {"proj-oc": {"type": "remote", "url": "https://x/sse",
                                           "headers": {"Authorization": "Bearer t"}}}}, f)
@@ -1280,6 +1294,19 @@ class McpSkillRegistryTest(DispatchTest):
             return
         self._project_made = True
         super().make_project()
+
+    # 对时间敏感的 tmux 用例在 DispatchTest 里已跑过；子类重复跑只会加重机器负载、诱发时长糖乱
+    @unittest.skip("基类已覆盖，不重复跑时间敏感的 tmux 用例")
+    def test_tmux_mode_keeps_session_alive_between_turns(self):
+        pass
+
+    @unittest.skip("基类已覆盖，不重复跑时间敏感的 tmux 用例")
+    def test_tmux_mode_take_while_running_and_stop(self):
+        pass
+
+    @unittest.skip("基类已覆盖，不重复跑时间敏感的 tmux 用例")
+    def test_follow_reattaches_to_running_session(self):
+        pass
 
     def _snapshot_sources(self):
         paths = [self.fakehome, os.path.join(self.work, ".pi"), os.path.join(self.work, ".agents"),
@@ -1323,122 +1350,164 @@ class McpSkillRegistryTest(DispatchTest):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         return [l for l in proc.stdout.splitlines() if l.startswith("@@")][-1][2:]
 
-    def by_name(self, candidates, name):
-        return [c for c in candidates if c["name"] == name]
+    def group(self, candidates, name):
+        return next(g for g in candidates if g["name"] == name)
 
-    def test_mcp_candidates_normalize_two_formats(self):
+    def test_mcp_candidates_grouped_with_diff(self):
         out = self.py("result = registry.mcp_candidates()")
-        pi = self.by_name(out, "pi-server")[0]
+        shared = self.group(out, "shared")
+        self.assertTrue(shared["conflict"])
+        self.assertEqual({v["id"] for v in shared["variants"]}, {"shared@pi-global", "shared@oc-global"})
+        self.assertTrue(all(v["name"] == "shared" for v in shared["variants"]))  # name 保持服务名
+        self.assertIn("command", shared["variants"][0]["diff"])  # 差异摘要指出哪些参数不同
+        # 内容相同的来源合并成一个变体并记下全部来源
+        dupe = self.group(out, "dupe")
+        self.assertFalse(dupe["conflict"])
+        self.assertEqual(dupe["variants"][0]["id"], "dupe")
+        self.assertEqual(len(dupe["variants"][0]["sources"]), 2)
+        self.assertTrue(any("pi 全局" in s for s in dupe["variants"][0]["sources"]))
+        self.assertTrue(any("项目" in s for s in dupe["variants"][0]["sources"]))
+        pi = self.group(out, "pi-server")["variants"][0]
         self.assertEqual((pi["entry"]["type"], pi["entry"]["command"]), ("local", "npx"))
-        self.assertEqual(pi["entry"]["env"], {"TOKEN": "tok-123"})
-        self.assertFalse(pi["conflict"])
-        oc = self.by_name(out, "oc-server")[0]
+        self.assertEqual(pi["entry"]["env"]["NODE_ENV"], "production")
+        oc = self.group(out, "oc-server")["variants"][0]
         self.assertEqual((oc["entry"]["command"], oc["entry"]["args"]), ("oc-run", ["x"]))  # OpenCode 数组归一
-        proj = self.by_name(out, "proj-oc")[0]
+        proj = self.group(out, "proj-oc")["variants"][0]
         self.assertEqual((proj["entry"]["type"], proj["entry"]["url"]), ("remote", "https://x/sse"))
-        self.assertIn("项目", self.by_name(out, "proj-mcp")[0]["source"])
-        self.assertFalse(self.by_name(out, "off-one"))  # enabled:false 的不带进来
+        self.assertIn("项目", self.group(out, "proj-mcp")["variants"][0]["source"])
+        self.assertFalse([g for g in out if g["name"] == "off-one"])  # enabled:false 的不带进来
 
-    def test_mcp_same_name_conflict_needs_source(self):
+    def test_mcp_import_variants_and_merge(self):
         err = self.raises("registry.import_mcp(['shared'])")
-        self.assertIn("shared", err)
-        self.assertIn("OpenCode", err)
-        self.assertIn("pi", err)
+        self.assertIn("shared@pi-global", err)
+        self.assertIn("shared@oc-global", err)
+        out = self.py("result = registry.import_mcp(['shared@oc-global'])")  # 按登记 ID 选
+        self.assertEqual(out, ["shared@oc-global"])
         out = self.py("""
-            source = [c for c in registry.mcp_candidates() if c['name'] == 'shared' and 'OpenCode' in c['source']][0]['source']
-            result = registry.import_mcp([{'name': 'shared', 'source': source}])
+            result = registry.import_mcp([
+                {'name': 'shared', 'source': 'pi 全局 ~/.pi/agent/mcp.json'},
+                'dupe', 'pi-server', 'oc-server', 'proj-mcp'])
         """)
-        self.assertEqual(out, ["shared"])
-        self.assertEqual(registry_load(self, "mcp")["shared"]["command"], "oc-run")
-
-    def test_mcp_import_unique_and_disk_keeps_secrets(self):
-        out = self.py("result = registry.import_mcp(['pi-server', 'oc-server', 'proj-mcp'])")
-        self.assertEqual(sorted(out), ["oc-server", "pi-server", "proj-mcp"])
+        self.assertEqual(sorted(out), sorted(["shared@pi-global", "dupe", "pi-server", "oc-server", "proj-mcp"]))
         data = registry_load(self, "mcp")
+        # 同名不同内容各成一条，name 都是原名
+        self.assertEqual(data["shared@oc-global"]["name"], "shared")
+        self.assertEqual(data["shared@oc-global"]["command"], "oc-run")
+        self.assertEqual(data["shared@pi-global"]["name"], "shared")
+        self.assertEqual(data["shared@pi-global"]["command"], "pi-cmd")
+        self.assertEqual(len(data["dupe"]["sources"]), 2)  # 相同内容合并，记下全部来源
         self.assertEqual(data["pi-server"]["env"]["TOKEN"], "tok-123")  # 磁盘上保留原值
         self.assertIn("s3cret", data["pi-server"]["args"])
-        again = self.py("result = registry.import_mcp(['pi-server'])")
+        again = self.py("result = registry.import_mcp(['pi-server', 'dupe'])")
         self.assertEqual(again, [])  # 已登记且相同：跳过
 
-    def test_masking_and_placeholder_keeps_original(self):
+    def test_masking_only_secret_env_and_placeholder(self):
         self.py("registry.import_mcp(['pi-server', 'proj-mcp'])")
-        out = self.py("result = {n: registry.mask_entry(e) for n, e in registry.load_mcp().items()}")
-        self.assertNotIn("s3cret", json.dumps(out))
-        self.assertNotIn("tok-123", json.dumps(out))
-        self.assertNotIn("mysql://u:pw@h/db", json.dumps(out))
-        self.assertIn("\u2022\u2022\u2022\u2022", json.dumps(out, ensure_ascii=False))
+        out = self.py("result = {i: registry.mask_entry(e) for i, e in registry.load_mcp().items()}")
+        text = json.dumps(out, ensure_ascii=False)
+        self.assertNotIn("tok-123", text)          # TOKEN 键名含敏感字样：遮
+        self.assertNotIn("s3cret", text)           # --password 后面的值：遮
+        self.assertNotIn("mysql://u:pw@h/db", text)  # 带凭据的 URL：遮
+        self.assertIn("production", text)          # NODE_ENV 这类不是秘密：不遮
+        self.assertIn("••••", text)
         listing = self.ok("mcp", "list", env_extra=self.import_env).stdout
         self.assertNotIn("s3cret", listing)
         self.assertIn("••••", listing)
         # 提交遮罩占位不覆盖原值
         self.py("""
             registry.save_mcp('pi-server', {'type': 'local', 'command': 'npx',
-                'args': ['-y', 'pkg', '--password', registry.MASK], 'env': {'TOKEN': registry.MASK}})
+                'args': ['-y', 'pkg', '--password', registry.MASK], 'env': {'TOKEN': registry.MASK, 'NODE_ENV': 'production'}})
             result = registry.load_mcp()['pi-server']
         """)
         data = registry_load(self, "mcp")["pi-server"]
         self.assertEqual(data["env"]["TOKEN"], "tok-123")
+        self.assertEqual(data["env"]["NODE_ENV"], "production")
         self.assertIn("s3cret", data["args"])
 
-    def test_skills_candidates_and_import(self):
+    def test_skills_dedupe_by_path_and_content(self):
         out = self.py("result = registry.skill_candidates()")
-        names = {c["name"] for c in out}
-        self.assertEqual(names, {"demo-skill", "pi-skill", "proj-skill"})  # 没有 SKILL.md 的不算
-        demo = self.by_name(out, "demo-skill")[0]
-        self.assertEqual(demo["description"], "演示技能的说明")
-        added = self.py("result = registry.import_skills(['demo-skill', 'pi-skill', 'proj-skill'])")
-        self.assertEqual(sorted(added), ["demo-skill", "pi-skill", "proj-skill"])
+        names = {g["name"] for g in out}
+        self.assertEqual(names, {"demo-skill", "pi-skill", "proj-skill", "dual"})  # 没有 SKILL.md 的不算
+        demo = self.group(out, "demo-skill")
+        self.assertFalse(demo["conflict"])  # 同内容拷贝合并成一个变体
+        self.assertEqual(len(demo["variants"]), 1)
+        self.assertEqual(len(demo["variants"][0]["sources"]), 2)
+        self.assertEqual(demo["variants"][0]["description"], "演示技能的说明")
+        pi_skill = self.group(out, "pi-skill")
+        self.assertEqual(len(pi_skill["variants"]), 1)  # 软链接按真实路径去重
+        dual = self.group(out, "dual")
+        self.assertTrue(dual["conflict"])
+        self.assertEqual({v["id"] for v in dual["variants"]}, {"dual@claude", "dual@agents"})
+        added = self.py("result = registry.import_skills(['demo-skill', 'pi-skill', 'proj-skill', 'dual@claude', 'dual@agents'])")
+        self.assertEqual(sorted(added), ["demo-skill", "dual@agents", "dual@claude", "pi-skill", "proj-skill"])
         data = registry_load(self, "skills")
         self.assertTrue(data["proj-skill"]["path"].endswith("proj-skill"))
         self.assertEqual(data["demo-skill"]["description"], "演示技能的说明")
-        self.assertIn("proj-skill", self.ok("skills", "list", env_extra=self.import_env).stdout)
+        self.assertEqual(data["dual@claude"]["name"], "dual")  # name 保持技能名
+        self.assertEqual(data["dual@agents"]["name"], "dual")
+        self.assertEqual(data["dual@claude"]["description"], "甲版本")
+        self.assertEqual(data["dual@agents"]["description"], "乙版本")
+        self.assertIn("dual@claude", self.ok("skills", "list", env_extra=self.import_env).stdout)
 
-    def test_role_mcp_skills_fields(self):
+    def test_role_rejects_duplicate_service_name(self):
         self.make_project()
-        self.py("registry.import_mcp(['pi-server'])\nregistry.import_skills(['demo-skill'])")
+        self.py("registry.import_mcp(['pi-server', 'shared@pi-global', 'shared@oc-global'])\n"
+                "registry.import_skills(['dual@claude', 'dual@agents'])")
+        err = self.raises("""
+            definitions.set_role_fields(definitions.load_project('p1'), 'qa',
+                {'mcp': ['shared@pi-global', 'shared@oc-global']})
+        """)
+        self.assertIn("shared", err)
+        self.assertIn("shared@pi-global", err)
+        self.assertIn("shared@oc-global", err)
+        err = self.raises("""
+            definitions.set_role_fields(definitions.load_project('p1'), 'qa',
+                {'skills': ['dual@claude', 'dual@agents']})
+        """)
+        self.assertIn("dual", err)
         err = self.raises("""
             definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'mcp': ['nope'], 'skills': []})
         """)
         self.assertIn("nope", err)
-        self.assertIn("mcp", err)
         err = self.raises("""
             definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'skills': 'demo-skill'})
         """)
         self.assertIn("skills", err)
         out = self.py("""
             project = definitions.load_project('p1')
-            definitions.set_role_fields(project, 'qa', {'mcp': ['pi-server'], 'skills': ['demo-skill']})
+            definitions.set_role_fields(project, 'qa', {'mcp': ['shared@oc-global', 'pi-server'], 'skills': ['dual@claude']})
             definitions.set_role_fields(project, 'dev', {'mcp': []})  # 空列表 = 由 agent-dispatch 管理，一个都不带
             result = {'qa': definitions.role_detail(project, 'qa'), 'dev': definitions.role_detail(project, 'dev')}
         """)
-        self.assertEqual(out["qa"]["fields"]["mcp"], {"value": ["pi-server"], "source": "项目"})
-        self.assertEqual(out["qa"]["fields"]["skills"]["value"], ["demo-skill"])
+        self.assertEqual(out["qa"]["fields"]["mcp"]["value"], ["shared@oc-global", "pi-server"])
+        self.assertEqual(out["qa"]["fields"]["mcp"]["source"], "项目")
         self.assertEqual(out["dev"]["fields"]["mcp"]["value"], [])
         show = self.ok("roles", "show", "qa", "-P", "p1", env_extra=self.import_env).stdout
-        self.assertIn('"mcp"', show)
-        self.assertIn('"skills"', show)
+        self.assertIn("shared@oc-global", show)
+        self.assertIn("dual@claude", show)
 
     def test_remove_referenced_is_refused(self):
         self.make_project()
         self.py("""
-            registry.import_mcp(['pi-server'])
+            registry.import_mcp(['shared@pi-global'])
             registry.import_skills(['demo-skill'])
-            definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'mcp': ['pi-server'], 'skills': ['demo-skill']})
+            definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'mcp': ['shared@pi-global'], 'skills': ['demo-skill']})
         """)
-        err = self.raises("registry.remove_mcp('pi-server')")
+        err = self.raises("registry.remove_mcp('shared@pi-global')")
         self.assertIn("p1", err)
         self.assertIn("qa", err)
         err = self.raises("registry.remove_skill('demo-skill')")
         self.assertIn("qa", err)
+        self.assertIn("没有", self.raises("registry.remove_mcp('shared')"))  # 没有 name 这个登记 ID
         # 去掉角色的引用后就能删
         self.py("definitions.reset_role_fields(definitions.load_project('p1'), 'qa', ['mcp', 'skills'])")
-        self.py("registry.remove_mcp('pi-server')\nregistry.remove_skill('demo-skill')")
-        self.assertEqual(registry_load(self, "mcp"), {})
+        self.py("registry.remove_mcp('shared@pi-global')\nregistry.remove_skill('demo-skill')")
+        self.assertNotIn("shared@pi-global", registry_load(self, "mcp"))
 
     def test_web_mcp_skills_api(self):
         import socket, urllib.error, urllib.request
         self.make_project()
-        self.py("registry.import_mcp(['pi-server', 'oc-server'])\nregistry.import_skills(['demo-skill'])")
+        self.py("registry.import_mcp(['pi-server', 'oc-server', 'shared@oc-global'])\nregistry.import_skills(['demo-skill'])")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = str(sock.getsockname()[1])
@@ -1463,44 +1532,58 @@ class McpSkillRegistryTest(DispatchTest):
             # 写操作没有请求头被拒
             self.assertEqual(call("POST", "/api/mcp", {"name": "x"}, header=False)[0], 403)
             self.assertEqual(call("DELETE", "/api/mcp/x", header=False)[0], 403)
-            # 登记表已遮罩，并带被哪些角色使用
+            # 登记表已遮罩，登记 ID 与 name 都可见，并带被哪些角色使用
             status, data = call("GET", "/api/mcp")
             self.assertEqual(status, 200)
             text = json.dumps(data, ensure_ascii=False)
             self.assertNotIn("tok-123", text)
             self.assertNotIn("s3cret", text)
-            pi = next(m for m in data["mcp"] if m["name"] == "pi-server")
-            self.assertEqual(pi["env"], {"TOKEN": "••••"})
-            # 候选与导入
+            self.assertIn("production", text)  # 非秘密的 env 值不遮
+            pi = next(m for m in data["mcp"] if m["id"] == "pi-server")
+            self.assertEqual((pi["name"], pi["env"]["TOKEN"], pi["env"]["NODE_ENV"]),
+                             ("pi-server", "••••", "production"))
+            shared = next(m for m in data["mcp"] if m["id"] == "shared@oc-global")
+            self.assertEqual(shared["name"], "shared")
+            # 候选按服务名分组，同名冲突列出各变体与差异
+            groups = call("GET", "/api/mcp/candidates")[1]["candidates"]
+            shared_group = next(g for g in groups if g["name"] == "shared")
+            self.assertTrue(shared_group["conflict"])
+            self.assertEqual({v["id"] for v in shared_group["variants"]}, {"shared@pi-global", "shared@oc-global"})
+            self.assertIn("command", shared_group["variants"][0]["diff"])
+            # 导入：按登记 ID；同名不给来源被拒
             self.assertEqual(call("POST", "/api/mcp/import", {"names": ["proj-mcp"]})[0], 200)
-            self.assertEqual(call("POST", "/api/mcp/import", {"names": ["shared"]})[0], 400)  # 同名冲突要带来源
-            candidates = call("GET", "/api/mcp/candidates")[1]["candidates"]
-            self.assertTrue(any(c["name"] == "shared" and c["conflict"] for c in candidates))
+            status, error = call("POST", "/api/mcp/import", {"names": ["shared"]})
+            self.assertEqual(status, 400)
+            self.assertIn("shared@oc-global", error["error"])
+            self.assertEqual(call("POST", "/api/mcp/import",
+                                  {"names": ["shared"], "selections": [{"name": "shared", "source": "pi 全局 ~/.pi/agent/mcp.json"}]})[0], 200)
             # 新增、修改（遮罩占位不覆盖）、删除
             self.assertEqual(call("POST", "/api/mcp", {"name": "mine", "entry": {
-                "type": "local", "command": "run-it", "args": ["--token", "abc"], "env": {"K": "V"}}})[0], 200)
+                "type": "local", "command": "run-it", "args": ["--token", "abc"], "env": {"API_KEY": "V"}}})[0], 200)
             self.assertEqual(call("POST", "/api/mcp", {"name": "mine", "entry": {
-                "type": "local", "command": "run-it", "env": {"K": "••••"}}})[0], 200)
-            mine = next(m for m in call("GET", "/api/mcp")[1]["mcp"] if m["name"] == "mine")
-            self.assertEqual(mine["env"], {"K": "••••"})
-            self.assertEqual(registry_load(self, "mcp")["mine"]["env"]["K"], "V")
+                "type": "local", "command": "run-it", "env": {"API_KEY": "••••"}}})[0], 200)
+            mine = next(m for m in call("GET", "/api/mcp")[1]["mcp"] if m["id"] == "mine")
+            self.assertEqual(mine["env"], {"API_KEY": "••••"})
+            self.assertEqual(registry_load(self, "mcp")["mine"]["env"]["API_KEY"], "V")
             self.assertEqual(call("DELETE", "/api/mcp/mine")[0], 200)
             # 被角色引用时删除被拒
-            self.py("definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'mcp': ['pi-server']})")
-            status, error = call("DELETE", "/api/mcp/pi-server")
+            self.py("definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'mcp': ['shared@oc-global']})")
+            status, error = call("DELETE", "/api/mcp/shared@oc-global")
             self.assertEqual(status, 400)
             self.assertIn("qa", error["error"])
             # 技能同样的接口
-            self.assertEqual(call("GET", "/api/skills")[1]["skills"][0]["name"], "demo-skill")
+            skills = call("GET", "/api/skills")[1]["skills"]
+            self.assertEqual(skills[0]["id"], "demo-skill")
             self.assertEqual(call("POST", "/api/skills/import", {"names": ["pi-skill"]})[0], 200)
             self.assertEqual(call("POST", "/api/skills", {"name": "mine-s", "path":
                 os.path.join(self.fakehome, ".claude", "skills", "demo-skill")})[0], 200)
+            self.assertEqual(registry_load(self, "skills")["mine-s"]["name"], "demo-skill")  # name 默认取目录名
             self.assertEqual(call("DELETE", "/api/skills/mine-s")[0], 200)
-            skills = {c["name"] for c in call("GET", "/api/skills/candidates")[1]["candidates"]}
-            self.assertEqual(skills, {"demo-skill", "pi-skill", "proj-skill"})
-            # 角色详情接口自动带出 mcp 字段
+            skill_groups = call("GET", "/api/skills/candidates")[1]["candidates"]
+            self.assertEqual({g["name"] for g in skill_groups}, {"demo-skill", "pi-skill", "proj-skill", "dual"})
+            # 角色详情接口自动带出 mcp 字段（存登记 ID）
             detail = call("GET", "/api/config/roles/qa?project=p1")[1]
-            self.assertEqual(detail["fields"]["mcp"]["value"], ["pi-server"])
+            self.assertEqual(detail["fields"]["mcp"]["value"], ["shared@oc-global"])
         finally:
             self.ok("web", "stop")
 
@@ -1519,7 +1602,9 @@ class McpSkillRegistryTest(DispatchTest):
         data = registry_load(self, "mcp")
         self.assertEqual((data["manual"]["command"], data["manual"]["args"]), ("run-x", ["a", "b"]))
         self.assertEqual(data["manual"]["description"], "手动的")
+        self.assertEqual(data["manual"]["name"], "manual")  # name 缺省等于登记 ID
         self.assertEqual(registry_load(self, "skills")["manual-skill"]["description"], "演示技能的说明")
+        self.assertEqual(registry_load(self, "skills")["manual-skill"]["name"], "demo-skill")  # name 默认取目录名
         # 既给 command 又给 url 的写法不对
         result = self.cli("mcp", "add", "bad", "--command", "x", "--url", "https://x", env_extra=self.import_env)
         self.assertEqual(result.returncode, 2)

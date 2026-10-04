@@ -345,15 +345,18 @@ class Handler(BaseHTTPRequestHandler):
                 project = definitions.load_project(query["project"][0]) if query.get("project") else None
                 return self.send_json(definitions.role_detail(project, parts[3]))
             if parts == ["api", "mcp"]:
-                return self.send_json({"mcp": [{"name": name, **registry.mask_entry(entry),
-                                                "used_by": registry.used_by("mcp", name)}
-                                               for name, entry in sorted(registry.load_mcp().items())]})
+                return self.send_json({"mcp": [{"id": reg_id, "name": entry.get("name") or reg_id,
+                                                **registry.mask_entry(entry), "used_by": registry.used_by("mcp", reg_id)}
+                                               for reg_id, entry in sorted(registry.load_mcp().items())]})
             if parts == ["api", "mcp", "candidates"]:
-                return self.send_json({"candidates": [dict(c, entry=registry.mask_entry(c["entry"]))
-                                                       for c in registry.mcp_candidates()]})
+                return self.send_json({"candidates": [dict(group, variants=[dict(v, entry=registry.mask_entry(v["entry"]),
+                                                                                diff={k: registry.mask_any(x) for k, x in v["diff"].items()})
+                                                                       for v in group["variants"]])
+                                                       for group in registry.mcp_candidates()]})
             if parts == ["api", "skills"]:
-                return self.send_json({"skills": [{"name": name, **entry, "used_by": registry.used_by("skills", name)}
-                                                   for name, entry in sorted(registry.load_skills().items())]})
+                return self.send_json({"skills": [{"id": reg_id, "name": entry.get("name") or reg_id, **entry,
+                                                   "used_by": registry.used_by("skills", reg_id)}
+                                                   for reg_id, entry in sorted(registry.load_skills().items())]})
             if parts == ["api", "skills", "candidates"]:
                 return self.send_json({"candidates": registry.skill_candidates()})
             if parts == ["api", "dispatch-options"]:
@@ -446,23 +449,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if parts == ["api", "mcp"]:
                 if not data.get("name") or not isinstance(data.get("entry"), dict):
-                    raise store.DispatchError("要有 name 和 entry（条目定义）")
+                    raise store.DispatchError("要有 name（登记 ID）和 entry（条目定义）")
                 registry.save_mcp(data["name"].strip(), data["entry"])
                 return self.send_json({"ok": True})
             if parts == ["api", "mcp", "import"]:
                 selections = data.get("selections") or data.get("names") or []
                 if not isinstance(selections, list) or not selections:
-                    raise store.DispatchError("要有 names（名称数组）或 selections（[{name, source}]）")
+                    raise store.DispatchError("要有 names（登记 ID / 服务名数组）或 selections（[{name, source}]）")
                 return self.send_json({"added": registry.import_mcp(selections)})
             if parts == ["api", "skills"]:
                 if not data.get("name") or not data.get("path"):
-                    raise store.DispatchError("要有 name 和 path（技能目录）")
-                registry.save_skill(data["name"].strip(), data["path"])
+                    raise store.DispatchError("要有 name（登记 ID）和 path（技能目录）")
+                registry.save_skill(data["name"].strip(), data["path"], data.get("skill_name"))
                 return self.send_json({"ok": True})
             if parts == ["api", "skills", "import"]:
                 selections = data.get("selections") or data.get("names") or []
                 if not isinstance(selections, list) or not selections:
-                    raise store.DispatchError("要有 names（名称数组）或 selections（[{name, source}]）")
+                    raise store.DispatchError("要有 names（登记 ID / 技能名数组）或 selections（[{name, source}]）")
                 return self.send_json({"added": registry.import_skills(selections)})
             if parts == ["api", "pools"]:
                 project = definitions.load_project(data["project"]) if data.get("project") else None

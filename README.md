@@ -81,28 +81,35 @@ agent-dispatch backends disable opencode        # 停用某个派工工具：新
 
 ## MCP 服务与技能
 
-MCP 服务和技能各有一张全局登记表，角色用 `mcp` / `skills` 两个可编辑字段引用登记表里的名称。
+MCP 服务和技能各有一张全局登记表，键是唯一的**登记 ID**；条目里的 `name` 是下发给执行者时的服务/技能名（缺省等于登记 ID）。
+同一个服务名在不同工程里内容不同是常态（pi 全局、OpenCode 全局、各工程的配置里同名不同参）：
+导入时内容相同的来源合并成一条（记下全部来源），内容不同的各自成一条，登记 ID 为 `<名>@<来源简称>`（如 `playwright@a04-test`、`playwright@pi-global`），`name` 保持原名。
+角色的 `mcp` / `skills` 字段存登记 ID；同一个角色选中的条目里不允许两个相同的 name（执行者按名字调用）。
 登记表可以从现有的 pi / OpenCode 配置导入（只读那些文件，绝不修改）：
 
 ```bash
-agent-dispatch mcp import             # 列出候选（来源、是否已登记、同名冲突）
-agent-dispatch mcp import --all       # 导入全部不冲突的候选
-agent-dispatch mcp import shared --source "OpenCode 全局 ~/.config/opencode/opencode.json"   # 同名不同内容的用来源消歧
-agent-dispatch mcp                     # 登记表（敏感信息已遮罩）：被哪些角色用、来源
-agent-dispatch mcp add mydb --command npx --args "-y,@bytebase/dbhub" --env DSN=mysql://...   # 手动登记
+agent-dispatch mcp import             # 按服务名列出候选：同名冲突的展示各变体与差异参数
+agent-dispatch mcp import --all       # 全部导入（同名不同内容的各成一条）
+agent-dispatch mcp import playwright@a04-test                          # 按登记 ID 选
+agent-dispatch mcp import playwright --source "项目 a04/test 的 .pi/mcp.json"   # 或按来源消歧
+agent-dispatch mcp                     # 登记表（敏感信息已遮罩）：登记 ID、name、被哪些角色用、全部来源
+agent-dispatch mcp add mydb --command npx --args "-y,@bytebase/dbhub" --env DSN=mysql://...   # 手动登记（--name 可改下发名）
 agent-dispatch mcp remove mydb
-agent-dispatch skills import           # 技能同理：候选来自 ~/.claude/skills、~/.pi/agent/skills、~/.agents/skills、各工程的技能目录
+agent-dispatch skills import           # 技能同理：同名目录先按真实路径（软链接）去重，再按 SKILL.md 内容合并
 agent-dispatch skills add my-skill ~/skills/my-skill
 ```
 
 - 导入来源：MCP 看 `~/.pi/agent/mcp.json`、`~/.config/opencode/opencode.json` 以及各项目工程里的 `.pi/mcp.json`、`opencode.json`；
-  技能看 `~/.claude/skills`、`~/.cc-switch/skills`、`~/.pi/agent/skills`、`~/.agents/skills` 和各工程的 `.agents/skills`、`.pi/skills`、`.claude/skills`（目录里有 SKILL.md 才算技能）。
-- **敏感信息只存本机**：登记表存在 `~/.agent-dispatch/mcp.json`、`skills.json`；env、headers 和 args 里形如密码令牌的内容在命令行与网页接口里一律显示为 `••••`，
+  技能看 `~/.claude/skills`、`~/.cc-switch/skills`、`~/.pi/agent/skills`、`~/.agents/skills` 和各工程的 `.agents/skills`、`.pi/skills`、`.claude/skills`（目录里有 SKILL.md 才算技能；内容相同的目录合成一条）。
+- **敏感信息只存本机**：登记表存在 `~/.agent-dispatch/mcp.json`、`skills.json`；
+  env 里键名含 password / passwd / secret / token / key / dsn / credential 等字样的值、值本身是带凭据 URL 的，
+  以及 headers 的值和 args 里形如密码令牌的内容，在命令行与网页接口里一律显示为 `••••`（`NODE_ENV` 这类不是秘密的原样显示）；
   修改登记时提交遮罩占位则保留原值。
 - **角色字段的语义**：`mcp` / `skills` 字段**不存在 = 不管理**，派工时不注入任何东西，执行者照旧用自己的配置（即现在的行为）；
   **字段存在（哪怕是空列表）= 由 agent-dispatch 管理**，派工时只带这些。空列表表示「管理，但一个都不带」。
-  字段名称必须已登记；登记表里的名称被角色引用时不能删除。
-- 网页同样提供 `/api/mcp`、`/api/skills` 一套接口（候选、导入、增删改，写操作要求本机页面请求头），角色的 mcp / skills 在配置中心里和其它字段一样分层配置、可恢复继承。
+  字段里存登记 ID，必须已登记；同一个角色里两个同名的会被拒；登记表里的 ID 被角色引用时不能删除。
+- 网页同样提供 `/api/mcp`、`/api/skills` 一套接口（候选按名称分组、导入、增删改，写操作要求本机页面请求头），
+  角色的 mcp / skills 在配置中心里和其它字段一样分层配置、可恢复继承。
 
 ## 快速开始
 
