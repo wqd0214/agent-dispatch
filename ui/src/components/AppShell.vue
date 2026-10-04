@@ -14,6 +14,15 @@ const { selected, set } = useCurrentProject()
 const o = useSharedOverview()
 const { entries, jobs, currentName } = useProjectScope(() => o.data.value)
 const connected = computed(() => !o.offline.value)
+// 服务进程还是旧代码（磁盘版本已变）：顶部横幅提醒重启，不拦操作
+const RESTART_CMD = 'agent-dispatch web stop && agent-dispatch web start'
+const stale = computed(() => {
+  const v = o.data.value?.versions
+  return !!v && v.process !== v.disk
+})
+async function copyRestart() {
+  try { await navigator.clipboard.writeText(RESTART_CMD) } catch { /* 剪贴板不可用就忽略，命令文字就在旁边 */ }
+}
 
 const activeNav = computed(() => {
   if (route.path === '/' || route.path.startsWith('/dashboard')) return '/dashboard'
@@ -106,6 +115,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <main class="main">
         <el-alert v-if="!connected" type="error" :closable="false" show-icon
           title="无法连接 agent-dispatch 服务，正在自动重试……恢复后界面会自动继续刷新。" class="offline" />
+        <el-alert v-if="stale" type="warning" :closable="false" show-icon class="offline">
+          <template #title>
+            网页服务还在运行旧版本，部分功能不可用。请在终端执行：{{ RESTART_CMD }}
+            <el-button size="small" type="primary" style="margin-left: 10px" @click="copyRestart">复制命令</el-button>
+          </template>
+        </el-alert>
         <slot />
       </main>
     </div>

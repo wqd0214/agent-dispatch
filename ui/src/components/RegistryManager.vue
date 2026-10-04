@@ -183,6 +183,7 @@ async function removeEntry(row: McpEntry | SkillEntry) {
 // ---------- 从现有配置导入 ----------
 const importOpen = ref(false)
 const importLoading = ref(false)
+const importError = ref('')
 const importSaving = ref(false)
 const candidates = ref<CandidateGroup[]>([])
 const importQuery = ref('')
@@ -192,11 +193,12 @@ async function openImport() {
   importOpen.value = true
   importQuery.value = ''
   importChecked.value = {}
+  importError.value = ''
   importLoading.value = true
   try {
     const r = isMcp.value ? await mcpApi.candidates() : await skillApi.candidates()
     candidates.value = r.candidates
-  } catch (e) { ElMessage.error(msg(e)) } finally { importLoading.value = false }
+  } catch (e) { importError.value = msg(e) } finally { importLoading.value = false }
 }
 const filteredCandidates = computed(() => filterCandidateGroups(candidates.value, importQuery.value))
 const allSelectable = computed(() => selectableCandidateIds(filteredCandidates.value))
@@ -351,6 +353,7 @@ async function doImport() {
 
     <el-dialog v-model="importOpen" :title="`从现有配置导入${kindLabel}`" width="720px">
       <div class="sub" style="margin-bottom: 8px">只读取、不修改这些配置文件；同名有多个变体的按登记 ID 和来源区分</div>
+      <el-alert v-if="importError" type="error" :closable="false" show-icon :title="importError" style="margin-bottom: 8px" />
       <div class="toolbar">
         <el-input v-model="importQuery" placeholder="搜索名称、登记 ID、来源、说明" clearable size="small" style="width: 260px" />
         <el-checkbox :model-value="allChecked" size="small" @update:model-value="toggleAll">全选（未登记的）</el-checkbox>
@@ -377,7 +380,8 @@ async function doImport() {
             </template>
           </div>
         </div>
-        <el-empty v-if="!importLoading && !filteredCandidates.length" description="没有找到候选" :image-size="60" />
+        <el-empty v-if="!importLoading && !filteredCandidates.length"
+          :description="importError || '没有找到候选'" :image-size="60" />
       </div>
       <template #footer>
         <el-button @click="importOpen = false">取消</el-button>

@@ -25,9 +25,13 @@ async function post<T = { ok: boolean; message?: string; error?: string }>(url: 
   return response.json() as Promise<T>
 }
 
-async function errText(response: Response): Promise<string> {
+// 404 且服务端回 {error: 'not found'}：接口不认识，多半是页面是新构建、服务进程还是旧的
+export const STALE_404_TEXT = '网页服务不认识这个接口，很可能是服务还没重启到新版本'
+
+export async function errText(response: Response): Promise<string> {
   try {
     const data = await response.json()
+    if (response.status === 404 && data.error === 'not found') return STALE_404_TEXT
     return data.error || data.message || `请求失败（${response.status}）`
   } catch {
     return `请求失败（${response.status}）`

@@ -16,7 +16,7 @@ const filters = reactive({ text: '', backend: '', used: false })
 const addForm = reactive({ alias: '', backend: '', id: '', note: '' })
 const defaultLimit = ref<number>(5)
 // 导入对话框：先看候选（已登记 / 未登记），可搜索勾选，确认后只导入勾选的
-const importDlg = reactive({ open: false, backend: '', loading: false, query: '', checked: [] as string[], candidates: [] as ModelCandidate[] })
+const importDlg = reactive({ open: false, backend: '', loading: false, query: '', checked: [] as string[], candidates: [] as ModelCandidate[], error: '' })
 
 function msg(e: unknown): string { return e instanceof Error ? e.message : String(e) }
 async function reload() {
@@ -69,7 +69,8 @@ async function openImport(backend: string) {
   importDlg.query = ''
   importDlg.checked = []
   importDlg.candidates = []
-  try { importDlg.candidates = (await modelApi.candidates(backend)).candidates } catch (e) { ElMessage.error(msg(e)) } finally { importDlg.loading = false }
+  importDlg.error = ''
+  try { importDlg.candidates = (await modelApi.candidates(backend)).candidates } catch (e) { importDlg.error = msg(e) } finally { importDlg.loading = false }
 }
 function toggleAllImport() {
   const all = importSelectable.value
@@ -236,6 +237,7 @@ function gotoRole(project: string, role: string) {
       description="还没有登记模型。点上面的「从 pi 导入」等按钮，把这个工具里配置的模型登记进来。" />
 
     <el-dialog v-model="importDlg.open" :title="`从 ${importDlg.backend} 导入模型`" width="640px" v-loading="importDlg.loading">
+      <el-alert v-if="importDlg.error" type="error" :closable="false" show-icon :title="importDlg.error" style="margin-bottom: 8px" />
       <div class="toolbar">
         <el-input v-model="importDlg.query" placeholder="搜索模型" clearable size="small" style="width: 240px" />
         <el-button size="small" @click="toggleAllImport">全选未登记</el-button>
@@ -250,6 +252,8 @@ function gotoRole(project: string, role: string) {
           <el-tag v-else size="small">未登记</el-tag>
         </div>
       </el-checkbox-group>
+      <el-empty v-if="!importDlg.loading && !importDlg.candidates.length"
+        :description="importDlg.error || '没有找到候选'" :image-size="60" />
       <div class="sub" style="margin-top: 8px">只导入勾选的；已登记的不会重复导入</div>
       <template #footer>
         <el-button @click="importDlg.open = false">取消</el-button>

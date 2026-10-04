@@ -2146,3 +2146,53 @@ class ModelLimitTest(DispatchBase):
             self.assertTrue(next(c["registered"] for c in page["candidates"] if c["backend"] == "pi" and c["id"] == "provA/modelX"))
         finally:
             self.ok("web", "stop")
+
+
+class WebVersionTest(DispatchBase):
+    """代码版本标识：磁盘上的 agent_dispatch/*.py 比进程启动时新，页面和 web status 都要能发现。"""
+
+    def test_code_version_changes_when_file_changes(self):
+        """版本摘要跟文件内容走：改动、新增 py 文件后摘要必须变。"""
+        from agent_dispatch import web
+        directory = os.path.join(self.tmp, "pkg")
+        os.makedirs(directory)
+        with open(os.path.join(directory, "a.py"), "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        first = web.code_version(directory)
+        self.assertRegex(first, r"^[0-9a-f]{10}$")
+        # 内容变了（大小也变）→ 摘要变
+        with open(os.path.join(directory, "a.py"), "w", encoding="utf-8") as f:
+            f.write("x = 1\n" + "#" * 200 + "\n")
+        self.assertNotEqual(first, web.code_version(directory))
+        # 新增文件也能反映
+        with open(os.path.join(directory, "b.py"), "w", encoding="utf-8") as f:
+            f.write("y = 2\n")
+        self.assertNotEqual(first, web.code_version(directory))
+
+    def test_overview_carries_both_versions_and_status_warns(self):
+        """/api/version 与总览都带两个版本；磁盘比进程新时 web status 提示重启。"""
+        import time as time_mod
+        import urllib.request
+        from agent_dispatch import web
+        port = self.start_web()
+        base = f"http://127.0.0.1:{port}"
+        # 改 backends.py 的修改时间（不动内容）模拟「磁盘比进程新」，测完恢复
+        target = os.path.join(ROOT, "agent_dispatch", "backends.py")
+        saved = os.stat(target)
+        bumped = (saved.st_atime_ns, saved.st_mtime_ns + 1_000_000_000)
+        try:
+            with urllib.request.urlopen(base + "/api/version", timeout=5) as response:
+                info = json.load(response)
+            self.assertTrue(info["process"] and info["disk"])
+            self.assertEqual(info["process"], info["disk"])  # 刚启动：两边一致
+            with urllib.request.urlopen(base + "/api/overview", timeout=5) as response:
+                self.assertEqual(json.load(response)["versions"], info)
+            os.utime(target, ns=bumped)
+            time_mod.sleep(web.VERSION_TTL + 0.3)  # 等服务端磁盘版本的短缓存过期
+            with urllib.request.urlopen(base + "/api/version", timeout=5) as response:
+                stale = json.load(response)
+            self.assertNotEqual(stale["process"], stale["disk"])
+            self.assertIn("旧版本", self.ok("web", "status").stdout)
+        finally:
+            os.utime(target, ns=(saved.st_atime_ns, saved.st_mtime_ns))
+            self.ok("web", "stop")

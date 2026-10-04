@@ -1,4 +1,5 @@
 """本地网页总览：新界面（ui/ 构建产物）只读作业 + 配置中心（项目 / 角色 / 模型登记表）。关掉不影响派工。"""
+import hashlib
 import json
 import mimetypes
 import os
@@ -6,12 +7,55 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import backends, cli, definitions, gates, inject, models, registry, store, tmux
 
 UI_DIST = os.environ.get("AGENT_DISPATCH_UI_DIST") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_dist")
 TEXT_SUFFIXES = (".md", ".json", ".jsonl", ".txt", ".log", ".sql", ".csv")
+
+
+PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+VERSION_TTL = 3.0  # 磁盘版本的缓存秒数：总览轮询很频繁，不能每次都 stat 全部源文件
+_version_cache = (0.0, "")
+
+
+def code_version(directory=None):
+    """对目录下 *.py 的名字、大小、修改时间算短摘要；不读内容，开销极小。"""
+    global _version_cache
+    directory = directory or PKG_DIR
+    now = time.time()
+    if directory == PKG_DIR and _version_cache[1] and now - _version_cache[0] < VERSION_TTL:
+        return _version_cache[1]
+    parts = []
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(".py"):
+            st = os.stat(os.path.join(directory, name))
+            parts.append(f"{name}:{st.st_size}:{st.st_mtime_ns}")
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:10]
+    if directory == PKG_DIR:
+        _version_cache = (now, digest)
+    return digest
+
+
+PROCESS_VERSION = code_version()  # 进程启动时的代码版本；之后磁盘再变它也不变
+
+
+def version_info():
+    """进程启动时的版本 vs 磁盘现在的版本：不一致说明服务还在跑旧代码，需要重启。"""
+    return {"process": PROCESS_VERSION, "disk": code_version()}
+
+
+def stale_hint(url):
+    """web status 用：问运行中的服务要两个版本；拿不到（老进程没这接口）或对不上都提示重启。"""
+    hint = "运行中的服务是旧版本，需要重启：agent-dispatch web stop && agent-dispatch web start"
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/version", timeout=3) as response:
+            info = json.load(response)
+    except (OSError, ValueError):
+        return hint
+    return None if info.get("process") == info.get("disk") else hint
 
 
 def ui_dist_dir():
@@ -117,7 +161,7 @@ def overview():
             cases.append({"tc": verdict.get("tc"), "verdict": verdict.get("verdict"), "evidence": verdict.get("evidence"),
                           "note": verdict.get("note"), "job": job["name"], "batch": job.get("batch") or "",
                           "group": group, "project": project, "run": os.path.basename(run_dir)})
-    return {"now": store.now(), "home": store.HOME,
+    return {"now": store.now(), "home": store.HOME, "versions": version_info(),
             "jobs": [summarize(j, batch_titles, session_titles, batch_reasons) for j in jobs], "cases": cases,
             "channels": list(channels.values()), "definitions": definitions_}
 
@@ -384,6 +428,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"now": store.now(), "batches": store.batch_rows(query["project"][0] if query.get("project") else None)})
             if parts == ["api", "overview"]:
                 return self.send_json(overview())
+            if parts == ["api", "version"]:  # 很轻：给页面横幅和 web status 判断服务是否旧版本
+                return self.send_json(version_info())
             if parts == ["api", "config"]:
                 return self.send_json(config_overview())
             if len(parts) == 4 and parts[:3] == ["api", "config", "roles"]:

@@ -54,6 +54,7 @@ export interface ProjectDef {
 export interface Overview {
   now: string
   home: string
+  versions?: { process: string; disk: string }  // 两者不同：服务进程还是旧代码，需重启
   jobs: JobSummary[]
   cases: { tc: string; verdict: string; evidence: string; note: string; job: string; batch: string; group: string; project: string; run: string }[]
   channels: { group: string; project: string; profile: string; table: Record<string, string | null> }[]

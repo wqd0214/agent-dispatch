@@ -1241,7 +1241,13 @@ def cmd_web(a):
         raise DispatchError(f"你是作业 {worker} 的执行者，不能启停用户的网页服务。自测请设置 AGENT_DISPATCH_HOME 指向临时目录并换端口")
     running = web_running()
     if a.action == "status":
-        print(f"后台网页在运行：{running['url']}  (pid {running['pid']})" if running else "后台网页没有在运行")
+        if not running:
+            print("后台网页没有在运行")
+            return 0
+        print(f"后台网页在运行：{running['url']}  (pid {running['pid']})")
+        stale = web.stale_hint(running["url"])
+        if stale:
+            print(stale)
         return 0
     if a.action == "stop":
         if not running:
