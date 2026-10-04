@@ -1,18 +1,24 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useSharedOverview } from '../composables/usePolling'
 import { useCurrentProject, useProjectScope } from '../composables/useProject'
 import { useTheme } from '../composables/useTheme'
+import DispatchPanel from './DispatchPanel.vue'
+import JobSearch from './JobSearch.vue'
 
 const route = useRoute()
+const router = useRouter()
 const { mode } = useTheme()
 const { selected, set } = useCurrentProject()
 const o = useSharedOverview()
 const { entries, jobs, currentName } = useProjectScope(() => o.data.value)
 const connected = computed(() => !o.offline.value)
 
-const activeNav = computed(() => (route.path.startsWith('/jobs') ? 'jobs' : route.path))
+const activeNav = computed(() => {
+  if (route.path === '/' || route.path.startsWith('/dashboard')) return '/dashboard'
+  return route.path.startsWith('/jobs') ? '/jobs' : route.path
+})
 const pending = computed(() => jobs.value.filter(j => j.needs_user || ['done', 'failed', 'interrupted'].includes(j.state)).length)
 const settingPages = [
   { path: '/settings/repos', label: '工程' },
@@ -21,6 +27,27 @@ const settingPages = [
   { path: '/settings/skills', label: '技能' },
   { path: '/settings/supervisor', label: '主管规则' },
 ]
+
+// 快捷键：⌘/Ctrl+N 派工、⌘/Ctrl+K 搜索、⌘/Ctrl+1~4 切页
+const dispatchOpen = ref(false)
+const searchOpen = ref(false)
+const navByNumber = ['/dashboard', '/jobs', '/batches', '/stats']
+function onKeydown(e: KeyboardEvent) {
+  if (!(e.metaKey || e.ctrlKey)) return
+  const key = e.key.toLowerCase()
+  if (key === 'n') {
+    e.preventDefault()
+    dispatchOpen.value = true
+  } else if (key === 'k') {
+    e.preventDefault()
+    searchOpen.value = true
+  } else if (['1', '2', '3', '4'].includes(e.key)) {
+    e.preventDefault()
+    void router.push(navByNumber[Number(e.key) - 1])
+  }
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
@@ -59,7 +86,7 @@ const settingPages = [
       <header class="topbar">
         <div class="title">{{ currentName }}</div>
         <div class="spacer" />
-        <el-button type="primary" size="small" disabled title="派工面板在下一个版本提供">派工</el-button>
+        <el-button type="primary" size="small" @click="dispatchOpen = true">派工</el-button>
         <el-dropdown @command="(m: string) => (mode = m as typeof mode)">
           <el-button size="small">
             {{ mode === 'system' ? '跟随系统' : mode === 'light' ? '亮色' : '暗色' }}
@@ -82,6 +109,8 @@ const settingPages = [
         <slot />
       </main>
     </div>
+    <DispatchPanel v-model="dispatchOpen" />
+    <JobSearch v-model="searchOpen" />
   </div>
 </template>
 

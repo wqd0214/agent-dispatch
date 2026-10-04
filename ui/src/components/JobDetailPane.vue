@@ -2,13 +2,15 @@
 import { computed, nextTick, ref, toRef, watch } from 'vue'
 import { api } from '../api'
 import { useJobDetail, useJobLog } from '../composables/useJob'
+import EscalationBox from './EscalationBox.vue'
+import JobActions from './JobActions.vue'
 import { stateTag, statusTag } from '../lib/jobs'
 import { formatDuration, relativeTime } from '../lib/time'
 import type { JobEvent } from '../types'
 
 const props = defineProps<{ name: string }>()
 const nameRef = toRef(props, 'name')
-const { data, offline, error } = useJobDetail(nameRef)
+const { data, offline, error, refresh } = useJobDetail(nameRef)
 const job = computed(() => data.value)
 
 const running = computed(() => job.value?.state === 'running')
@@ -74,11 +76,7 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
       {{ relativeTime(job.updated || job.created) }}
     </div>
 
-    <div v-if="job.needs_user" class="q-box">
-      <div class="h">待你决定</div>
-      <div class="q-text">{{ job.needs_user }}</div>
-      <div class="sub">答复与处理操作在下一个版本提供。</div>
-    </div>
+    <EscalationBox v-if="job.needs_user" :job="job" @done="refresh" />
 
     <div class="box">
       <div class="h">结论
@@ -100,7 +98,7 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
 
     <div class="box">
       <div class="h">下一步</div>
-      <div class="sub">操作在下一个版本提供。</div>
+      <JobActions :job="job" @done="refresh" />
     </div>
 
     <el-tabs v-model="tab" class="tabs">
@@ -182,9 +180,6 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
 .gate-row { display: flex; gap: 8px; font-size: 13px; align-items: baseline; }
 .g-ok { color: var(--el-color-success); }
 .g-bad { color: var(--el-color-danger); }
-.q-box { border: 1px solid var(--el-color-warning); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--el-color-warning-light-9); }
-html.dark .q-box { background: var(--el-fill-color-dark); }
-.q-text { margin: 4px 0; font-weight: 500; }
 .tabs { flex: 1; min-height: 0; }
 .events { display: flex; flex-direction: column; gap: 6px; }
 .ev { border: 1px solid var(--el-border-color-lighter); border-radius: 6px; padding: 6px 8px; }

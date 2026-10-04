@@ -42,7 +42,7 @@ export const api = {
   jobFileUrl: (name: string, path: string) => `/api/job/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`,
   dispatchOptions: () => getJson<DispatchOptions>('/api/dispatch-options'),
   dispatchPreview: (body: JobActionBody) => post<Record<string, unknown>>('/api/jobs/preview', body),
-  dispatch: (body: JobActionBody) => post('/api/jobs', body),
+  dispatch: (body: JobActionBody) => post<{ ok: boolean; job?: string; message?: string }>('/api/jobs', body),
   jobAction: (name: string, action: 'reply' | 'stop' | 'gate' | 'accept' | 'reject' | 'clear-escalation', body: unknown = {}) =>
-    post(`/api/jobs/${encodeURIComponent(name)}/${action}`, body),
+    post<{ ok: boolean; passed?: boolean; message?: string }>(`/api/jobs/${encodeURIComponent(name)}/${action}`, body),
 }

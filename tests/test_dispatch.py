@@ -529,6 +529,14 @@ class DispatchTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(started["job"].startswith("dev-"))
             self.ok("wait", started["job"], "--timeout", "20")
+            # 待你决定在总览里给问题原文（不是 {question: …} 对象），新界面的工作台直接显示它
+            self.ok("escalate", "w2", "要不要清库")
+            overview = call("GET", "/api/overview")[1]
+            w2 = next(j for j in overview["jobs"] if j["name"] == "w2")
+            self.assertEqual(w2["needs_user"], "要不要清库")
+            self.assertEqual(call("POST", "/api/jobs/w2/reply", {"text": "不清库，继续\nSTATUS: PASS"})[0], 200)
+            self.ok("wait", "w2", "--timeout", "20")
+            self.assertIsNone(self.job("w2")["needs_user"])
             # 依次闸门、验收；驳回不带 reason 返回 400
             self.assertEqual(call("POST", "/api/jobs/w2/gate")[1]["passed"], True)
             self.assertEqual(call("POST", "/api/jobs/w2/accept")[0], 200)

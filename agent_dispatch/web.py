@@ -53,6 +53,7 @@ def summarize(job):
     start = job.get("turn_started_ts")
     end = time.time() if state == "running" else job.get("ended_ts") or start
     group, project = store.project_of(job)
+    escalated = job.get("needs_user")
     return {
         "name": job["name"], "batch": job.get("batch") or "", "profile": job.get("profile"),
         "group": group, "project": project, "role": job.get("role"), "role_title": job.get("role_title"),
@@ -60,7 +61,7 @@ def summarize(job):
         "model_actual": job.get("model_actual"), "state": state,
         "state_label": cli.STATE_LABEL.get(state, state), "status": job.get("status"), "turn": job.get("turn"),
         "seconds": int(max(0, end - start)) if start else None, "channels": job.get("channels") or [],
-        "task": job.get("task", ""), "needs_user": job.get("needs_user"), "reason": job.get("reason"),
+        "task": job.get("task", ""), "needs_user": escalated.get("question") if isinstance(escalated, dict) else escalated, "reason": job.get("reason"),
         "gate_ok": (job.get("gate") or {}).get("ok"), "created": job.get("created"), "mode": job.get("mode", "headless"),
         "updated": job.get("updated"), "ended": job.get("ended"),
         "activity": last_log_line(job["name"]) if state == "running" else "",
