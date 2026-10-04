@@ -123,13 +123,13 @@ def discover():
     return found
 
 
-def import_all():
-    """把各后端现有的模型都登记进来（已登记的不动），返回新增的短名。"""
+def import_all(backend=None):
+    """把某个后端（不指定则全部）现有的模型登记进来（已登记的不动），返回新增的短名。"""
     added = []
     with _locked():
         data = load_registry()
         known = {(m["backend"], m["id"]) for m in data["models"].values()}
-        found = discover()
+        found = [item for item in discover() if backend is None or item[0] == backend]
         names = {}
         for backend, model_id in found:  # 同名模型出现在多个服务商下时，短名带上服务商
             names.setdefault((backend, model_id.rpartition("/")[2]), []).append(model_id)

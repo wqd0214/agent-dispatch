@@ -257,7 +257,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = self.body()
             if parts == ["api", "models", "import"]:
-                return self.send_json({"added": models.import_all()})
+                return self.send_json({"added": models.import_all(data.get("backend") or None)})
             if parts == ["api", "models"]:
                 models.add(data.get("alias", "").strip(), data.get("backend", ""), data.get("id", "").strip(), data.get("note", ""))
                 return self.send_json({"ok": True})

@@ -735,12 +735,14 @@ def cmd_models(a):
     action = a.action or "list"
     if action == "list":
         if not models.load_registry()["models"]:
-            print("（模型登记表是空的。导入本机 pi 和 OpenCode 的全部模型：agent-dispatch models import）")
+            print("（模型登记表是空的。导入：agent-dispatch models import --backend pi）")
             return 0
         table(model_table())
         return 0
     if action == "import":
-        added = models.import_all()
+        if a.backend:
+            backends.get(a.backend)
+        added = models.import_all(a.backend)
         store.info(f"新登记 {len(added)} 个模型" + (f"：{'、'.join(added)}" if added else "（都已登记过）"))
         return 0
     if not a.alias:
@@ -1010,7 +1012,7 @@ def build_parser():
     p = add("models", cmd_models, "模型登记：列表 / import / add / enable / disable / note / resume / remove")
     p.add_argument("action", nargs="?", choices=["list", "import", "add", "enable", "disable", "note", "resume", "remove"])
     p.add_argument("alias", nargs="?", help="模型短名，如 pi:glm-5.3-flash")
-    p.add_argument("--backend", help="add：后端")
+    p.add_argument("--backend", help="add：后端；import：只导入这个后端的模型（不给则全部）")
     p.add_argument("--id", help="add：后端里的模型 ID，如 cc-switch-zhipu-glm/glm-5.3-flash")
     p.add_argument("--note", help="add / note：备注")
 

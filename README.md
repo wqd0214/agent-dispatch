@@ -60,7 +60,7 @@ agent-dispatch roles -P c2         # 这个项目可派的角色；roles show te
 派工只认角色，模型由角色的**模型池**按比例自动选择，主管不用也不能指定。
 
 ```bash
-agent-dispatch models import                    # 把本机 pi 和 OpenCode 的模型都登记进来（短名如 pi:glm-5.3、oc:glm-5）
+agent-dispatch models import --backend pi       # 把 pi 里配置的模型登记进来（短名如 pi:glm-5.3）；不带 --backend 则导入全部工具的
 agent-dispatch models                           # 登记表：状态、用在哪些角色
 agent-dispatch roles pool tester -P c2 pi:glm-5.3=70 oc:glm-5=30   # 项目角色的模型池：按 7:3
 agent-dispatch roles pool tester --global pi:glm-5.3=1             # 全局角色的模型池：项目里没单独配置的都沿用它
