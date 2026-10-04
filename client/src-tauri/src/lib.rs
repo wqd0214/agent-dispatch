@@ -130,7 +130,12 @@ fn fetch_snapshot(url: &str) -> Option<Vec<(String, JobSnap)>> {
     let jobs = json.get("jobs")?.as_array()?;
     Some(jobs.iter().filter_map(|j| {
         let name = j.get("name")?.as_str()?.to_string();
-        let needs_user = j.get("needs_user").and_then(|v| v.as_object()).is_some();
+        // 接口里是问题原文（字符串）；兼容早先的 {question, at} 对象
+        let needs_user = match j.get("needs_user") {
+            Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
+            Some(serde_json::Value::Object(_)) => true,
+            _ => false,
+        };
         Some((name, JobSnap {
             state: j.get("state")?.as_str()?.to_string(),
             state_label: j.get("state_label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
