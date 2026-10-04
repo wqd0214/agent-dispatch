@@ -35,8 +35,28 @@ def clip(value, limit):
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+# 有的模型坚持把报告字段名译成中文（「状态：通过」），这里先还原成约定的英文字段
+CN_FIELDS = {"状态": "STATUS", "结论": "STATUS", "总结": "SUMMARY", "摘要": "SUMMARY", "证据": "EVIDENCE",
+             "问题": "QUESTION", "提问": "QUESTION", "运行目录": "RUN_DIR", "RUN目录": "RUN_DIR"}
+CN_STATUS = {"通过": "PASS", "成功": "PASS", "失败": "FAIL", "未通过": "FAIL", "阻塞": "BLOCKED", "受阻": "BLOCKED",
+             "被阻塞": "BLOCKED", "需要决定": "NEEDS_DECISION", "需决策": "NEEDS_DECISION", "待决定": "NEEDS_DECISION",
+             "需要决策": "NEEDS_DECISION"}
+CN_LINE_RE = re.compile(r"^([\s>*#-]*)(%s)(\**\s*[:：]\s*)(.*)$" % "|".join(map(re.escape, CN_FIELDS)), re.M)
+
+
+def _restore_cn_fields(text):
+    def repl(match):
+        key = CN_FIELDS[match.group(2)]
+        value = match.group(4)
+        if key == "STATUS":
+            value = CN_STATUS.get(value.strip().strip("`*").strip(), value)
+        return f"{match.group(1)}{key}: {value}"
+    return CN_LINE_RE.sub(repl, text)
+
+
 def parse_report(text):
     """从智能体最后一条回复里取 STATUS 和其它 `KEY: 值` 字段（取最后一次出现）。"""
+    text = _restore_cn_fields(text or "")
     statuses = STATUS_RE.findall(text or "")
     fields = {}
     for key, value in FIELD_RE.findall(text or ""):

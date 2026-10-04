@@ -101,6 +101,14 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(self.cli("accept", "j2", "--force").returncode, 2)
         self.ok("accept", "j2", "--force", "--note", "人工确认过")
 
+    def test_report_with_chinese_field_names(self):
+        sys.path.insert(0, ROOT)
+        from agent_dispatch.runner import parse_report
+        status, fields = parse_report("做完了。\n状态：通过\n总结：接口都加上了\n证据：db6939c, web.py\n提问：")
+        self.assertEqual((status, fields["SUMMARY"], fields["EVIDENCE"]), ("PASS", "接口都加上了", "db6939c, web.py"))
+        self.assertEqual(parse_report("状态：需要决定\n问题：要不要清库")[0], "NEEDS_DECISION")
+        self.assertIsNone(parse_report("当前状态：还在跑")[0])  # 不是独占一行的字段，不算
+
     def test_template_echo_is_not_a_status(self):
         self.ok("start", "j3", "-p", "t", "STATUS: PASS | FAIL | BLOCKED")
         self.ok("wait", "j3", "--timeout", "20")
