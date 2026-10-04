@@ -1,4 +1,4 @@
-"""本地网页总览：作业部分只读；「模型与角色」页可以管理模型登记表和角色的模型池。关掉不影响派工。"""
+"""本地网页总览：新界面（ui/ 构建产物）只读作业 + 配置中心（项目 / 角色 / 模型登记表）。关掉不影响派工。"""
 import json
 import mimetypes
 import os
@@ -10,7 +10,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import backends, cli, definitions, gates, models, store, tmux
 
-PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web.html")
 UI_DIST = os.environ.get("AGENT_DISPATCH_UI_DIST") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_dist")
 TEXT_SUFFIXES = (".md", ".json", ".jsonl", ".txt", ".log", ".sql", ".csv")
 
@@ -326,9 +325,7 @@ class Handler(BaseHTTPRequestHandler):
             if not parts:
                 if ui:
                     return self.send_page(os.path.join(ui, "index.html"))
-                return self.send_page(PAGE)
-            if parts == ["legacy"]:
-                return self.send_page(PAGE)
+                return self.send_json({"error": "前端界面未构建：在 ui/ 下执行 pnpm build 后重试"}, 404)
             if parts[0] != "api" and ui:
                 if any(p == ".." or "/" in p or "\\" in p for p in parts):  # 目录穿越直接拒
                     return self.send_json({"error": "not found"}, 404)

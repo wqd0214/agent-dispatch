@@ -1089,7 +1089,7 @@ def build_parser():
     p.add_argument("--backend", help="add：默认后端")
     p.add_argument("--mode", choices=["headless", "tmux"], help="add：默认运行方式")
 
-    p = add("web", cmd_web, "只读的本地网页总览：web start 后台运行，web stop 停止；不带动作则在前台运行")
+    p = add("web", cmd_web, "本地网页总览与配置：web start 后台运行，web stop 停止；不带动作则在前台运行")
     p.add_argument("action", nargs="?", choices=["start", "stop", "status"], help="start 后台启动 / stop 停止 / status 查看；省略则前台运行")
     p.add_argument("--open", action="store_true", help="同时在浏览器里打开")
     p.add_argument("--host", default="127.0.0.1")

@@ -661,11 +661,10 @@ class DispatchTest(unittest.TestCase):
             self.assertIn("max-age", headers["Cache-Control"])
             for path in ("/assets/../../etc/passwd", "/assets/..%2f..%2fetc%2fpasswd"):
                 self.assertEqual(get(path)[0], 404, path)
+            # 旧页面（/legacy）已删除：只剩前端路由回退，送新界面的 index.html
             status, headers, body = get("/legacy")
             self.assertEqual(status, 200)
-            self.assertIn("text/html", headers["Content-Type"])
-            with open(os.path.join(ROOT, "agent_dispatch", "web.html"), "rb") as f:
-                self.assertEqual(body, f.read())
+            self.assertIn("新界面", body.decode())
             with urllib.request.urlopen(base + "/api/overview", timeout=5) as response:
                 self.assertIn("jobs", json.load(response))
         finally:
