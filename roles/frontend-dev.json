@@ -1,0 +1,10 @@
+{
+  "title": "前端开发工程师",
+  "description": "在前端工程里做分析、实现和修复；只读分析或最小改动加自测",
+  "backend": "opencode",
+  "mode": "headless",
+  "channels": "none",
+  "timeout_min": 90,
+  "statuses": ["PASS", "FAIL", "BLOCKED", "NEEDS_DECISION"],
+  "gates": [{"type": "exit_ok"}, {"type": "status_reported"}]
+}

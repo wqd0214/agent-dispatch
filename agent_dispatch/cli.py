@@ -1,0 +1,946 @@
+"""agent-dispatch：纯命令行的多智能体派工。
+
+主管（任意智能体会话或你本人）调用这些命令；执行者是后台的智能体进程
+（无头，或跑在 tmux 会话里的交互界面）；状态全在 ~/.agent-dispatch/ 下的文件里。
+"""
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import unicodedata
+import webbrowser
+
+from . import backends, definitions, gates, runner, store, tmux
+from .store import DispatchError
+
+STATE_LABEL = {"running": "运行中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
+               "interrupted": "意外中断", "held": "人工持有", "accepted": "已验收", "rejected": "已驳回"}
+REPLYABLE = {"done", "failed", "stopped", "interrupted", "rejected"}
+EXIT_TIMEOUT = 3
+
+
+# ---------- profile ----------
+
+def profile_dirs():
+    return [os.path.join(store.HOME, "profiles"), os.path.join(backends.ROOT, "profiles")]
+
+
+def load_profile(name):
+    """按台账里记的配置名取配置：「项目:角色@工程」走项目/角色定义，其余是早先的 profile 文件。"""
+    if not name or name == "default":
+        return {"name": "default"}
+    if ":" in name:
+        return definitions.load(name)
+    for directory in profile_dirs():
+        path = os.path.join(directory, f"{name}.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                profile = json.load(f)
+            profile.update(name=name, _dir=directory)
+            return profile
+    raise DispatchError(f"找不到 profile {name!r}（查找位置：{'、'.join(profile_dirs())}）")
+
+
+def select_config(a):
+    """决定这次派工用哪份配置：早先的 profile，或（项目，角色，工程）。项目和工程可以从所在目录自动识别。"""
+    if a.profile:
+        return load_profile(a.profile)
+    detected_project, detected_repo = definitions.detect(a.cwd or os.getcwd())
+    if a.project:
+        project = definitions.load_project(a.project)
+        if not detected_project or detected_project["id"] != project["id"]:
+            detected_repo = None
+    else:
+        project = detected_project
+    if not project:
+        if a.repo:
+            raise DispatchError("--repo 要和项目一起用：加 --project，或在项目的某个工程目录里执行")
+        return definitions.resolve(None, a.role) if a.role else {"name": "default"}
+    role = a.role or project.get("default_role")
+    if role:
+        return definitions.resolve(project, role, a.repo, detected_repo)
+    repo = a.repo or detected_repo or (next(iter(project["repos"])) if len(project["repos"]) == 1 else None)
+    if not repo:
+        raise DispatchError(f"项目 {project['id']} 有多个工程，请用 --role 指定角色或用 --repo 指明工程：{'、'.join(project['repos'])}")
+    if repo not in project["repos"]:
+        raise DispatchError(f"项目 {project['id']} 没有工程 {repo!r}，可选：{'、'.join(project['repos'])}")
+    return definitions.bare(project, repo)
+
+
+def render_brief(profile, task, job_name, channels, cwd):
+    path = profile.get("_brief_path") or (os.path.join(profile["_dir"], profile["brief_template"]) if profile.get("brief_template") else None)
+    if not path:
+        return task
+    text = store.read_text(path)
+    if text is None:
+        raise DispatchError(f"派工单模板不存在：{path}")
+    values = {"task": task, "job": job_name, "channels": "、".join(channels) if channels else "（未分配浏览器通道）",
+              "role": profile.get("title") or "", "project": profile.get("group") or "", "repo": profile.get("project") or "",
+              "cwd": cwd}
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
+
+
+def backend_args(profile, backend_name):
+    extra = profile.get("backend_args") or []
+    return list(extra.get(backend_name) or []) if isinstance(extra, dict) else list(extra)
+
+
+def pick_channels(profile, requested):
+    available = profile.get("channels") or []
+    choice = requested if requested is not None else profile.get("default_channels", "none")
+    if choice == "none" or not available:
+        return []
+    if choice == "all":
+        return list(available)
+    picked = [c.strip() for c in choice.split(",") if c.strip()]
+    unknown = [c for c in picked if c not in available]
+    if unknown:
+        raise DispatchError(f"这个工程没有通道 {'、'.join(unknown)}，可用：{'、'.join(available)}")
+    return picked
+
+
+# ---------- 通用 ----------
+
+def read_task(args):
+    if getattr(args, "file", None):
+        text = store.read_text(args.file)
+        if text is None:
+            raise DispatchError(f"文件不存在：{args.file}")
+        return text.strip()
+    if args.task == ["-"] or (not args.task and not sys.stdin.isatty()):
+        return sys.stdin.read().strip()
+    return " ".join(args.task).strip()
+
+
+def reconcile(job):
+    """运行器意外消失时把台账落定为 interrupted，并清掉残留的智能体进程。"""
+    if job.get("state") != "running" or store.alive(job.get("runner_pid")):
+        return job
+    with store.locked(job["name"]):
+        job = store.load(job["name"])
+        if job.get("state") != "running" or store.alive(job.get("runner_pid")):
+            return job
+        kill_group(job.get("child_pid"), signal.SIGTERM)
+        job.update(state="interrupted", reason="运行器进程意外消失（关机或被杀）", ended=store.now(),
+                   ended_ts=time.time(), runner_pid=None, child_pid=None)
+        store.save(job)
+    if not tmux.alive(job.get("tmux")):
+        store.release_channels(store.channel_ns(job), job.get("channels"), job["name"])
+    return job
+
+
+def kill_group(pid, sig):
+    if not pid:
+        return
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def get_job(name):
+    return reconcile(store.load(name))
+
+
+def close_session(job):
+    """作业不再需要执行者时：关掉 tmux 里的界面（连同浏览器），释放通道。"""
+    tmux.kill(job.get("tmux"))
+    if job.get("state") != "held":
+        store.release_channels(store.channel_ns(job), job.get("channels"), job["name"])
+
+
+def how_to_attach(job):
+    if tmux.alive(job.get("tmux")) or (job.get("tmux") and job.get("state") == "running"):
+        return tmux.attach_command(job["tmux"])  # 刚派出时界面可能还在启动
+    attach = backends.attach_command(backends.get(job["backend"]), job)
+    return f"cd {job['cwd']} && {attach}" if attach else None
+
+
+def decide(job, action, note=None):
+    job.setdefault("decisions", []).append({"at": store.now(), "turn": job.get("turn"), "action": action, "note": note})
+
+
+def elapsed(job):
+    start = job.get("turn_started_ts")
+    if not start:
+        return "-"
+    end = time.time() if job.get("state") == "running" else job.get("ended_ts") or start
+    seconds = int(max(0, end - start))
+    if seconds < 60:
+        return f"{seconds}秒"
+    if seconds < 3600:
+        return f"{seconds // 60}分{seconds % 60:02d}秒"
+    return f"{seconds // 3600}时{seconds % 3600 // 60:02d}分"
+
+
+def width(text):
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def table(rows):
+    widths = [max(width(str(row[i])) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(str(cell) + " " * (w - width(str(cell))) for cell, w in zip(row, widths)).rstrip())
+
+
+def launch(job, task_text):
+    """占通道 → 写本轮派工单 → 启动运行器。占不到通道时不留下半截状态。"""
+    name = job["name"]
+    store.acquire_channels(store.channel_ns(job), job.get("channels"), name)
+    store.write_text(store.job_path(name, "turns", f"{job['turn']}.task.md"), task_text)
+    pid = runner.spawn(name)
+    store.update(name, runner_pid=pid)
+    return pid
+
+
+# ---------- 命令 ----------
+
+def cmd_start(a):
+    worker = os.environ.get("AGENT_DISPATCH_WORKER")
+    if worker and not a.dry_run:
+        raise DispatchError(f"你是作业 {worker} 的执行者，不能再往下派工。做不了的事用 BLOCKED / NEEDS_DECISION 上报给主管")
+    store.check_name(a.job)
+    if store.exists(a.job):
+        raise DispatchError(f"作业 {a.job} 已存在：续派用 reply，重新开始请换个作业名")
+    profile = select_config(a)
+    cwd = a.cwd or profile.get("cwd")
+    if not cwd:
+        raise DispatchError("没有工作目录：用 --project/--role 指定项目和角色，或显式给 --cwd")
+    cwd = os.path.realpath(os.path.expanduser(os.path.expandvars(cwd)))
+    if not os.path.isdir(cwd):
+        raise DispatchError(f"工作目录不存在：{cwd}")
+    backend_name = a.backend or profile.get("backend")
+    if not backend_name:
+        raise DispatchError("没有指定后端：用 --backend，或在角色定义里配置 backend")
+    backend = backends.get(backend_name)
+    model = (a.model or (profile.get("model") if not a.backend else None) or (profile.get("models") or {}).get(backend_name)
+             or backend.get("default_model"))
+    if not model:
+        raise DispatchError(f"后端 {backend_name} 没有默认模型，请用 --model 指定")
+    task = read_task(a)
+    if not task:
+        raise DispatchError("任务为空（用位置参数、-f 文件或标准输入传入）")
+    channels = pick_channels(profile, a.channels)
+    mode = a.mode or profile.get("mode") or "headless"
+    session_id = backends.initial_session(backend, a.job)
+    if mode == "tmux":
+        if not tmux.available():
+            raise DispatchError("本机没有 tmux，不能用 tmux 方式（改用 --mode headless）")
+        backends.build_interactive_argv(backend, {"name": a.job, "backend": backend_name, "model": model,
+                                                  "session_id": session_id}, task)
+    brief = render_brief(profile, task, a.job, channels, cwd)
+    if a.dry_run:
+        print(brief)
+        return 0
+
+    now_ts = time.time()
+    group, project = store.derive_project(cwd)
+    job = {
+        "name": a.job, "batch": a.batch or "", "profile": profile["name"], "backend": backend_name, "model": model,
+        "group": profile.get("group") or group, "project": profile.get("project") or project,  # 项目名 / 工程名
+        "project_id": profile.get("project_id"), "repo": profile.get("repo"), "role": profile.get("role"),
+        "role_title": profile.get("title"), "channel_ns": profile.get("channel_ns"),
+        "cwd": cwd, "session_id": session_id, "state": "running", "status": None,
+        "mode": mode, "tmux": "ad-" + a.job.replace(".", "_") if mode == "tmux" else None,
+        "turn": 1, "channels": channels, "task": task,
+        "timeout_min": a.timeout if a.timeout is not None else profile.get("timeout_min"),
+        "backend_args": backend_args(profile, backend_name),
+        "created": store.now(), "created_ts": now_ts, "turn_started": store.now(), "turn_started_ts": now_ts,
+        "runner_pid": os.getpid(),  # 运行器接管前先用本进程占位，避免被判成意外中断
+        "turns": [], "decisions": [],
+    }
+    store.save(job)
+    store.write_text(store.job_path(a.job, "brief.md"), brief)
+    try:
+        launch(job, brief)
+    except DispatchError:
+        shutil.rmtree(store.job_dir(a.job), ignore_errors=True)
+        raise
+    who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
+    store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model} 通道={','.join(channels) or '无'}")
+    store.info(f"等结果：agent-dispatch wait {a.job}    看输出：agent-dispatch log {a.job} -f"
+               + (f"    接进界面：agent-dispatch attach {a.job}" if mode == "tmux" else ""))
+    return 0
+
+
+def cmd_reply(a):
+    task = read_task(a)
+    if not task:
+        raise DispatchError("内容为空")
+    with store.locked(a.job):
+        job = reconcile_locked(a.job)
+        state = job["state"]
+        if state == "running":
+            raise DispatchError(f"作业 {a.job} 还在运行：先 wait 等它结束，或 stop 叫停")
+        if state == "held":
+            raise DispatchError(f"作业 {a.job} 正被人工持有：先 release 交还")
+        if state == "accepted" and not a.force:
+            raise DispatchError(f"作业 {a.job} 已验收；确实要继续派请加 --force")
+        if state not in REPLYABLE and not a.force:
+            raise DispatchError(f"作业 {a.job} 当前状态 {state} 不能续派")
+        profile = load_profile(job["profile"])
+        now_ts = time.time()
+        job.update(state="running", status=None, reason=None, turn=job["turn"] + 1, gate=None, needs_user=None,
+                   follow=False, turn_started=store.now(), turn_started_ts=now_ts, runner_pid=os.getpid())
+        decide(job, "reply", task[:300])
+        store.save(job)
+    try:
+        launch(job, task + (profile.get("reply_suffix") or ""))
+    except DispatchError as exc:
+        store.update(a.job, state=state, turn=job["turn"] - 1, runner_pid=None, reason=f"续派未发出：{exc}")
+        raise
+    store.info(f"已续派 {a.job} 第 {job['turn']} 轮")
+    return 0
+
+
+def cmd_follow(a):
+    """界面还在跑、但台账已落定（监视中断或误判）时，重新跟进：不往界面里送任何东西。"""
+    with store.locked(a.job):
+        job = reconcile_locked(a.job)
+        if job.get("mode") != "tmux" or not tmux.alive(job.get("tmux")):
+            raise DispatchError(f"作业 {a.job} 没有开着的 tmux 界面，无从跟进")
+        if job["state"] in ("running", "held"):
+            raise DispatchError(f"作业 {a.job} 当前是 {STATE_LABEL[job['state']]}，不需要跟进")
+        now_ts = time.time()
+        job.update(state="running", status=None, reason=None, turn=job["turn"] + 1, gate=None, follow=True,
+                   turn_started=store.now(), turn_started_ts=now_ts, runner_pid=os.getpid())
+        decide(job, "follow", a.note)
+        store.save(job)
+    launch(job, "（重新跟进仍在运行的界面，未发送新内容）")
+    store.info(f"已重新跟进 {a.job}：界面里的回合结束时会正常落定")
+    return 0
+
+
+def reconcile_locked(name):
+    """已持有作业锁时使用：只读出当前台账，意外中断的就地落定。"""
+    job = store.load(name)
+    if job.get("state") == "running" and not store.alive(job.get("runner_pid")):
+        kill_group(job.get("child_pid"), signal.SIGTERM)
+        job.update(state="interrupted", reason="运行器进程意外消失（关机或被杀）", ended=store.now(),
+                   ended_ts=time.time(), runner_pid=None, child_pid=None)
+        store.save(job)
+        if not tmux.alive(job.get("tmux")):
+            store.release_channels(store.channel_ns(job), job.get("channels"), name)
+    return job
+
+
+def resolve_targets(a):
+    names = list(a.jobs)
+    if getattr(a, "batch", None):
+        names += [j["name"] for j in store.all_jobs() if j.get("batch") == a.batch and j["name"] not in names]
+    if not names:
+        raise DispatchError("没有指定作业（给作业名，或用 --batch）")
+    return names
+
+
+def summary_line(job):
+    parts = [job["name"], STATE_LABEL.get(job["state"], job["state"]), f"STATUS={job.get('status') or '-'}",
+             f"第{job['turn']}轮", elapsed(job)]
+    if job.get("reason"):
+        parts.append(job["reason"])
+    return "  ".join(parts)
+
+
+def cmd_wait(a):
+    names = resolve_targets(a)
+    deadline = time.time() + a.timeout
+    while True:
+        jobs = [get_job(n) for n in names]
+        pending = [j for j in jobs if j["state"] == "running"]
+        if not pending or time.time() >= deadline:
+            break
+        time.sleep(min(2, max(0.1, deadline - time.time())))
+    for job in jobs:
+        print(summary_line(job))
+    if pending:
+        store.info(f"{len(pending)} 个作业仍在运行。这只是检查点，不是失败：继续 wait，或用 log 看进展")
+        return EXIT_TIMEOUT
+    return 0
+
+
+def print_status_table(batch=None, group=None, project=None):
+    jobs = [reconcile(j) for j in store.all_jobs() if batch is None or j.get("batch") == batch]
+    jobs = [j for j in jobs if (group is None or store.project_of(j)[0] == group)
+            and (project is None or store.project_of(j)[1] == project)]
+    if not jobs:
+        print("（暂无作业）")
+        return
+    jobs.sort(key=lambda j: store.project_of(j))  # 同一项目的排在一起，组内仍是新的在前
+    rows = [("项目/工程", "作业", "角色", "批次", "后端", "状态", "结论", "轮", "耗时", "通道", "任务")]
+    for job in jobs:
+        flag = " ⚑待你决定" if job.get("needs_user") else ""
+        channels = job.get("channels") or []
+        rows.append(("/".join(part for part in store.project_of(job) if part) or "-", job["name"], job.get("role_title") or "-",
+                     job.get("batch") or "-", job["backend"],
+                     STATE_LABEL.get(job["state"], job["state"]) + flag, job.get("status") or "-", job["turn"],
+                     elapsed(job), (f"{len(channels)}个" if len(channels) > 3 else ",".join(channels)) or "-",
+                     runner.clip(job.get("task", ""), 30)))
+    table(rows)
+
+
+def print_job_detail(job):
+    print(f"作业      {job['name']}" + (f"   批次 {job['batch']}" if job.get("batch") else ""))
+    print(f"项目      {' / '.join(part for part in store.project_of(job) if part) or '-'}"
+          + (f"   角色 {job['role_title']}（{job['role']}）" if job.get("role") else ""))
+    print(f"状态      {STATE_LABEL.get(job['state'], job['state'])}   STATUS={job.get('status') or '-'}   第 {job['turn']} 轮   耗时 {elapsed(job)}")
+    if job.get("reason"):
+        print(f"原因      {job['reason']}")
+    print(f"后端      {job['backend']}  {job['model']}")
+    print(f"目录      {job['cwd']}")
+    print(f"通道      {','.join(job.get('channels') or []) or '-'}")
+    print(f"会话      {job.get('session_id') or '（尚未取得）'}")
+    print(f"方式      {job.get('mode', 'headless')}" + (f"   界面{'开着' if tmux.alive(job.get('tmux')) else '已关闭'}" if job.get("tmux") else ""))
+    attach = how_to_attach(job)
+    if attach and tmux.alive(job.get("tmux")):
+        print(f"接入      agent-dispatch attach {job['name']}   （即 {attach}；可直接看和打字）")
+    elif attach:
+        print(f"接手      agent-dispatch take {job['name']} 之后：{attach}")
+    if job.get("run_dir"):
+        print(f"run 目录  {job['run_dir']}")
+    if job.get("needs_user"):
+        print(f"⚑ 待你决定  {job['needs_user']['question']}")
+    for key, value in (job.get("report") or {}).items():
+        print(f"  {key}: {value}")
+    if job.get("gate"):
+        print_gate(job["gate"])
+    for d in job.get("decisions") or []:
+        print(f"  裁决 [{d['at']}] 第{d.get('turn')}轮 {d['action']}" + (f"：{d['note']}" if d.get("note") else ""))
+    print(f"文件      {store.job_dir(job['name'])}")
+
+
+def cmd_status(a):
+    while True:
+        if a.watch:
+            print("\033[2J\033[H", end="")
+            print(f"agent-dispatch  {store.now()}   （Ctrl-C 退出）\n")
+        if a.json:
+            jobs = [get_job(a.job)] if a.job else [reconcile(j) for j in store.all_jobs()]
+            print(json.dumps(jobs if not a.job else jobs[0], ensure_ascii=False, indent=2))
+        elif a.job:
+            print_job_detail(get_job(a.job))
+        else:
+            print_status_table(a.batch, a.group, a.project)
+        if not a.watch:
+            return 0
+        try:
+            time.sleep(3)
+        except KeyboardInterrupt:
+            return 0
+
+
+def cmd_log(a):
+    get_job(a.job)
+    path = store.job_path(a.job, "run.log")
+    text = store.read_text(path, "")
+    lines = text.splitlines()
+    print("\n".join(lines[-a.n:]))
+    if not a.follow:
+        return 0
+    offset = len(text.encode("utf-8"))
+    try:
+        while True:
+            with open(path, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+            if chunk:
+                offset += len(chunk)
+                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                sys.stdout.flush()
+            elif get_job(a.job)["state"] != "running":
+                return 0
+            time.sleep(1)
+    except KeyboardInterrupt:
+        return 0
+
+
+def read_events(name):
+    events = []
+    for line in (store.read_text(store.job_path(name, "events.jsonl"), "") or "").splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue
+    return events
+
+
+def cmd_history(a):
+    get_job(a.job)
+    limit = None if a.full else 400
+    for event in read_events(a.job)[-a.n:]:
+        head = f"[{event.get('t', '')[11:]}] 第{event.get('turn')}轮"
+        if event["kind"] == "tool":
+            took = f" {event['ms']}ms" if event.get("ms") is not None else ""
+            print(f"{head} 工具 {event.get('name')}{' ✗失败' if event.get('error') else ''}{took}")
+            for label, value in (("入参", event.get("input")), ("返回", event.get("output"))):
+                text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                print(f"    {label}: {text if limit is None else runner.clip(text or '', limit)}")
+        elif event["kind"] == "text":
+            print(f"{head} 回复\n{event['text'] if limit is None else runner.clip(event['text'], limit)}")
+        else:
+            print(f"{head} 错误 {event.get('message')}")
+    return 0
+
+
+def stop_job(name):
+    job = get_job(name)
+    if job["state"] != "running":
+        return job, False
+    runner_pid = job.get("runner_pid")
+    try:
+        os.kill(runner_pid, signal.SIGTERM)
+    except (ProcessLookupError, TypeError):
+        pass
+    for _ in range(100):
+        time.sleep(0.2)
+        job = get_job(name)
+        if job["state"] != "running":
+            return job, True
+    # 运行器没在 20 秒内收尾：强杀并由本命令落定
+    kill_group(job.get("child_pid"), signal.SIGKILL)
+    try:
+        os.kill(runner_pid, signal.SIGKILL)
+    except (ProcessLookupError, TypeError):
+        pass
+    job = store.update(name, state="stopped", reason="被叫停（强制结束）", ended=store.now(), ended_ts=time.time(),
+                       runner_pid=None, child_pid=None)
+    close_session(job)
+    return job, True
+
+
+def cmd_stop(a):
+    job, stopped = stop_job(a.job)
+    if not stopped:
+        if tmux.alive(job.get("tmux")) and job["state"] != "held":
+            close_session(job)
+            store.info(f"作业 {a.job} 本轮已结束（{STATE_LABEL.get(job['state'], job['state'])}），已关闭它的界面并释放通道")
+            return 0
+        store.info(f"作业 {a.job} 不在运行（{STATE_LABEL.get(job['state'], job['state'])}）")
+        return 0
+    store.update(a.job, decisions=(job.get("decisions") or []) + [
+        {"at": store.now(), "turn": job.get("turn"), "action": "stop", "note": a.reason}])
+    print(summary_line(job))
+    return 0
+
+
+def cmd_take(a):
+    job = get_job(a.job)
+    if job["state"] == "running" and (a.stop or job.get("mode") != "tmux"):
+        if not a.stop:
+            raise DispatchError(f"作业 {a.job} 还在运行：加 --stop 先叫停再接手，或等它结束")
+        job, _ = stop_job(a.job)
+    if job["state"] == "held":
+        raise DispatchError(f"作业 {a.job} 已经是人工持有")
+    attach = how_to_attach(job)
+    with store.locked(a.job):
+        job = store.load(a.job)
+        previous = job["state"]
+        job.update(state="held", prev_state=previous)
+        decide(job, "take", a.note)
+        store.save(job)
+    try:
+        store.acquire_channels(store.channel_ns(job), job.get("channels"), a.job)
+    except DispatchError:
+        store.update(a.job, state=previous, prev_state=None)
+        raise
+    store.info(f"{a.job} 已转为人工持有，主管不会再往里派工。通道 {','.join(job.get('channels') or []) or '无'} 归你使用")
+    if attach:
+        print(attach)
+    store.info(f"用完后：agent-dispatch release {a.job}")
+    return 0
+
+
+def cmd_release(a):
+    with store.locked(a.job):
+        job = store.load(a.job)
+        if job["state"] != "held":
+            raise DispatchError(f"作业 {a.job} 不是人工持有状态")
+        job.update(state=job.get("prev_state") or "done", prev_state=None)
+        decide(job, "release", a.note)
+        store.save(job)
+    if not tmux.alive(job.get("tmux")):
+        store.release_channels(store.channel_ns(job), job.get("channels"), a.job)
+    store.info(f"{a.job} 已交还，当前状态：{STATE_LABEL.get(job['state'], job['state'])}")
+    return 0
+
+
+def print_gate(gate):
+    print(f"闸门      {'通过' if gate['ok'] else '未通过'}（{gate['at']}）")
+    for check in gate["checks"]:
+        mark = "✓" if check["ok"] else ("✗" if check["level"] == "hard" else "⚠")
+        print(f"  {mark} {check['gate']}：{check['detail']}")
+
+
+def cmd_gate(a):
+    job = get_job(a.job)
+    if job["state"] == "running":
+        raise DispatchError(f"作业 {a.job} 还在运行，结束后再查闸门")
+    profile = load_profile(job["profile"])
+    if not profile.get("gates"):
+        store.info("这个作业的角色没有配置闸门")
+        return 0
+    run_dir, ok, checks = gates.run_gates(job, profile)
+    gate = {"at": store.now(), "turn": job["turn"], "ok": ok, "checks": checks}
+    store.update(a.job, gate=gate, run_dir=run_dir)
+    print_gate(gate)
+    return 0 if ok else 1
+
+
+def cmd_accept(a):
+    with store.locked(a.job):
+        job = reconcile_locked(a.job)
+        if job["state"] != "done" and not a.force:
+            raise DispatchError(f"只有「待审查」的作业能验收；{a.job} 当前是 {STATE_LABEL.get(job['state'], job['state'])}")
+        if load_profile(job["profile"]).get("gates") and not a.force:
+            gate = job.get("gate")
+            if not gate or gate.get("turn") != job["turn"]:
+                raise DispatchError(f"还没对本轮跑过闸门：先 agent-dispatch gate {a.job}")
+            if not gate["ok"]:
+                raise DispatchError("闸门未通过，不能验收（确有理由请加 --force 并用 --note 写明）")
+        if a.force and not a.note:
+            raise DispatchError("--force 验收必须用 --note 写明原因")
+        job.update(state="accepted", needs_user=None)
+        decide(job, "accept" + ("(force)" if a.force else ""), a.note)
+        store.save(job)
+    close_session(job)
+    store.info(f"{a.job} 已验收")
+    return 0
+
+
+def cmd_reject(a):
+    with store.locked(a.job):
+        job = reconcile_locked(a.job)
+        if job["state"] in ("running", "held"):
+            raise DispatchError(f"作业 {a.job} 当前是 {STATE_LABEL[job['state']]}，不能驳回")
+        job.update(state="rejected", needs_user=None)
+        decide(job, "reject", a.reason)
+        store.save(job)
+    close_session(job)
+    store.info(f"{a.job} 已驳回")
+    return 0
+
+
+def cmd_escalate(a):
+    with store.locked(a.job):
+        job = store.load(a.job)
+        if a.clear:
+            job["needs_user"] = None
+            decide(job, "escalate-clear", None)
+        else:
+            question = " ".join(a.question).strip()
+            if not question:
+                raise DispatchError("请写明需要用户决定什么")
+            job["needs_user"] = {"question": question, "at": store.now()}
+            decide(job, "escalate", question)
+        store.save(job)
+    store.info(f"{a.job} " + ("已清除待决标记" if a.clear else "已标记为等待用户决定"))
+    return 0
+
+
+def cmd_attach(a):
+    job = get_job(a.job)
+    if not tmux.alive(job.get("tmux")):
+        hint = how_to_attach(job)
+        raise DispatchError(f"作业 {a.job} 没有开着的 tmux 界面" + (f"。要接手它的会话：agent-dispatch take {a.job} 之后 {hint}" if hint else ""))
+    if os.environ.get("TMUX"):
+        os.execvp("tmux", ["tmux", "switch-client", "-t", job["tmux"]])
+    os.execvp("tmux", ["tmux", "attach", "-t", job["tmux"]])
+
+
+def current_project(a):
+    """命令针对哪个项目：--project 指定，否则按当前目录识别。"""
+    if getattr(a, "project", None):
+        return definitions.load_project(a.project)
+    return definitions.detect(os.getcwd())[0]
+
+
+def role_table(project):
+    rows = [("角色ID", "称呼", "工程", "后端·方式", "来源", "说明")]
+    for role in definitions.list_roles(project):
+        repos = "、".join(role["repos"]) or ("（派工时指定）" if project else "-")
+        rows.append((role["role"], role["title"], repos, f"{role.get('backend') or '-'}·{role.get('mode') or 'headless'}",
+                     role["scope"], runner.clip(role.get("description") or "", 44)))
+    return rows
+
+
+def cmd_role(a):
+    """打印主管角色文档：任何目录、任何智能体都能用这条命令拿到同一份定义。在项目里会附上项目的补充规则和可派的角色。"""
+    print(store.read_text(os.path.join(backends.ROOT, "SUPERVISOR.md"), ""))
+    project = current_project(a)
+    if not project:
+        return 0
+    print(f"\n---\n\n# 项目 {project['name']}（ID：{project['id']}）\n")
+    notes = definitions.supervisor_notes(project)
+    if notes:
+        print(notes.strip() + "\n")
+    print("## 工程\n")
+    for repo in project["repos"].values():
+        channels = f"   通道：{'、'.join(repo['channels'])}" if repo["channels"] else ""
+        print(f"- `{repo['id']}`：{repo['cwd']}{channels}")
+    print(f"\n## 可派的角色（agent-dispatch start <作业名> --project {project['id']} --role <角色ID> \"任务\"）\n")
+    table(role_table(project))
+    return 0
+
+
+def cmd_projects(a):
+    action, args = a.action or "list", a.args
+    if action == "list":
+        projects = definitions.list_projects()
+        if not projects:
+            print("（还没有定义项目。新建：agent-dispatch projects add <ID> --name <名字> --repo <工程名>=<目录>）")
+            return 0
+        rows = [("项目ID", "名称", "工程", "角色")]
+        for project in projects:
+            rows.append((project["id"], project["name"], "、".join(project["repos"]) or "-",
+                         "、".join(r["title"] for r in definitions.list_roles(project)) or "-"))
+        table(rows)
+        return 0
+    if not args:
+        raise DispatchError(f"projects {action} 需要项目 ID")
+    if action == "show":
+        project = definitions.load_project(args[0])
+        print(f"项目 {project['name']}（ID：{project['id']}）   定义：{definitions.project_dir(project['id'])}\n")
+        rows = [("工程ID", "名称", "目录", "通道")]
+        for repo in project["repos"].values():
+            rows.append((repo["id"], repo["name"], repo["cwd"], "、".join(repo["channels"]) or "-"))
+        table(rows)
+        print()
+        table(role_table(project))
+        return 0
+    if action == "add":
+        repos = dict(pair.split("=", 1) for pair in a.repo or [])
+        path = definitions.add_project(args[0], a.name, repos)
+        store.info(f"已建项目 {args[0]}：{path}")
+        return 0
+    if action == "add-repo":
+        if len(args) < 2 or "=" not in args[1]:
+            raise DispatchError("用法：agent-dispatch projects add-repo <项目ID> <工程名>=<目录> [--channels a,b]")
+        repo_id, cwd = args[1].split("=", 1)
+        definitions.add_repo(args[0], repo_id, cwd, [c.strip() for c in a.channels.split(",")] if a.channels else None)
+        store.info(f"已把工程 {repo_id} 加进项目 {args[0]}")
+        return 0
+    raise DispatchError(f"未知动作 {action}")
+
+
+def cmd_roles(a):
+    action = a.action or "list"
+    project = None if a.is_global else current_project(a)
+    if action == "list":
+        print(f"项目 {project['name']}（{project['id']}）可派的角色：\n" if project else "全局角色（不在任何项目里；看某个项目的用 --project）：\n")
+        table(role_table(project))
+        return 0
+    if not a.name:
+        raise DispatchError(f"roles {action} 需要角色 ID")
+    if action == "show":
+        role = definitions._merged_role(project, definitions.find_role_id(project, a.name))
+        public = {k: v for k, v in role.items() if not k.startswith("_")}
+        print(json.dumps(public, ensure_ascii=False, indent=2))
+        print(f"\n派工单模板：{role['_brief_path'] or '（无，任务原文直接作为派工单）'}")
+        if role["_brief_path"]:
+            print("\n" + (store.read_text(role["_brief_path"]) or ""))
+        return 0
+    if action == "add":
+        path, inherits = definitions.add_role(a.name, project, a.title, a.description,
+                                              [r.strip() for r in a.repos.split(",")] if a.repos else None, a.backend, a.mode)
+        where = f"项目 {project['id']}" if project else "全局"
+        store.info(f"已在{where}新建角色 {a.name}：{path}" + ("（覆盖全局同名角色，只需写要改的项）" if inherits else ""))
+        if not inherits:
+            store.info(f"派工单模板：{path[:-5]}.brief.md —— 把这个角色的职责、边界写进去")
+        return 0
+    raise DispatchError(f"未知动作 {action}")
+
+
+WEB_STATE = os.path.join(store.HOME, "web.json")
+
+
+def web_running():
+    """后台网页服务的登记信息；进程已不在则视为没在跑。"""
+    try:
+        info = json.loads(store.read_text(WEB_STATE) or "")
+    except ValueError:
+        return None
+    return info if store.alive(info.get("pid")) else None
+
+
+def cmd_web(a):
+    from . import web
+    running = web_running()
+    if a.action == "status":
+        print(f"后台网页在运行：{running['url']}  (pid {running['pid']})" if running else "后台网页没有在运行")
+        return 0
+    if a.action == "stop":
+        if not running:
+            store.info("后台网页没有在运行")
+            return 0
+        os.kill(running["pid"], signal.SIGTERM)
+        os.remove(WEB_STATE)
+        store.info(f"已停止后台网页（pid {running['pid']}）。不影响任何作业")
+        return 0
+    if a.action == "start":
+        if running:
+            store.info(f"后台网页已经在运行：{running['url']}")
+        else:
+            env = dict(os.environ, PYTHONPATH=backends.ROOT + os.pathsep + os.environ.get("PYTHONPATH", ""))
+            os.makedirs(store.HOME, exist_ok=True)
+            with open(os.path.join(store.HOME, "web.log"), "a", encoding="utf-8") as log:
+                proc = subprocess.Popen([sys.executable, "-m", "agent_dispatch", "web", "--host", a.host, "--port", str(a.port)],
+                                        env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            time.sleep(0.8)
+            if proc.poll() is not None:
+                raise DispatchError(f"后台网页没启动成功（端口 {a.port} 可能被占用）。详见 {os.path.join(store.HOME, 'web.log')}")
+            running = {"pid": proc.pid, "url": f"http://{a.host}:{a.port}/"}
+            store.write_text(WEB_STATE, json.dumps(running))
+            store.info(f"后台网页已启动：{running['url']}    停止：agent-dispatch web stop")
+        if a.open:
+            webbrowser.open(running["url"])
+        return 0
+    if a.open:
+        webbrowser.open(f"http://{a.host}:{a.port}/")
+    return web.serve(a.host, a.port)
+
+
+def cmd_run(a):
+    runner.run(a.job)
+    return 0
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(prog="agent-dispatch", description="纯命令行的多智能体派工")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="命令")
+
+    def add(name, func, help_text):
+        parser = sub.add_parser(name, help=help_text, description=help_text)
+        parser.set_defaults(func=func)
+        return parser
+
+    p = add("start", cmd_start, "派出一个新作业，立即返回")
+    p.add_argument("job", help="作业名（字母数字 . _ -）")
+    p.add_argument("task", nargs="*", help="任务文本；'-' 表示从标准输入读")
+    p.add_argument("--project", "-P", help="项目 ID 或名称（在项目的工程目录里执行时可省略，自动识别）")
+    p.add_argument("--role", "-r", help="角色 ID 或称呼，如 tester / 测试工程师（见 agent-dispatch roles）")
+    p.add_argument("--repo", help="工程 ID：角色负责多个工程时用它指明")
+    p.add_argument("--profile", "-p", help="早先的 profile 名（已被 --project/--role 取代）")
+    p.add_argument("--backend", "-b", help="后端：pi / opencode …（默认取角色定义）")
+    p.add_argument("--model", "-m", help="模型（默认取角色定义或后端默认）")
+    p.add_argument("--batch", help="批次名：同一次请求派出的作业用同一个批次")
+    p.add_argument("--channels", help="浏览器通道：逗号分隔，或 all / none（默认取 profile）")
+    p.add_argument("--cwd", help="工作目录（默认取 profile）")
+    p.add_argument("--file", "-f", help="从文件读任务文本")
+    p.add_argument("--mode", choices=["headless", "tmux"],
+                   help="运行方式：headless 无头；tmux 交互界面跑在 tmux 里，可接入、两轮之间不退出（默认取 profile）")
+    p.add_argument("--timeout", type=float, help="单轮最长分钟数，超时终止（默认取 profile）")
+    p.add_argument("--dry-run", action="store_true", help="只打印派工单，不派出")
+
+    p = add("wait", cmd_wait, "限时等待作业落定；超时返回码 3，只表示还在跑")
+    p.add_argument("jobs", nargs="*")
+    p.add_argument("--batch", help="等这个批次的全部作业")
+    p.add_argument("--timeout", type=int, default=540, help="最多等多少秒（默认 540）")
+
+    p = add("status", cmd_status, "作业总览，或单个作业的详情")
+    p.add_argument("job", nargs="?")
+    p.add_argument("--batch", help="只看这个批次")
+    p.add_argument("--project", dest="group", help="只看这个项目（按项目名）")
+    p.add_argument("--repo", dest="project", help="只看这个工程（按工程名）")
+    p.add_argument("--watch", "-w", action="store_true", help="每 3 秒刷新")
+    p.add_argument("--json", action="store_true", help="输出台账 JSON")
+
+    p = add("log", cmd_log, "看执行者的输出")
+    p.add_argument("job")
+    p.add_argument("-n", type=int, default=60, help="最后多少行（默认 60）")
+    p.add_argument("--follow", "-f", action="store_true", help="持续跟随，作业结束后自动退出")
+
+    p = add("history", cmd_history, "逐步查看工具调用与回复")
+    p.add_argument("job")
+    p.add_argument("-n", type=int, default=30, help="最后多少条（默认 30）")
+    p.add_argument("--full", action="store_true", help="不截断")
+
+    p = add("reply", cmd_reply, "在同一会话里续派（裁决、补充说明、返工）")
+    p.add_argument("job")
+    p.add_argument("task", nargs="*", help="内容；'-' 表示从标准输入读")
+    p.add_argument("--file", "-f")
+    p.add_argument("--force", action="store_true", help="对已验收的作业继续派")
+
+    p = add("follow", cmd_follow, "tmux 界面还在跑但作业已落定时，重新跟进它（不发送任何内容）")
+    p.add_argument("job")
+    p.add_argument("--note")
+
+    p = add("stop", cmd_stop, "叫停运行中的作业并释放通道")
+    p.add_argument("job")
+    p.add_argument("--reason", help="叫停原因，记入裁决记录")
+
+    p = add("attach", cmd_attach, "接进 tmux 方式作业的界面：可以看，也可以直接打字（Ctrl-b d 退出，不影响作业）")
+    p.add_argument("job")
+
+    p = add("take", cmd_take, "人工接手：主管不再往里派工，通道归你")
+    p.add_argument("job")
+    p.add_argument("--stop", action="store_true", help="作业在运行时先叫停")
+    p.add_argument("--note")
+
+    p = add("release", cmd_release, "把人工持有的作业交还主管")
+    p.add_argument("job")
+    p.add_argument("--note")
+
+    p = add("gate", cmd_gate, "跑机械闸门；有硬性项未通过时返回码 1")
+    p.add_argument("job")
+
+    p = add("accept", cmd_accept, "验收")
+    p.add_argument("job")
+    p.add_argument("--note")
+    p.add_argument("--force", action="store_true", help="闸门未过或状态不符时强制验收，必须配 --note")
+
+    p = add("reject", cmd_reject, "驳回（不再续派）")
+    p.add_argument("job")
+    p.add_argument("--reason", required=True)
+
+    p = add("escalate", cmd_escalate, "标记「等待用户决定」，在总览里置顶")
+    p.add_argument("job")
+    p.add_argument("question", nargs="*")
+    p.add_argument("--clear", action="store_true", help="清除标记")
+
+    p = add("role", cmd_role, "打印主管角色文档（职责、工作循环、裁决表）；在项目里会附上项目规则和可派的角色")
+    p.add_argument("--project", "-P", help="项目 ID 或名称（默认按当前目录识别）")
+
+    p = add("projects", cmd_projects, "项目定义：列表 / show <ID> / add <ID> / add-repo <ID> <工程名>=<目录>")
+    p.add_argument("action", nargs="?", choices=["list", "show", "add", "add-repo"])
+    p.add_argument("args", nargs="*")
+    p.add_argument("--name", help="add：项目显示名")
+    p.add_argument("--repo", action="append", metavar="工程名=目录", help="add：登记一个工程，可重复")
+    p.add_argument("--channels", help="add-repo：这个工程的浏览器通道，逗号分隔")
+
+    p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID>")
+    p.add_argument("action", nargs="?", choices=["list", "show", "add"])
+    p.add_argument("name", nargs="?")
+    p.add_argument("--project", "-P", help="项目 ID 或名称（默认按当前目录识别）")
+    p.add_argument("--global", dest="is_global", action="store_true", help="只看 / 新建全局角色")
+    p.add_argument("--title", help="add：角色的称呼，如 后端开发工程师")
+    p.add_argument("--description", help="add：一句话说明")
+    p.add_argument("--repos", help="add：这个角色负责的工程 ID，逗号分隔")
+    p.add_argument("--backend", help="add：默认后端")
+    p.add_argument("--mode", choices=["headless", "tmux"], help="add：默认运行方式")
+
+    p = add("web", cmd_web, "只读的本地网页总览：web start 后台运行，web stop 停止；不带动作则在前台运行")
+    p.add_argument("action", nargs="?", choices=["start", "stop", "status"], help="start 后台启动 / stop 停止 / status 查看；省略则前台运行")
+    p.add_argument("--open", action="store_true", help="同时在浏览器里打开")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+
+    p = sub.add_parser("_run")  # 内部：后台运行器入口
+    p.add_argument("job")
+    p.set_defaults(func=cmd_run)
+    return ap
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args) or 0
+    except DispatchError as exc:
+        print(f"[agent-dispatch] 错误：{exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130

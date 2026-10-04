@@ -1,0 +1,165 @@
+# agent-dispatch
+
+纯命令行的多智能体派工：一个**主管**智能体负责派工和裁决，若干**执行者**智能体负责干活。
+主管和执行者都可以是任意命令行智能体（pi、OpenCode，后续可加 Claude Code、Codex）。
+
+没有客户端，没有常驻服务。全部状态是 `~/.agent-dispatch/` 下的文件。
+
+```
+主管（任意智能体会话，或你本人）
+   │ 调命令
+   ▼
+agent-dispatch ──读写──▶ ~/.agent-dispatch/jobs/…  ◀──只读── agent-dispatch web
+   │ 启动
+   ▼
+执行者（pi / OpenCode：无头进程，或 tmux 里的交互界面）
+```
+
+## 安装
+
+需要 Python 3.9+（只用标准库）；tmux 方式需要 tmux。
+
+```bash
+ln -s "$PWD/bin/agent-dispatch" ~/.local/bin/agent-dispatch
+```
+
+## 项目、工程、角色
+
+- **项目**：一条产品线或一个工程群（如 C2）。
+- **工程**：项目下的一个代码仓库目录（前端、后端、测试工程……），可以带自己的资源，如浏览器通道。
+- **角色**：项目里的一个岗位（后端开发工程师、前端开发工程师、测试工程师……）。角色定义了：负责哪些工程、
+  用哪个后端和模型、运行方式、默认占哪些通道、派工单模板（岗位职责和边界）、闸门。
+
+```bash
+agent-dispatch projects add c2 --name WMS_ZC_C2 \
+    --repo backend=~/WmsProjects/WMS_ZC_C2/WMS_V3_backend --repo test=~/WmsProjects/WMS_ZC_C2/Zc_Wms_Test_V2
+agent-dispatch projects add-repo c2 frontend=~/WmsProjects/WMS_ZC_C2/Zc_Wms_Frontend
+agent-dispatch roles add backend-dev -P c2 --repos backend      # 沿用全局的「后端开发工程师」，只指定它在本项目负责的工程
+agent-dispatch roles add dba -P c2 --title 数据库管理员 --repos backend   # 全新角色：生成定义和派工单模板，再去改模板
+
+agent-dispatch projects            # 项目列表；projects show c2 看工程和角色
+agent-dispatch roles -P c2         # 这个项目可派的角色；roles show tester -P c2 看完整定义和派工单模板
+```
+
+定义都是文件，直接编辑即可：
+
+```
+~/.agent-dispatch/projects/<项目ID>/
+├── project.json            名称、工程清单（目录、通道）、defaults（对所有角色生效的默认值）
+├── supervisor.md           给主管的项目专属规则（`agent-dispatch role` 会附上）
+└── roles/<角色ID>.json      项目的角色；与全局角色同名时只写要覆盖的项
+    roles/<角色ID>.brief.md  派工单模板，可用 {{task}} {{job}} {{role}} {{project}} {{repo}} {{cwd}} {{channels}}
+~/.agent-dispatch/roles/     本机的全局角色
+<本工程>/roles/              随工具发布的全局角色：backend-dev、frontend-dev、tester
+```
+
+解析顺序：全局角色 → 项目的 `defaults` → 项目角色，后者逐项覆盖前者。同一个工程的通道由该工程的所有角色共用。
+
+## 快速开始
+
+```bash
+# 按角色派工。在项目的工程目录里执行时 --project 可省略
+agent-dispatch start sanTai-01 --project c2 --role tester --batch 回归-1002 "跑 托盘库出库-整托三态判定"
+agent-dispatch start fix-5619 -P c2 -r backend-dev --batch 回归-1002 "修复：移入收货重复点击产生两条记录……"
+agent-dispatch start pda-ui -P c2 -r frontend-dev --repo pda "……"      # 角色负责多个工程时指明工程
+
+agent-dispatch wait sanTai-01            # 限时等；返回码 3 = 还在跑
+agent-dispatch status                    # 总览；--project <项目名> --repo <工程名> 筛选
+agent-dispatch status sanTai-01          # 单个作业：结论、STATUS、QUESTION、接入方式
+agent-dispatch gate sanTai-01            # 机械闸门
+agent-dispatch accept sanTai-01 --note "核对了 report.md 的三态断言"
+```
+
+不用角色也能派（临时的活）：
+
+```bash
+agent-dispatch start demo --cwd ~/some/repo -b pi "把 README 里的错别字改掉，最后写 STATUS: PASS"
+```
+
+## 让谁当主管
+
+在本目录打开任意智能体即可，它会读 `AGENTS.md`（Claude Code 读 `SKILL.md`），再读 `SUPERVISOR.md`。
+`SUPERVISOR.md` 是主管角色的唯一来源：职责、工作循环、裁决表（哪些能自己定、哪些必须问你、哪些禁止）。
+
+主管不要在被测工程目录里启动：那里的工具配置和执行约定是给执行者的。
+
+## 两种运行方式
+
+| | `headless`（默认） | `tmux` |
+|---|---|---|
+| 执行者是什么 | 无头进程，一轮结束就退出 | 跑在 tmux 会话里的交互界面，两轮之间不退出 |
+| 看过程 | `log -f`、`history`、网页 | 同左，外加 `attach` 直接看界面 |
+| 中途插话 | 不能，只能 `stop` 后 `reply` | `attach` 进去直接打字 |
+| 两轮之间的浏览器和页面状态 | 取决于智能体 | 保留 |
+| 通道何时释放 | 每轮结束 | `accept` / `reject` / `stop` 之后 |
+| 模型 | `--model` 指定 | pi 可指定；OpenCode 的界面不接受模型参数，沿用它上次用的模型 |
+
+用 `--mode` 或角色定义里的 `mode` 切换。tmux 方式下回合是否结束，靠读智能体自己的会话存储判断，不依赖执行者自觉。
+
+## 看和介入
+
+```bash
+agent-dispatch log <作业> -f          # 实时输出（工具调用、回复）
+agent-dispatch history <作业> --full  # 逐步的工具入参与返回
+agent-dispatch attach <作业>          # tmux 方式：接进界面，可直接打字；Ctrl-b d 退出，不影响作业
+agent-dispatch web start --open       # 只读网页总览，后台运行并打开浏览器；web stop 停止，web status 查看
+agent-dispatch web                    # 同上，但在前台运行（Ctrl-C 关闭）
+agent-dispatch status --watch         # 终端里的总览
+
+agent-dispatch stop <作业>            # 叫停（已结束的 tmux 作业：只关界面、释放通道）
+agent-dispatch reply <作业> "…"       # 在同一会话里续派
+agent-dispatch take <作业>            # 人工接手：主管不再往里派；用完 release
+```
+
+网页是只读的旁观者，关掉不影响任何作业。它按批次列出作业、通道占用、等你决定的事项，
+并把各作业 run 目录里的 `verdicts.json` 汇总成用例判定表。
+
+作业按「项目 → 工程 → 批次」归类，网页顶部可以逐级筛选，选中项目后还会列出它的角色。
+没有登记进项目的目录也能派工，归类按目录推断：工程是目录名（worktree 归到主工程），项目是它的上级目录名。
+
+## 状态目录
+
+```
+~/.agent-dispatch/
+├── jobs/<作业>/
+│   ├── job.json            台账：状态、会话 ID、通道、轮次、闸门、裁决记录
+│   ├── brief.md            首轮派工单
+│   ├── run.log             可读日志
+│   ├── events.jsonl        归一化的工具调用与回复
+│   ├── result.md           最近一轮的结论
+│   └── turns/<n>.task.md / <n>.result.md / <n>.raw.jsonl
+├── channels/<工程>/        通道占用（一个通道一个文件）
+├── projects/               项目、工程、角色的定义
+└── roles/                  本机的全局角色
+```
+
+作业状态：`运行中` → `待审查` / `运行失败` / `已叫停` / `意外中断` → `已验收` / `已驳回`；另有 `人工持有`。
+执行者自报的 `STATUS`（PASS / FAIL / BLOCKED / NEEDS_DECISION）是另一个维度。
+
+## 扩展
+
+**加一个后端**：在 `backends.json` 加一项。要提供启动与续聊的命令模板；事件流格式若与现有的不同，
+在 `agent_dispatch/backends.py` 加一个归一化函数（无头方式）和一个会话存储读取函数（tmux 方式）。
+
+**加一个角色**：`agent-dispatch roles add`，然后编辑生成的 json 和派工单模板。可配：`title`、`description`、`repos`、
+`backend`、`model`、`mode`、`channels`（默认占哪些通道：`all` / `none` / 列表）、`timeout_min`、`statuses`、`gates`、`reply_suffix`。
+
+闸门类型：`exit_ok`、`status_reported`、`run_dir`、`file`、`verdicts`。每项可设 `"level": "warn"` 降为提示；
+设 `"when": "run_dir"` 则只在任务产生了 run 目录时才检查（同一个角色既跑测试又写用例时用）。
+
+早先的 `profiles/*.json`（`-p wms-test`）仍然可用，但已被项目和角色取代。
+
+## 已知限制
+
+- 只限本机：主管、执行者和状态目录在同一台机器上。
+- 通道锁只管经 agent-dispatch 派出的作业。你自己手动开的智能体会话在用哪个浏览器，它不知道。
+- OpenCode 的 MCP 服务由它的后台服务持有、同一工程的会话共用。所以执行者结束后浏览器不一定关闭，
+  同一工程里的两个 OpenCode 会话会操作同一个浏览器实例。
+- 无头方式的 pi 必须关闭标准输入才不会挂起；OpenCode 不指定模型时会落到一个工具调用有问题的默认模型，
+  并且按环境变量 `PWD`（而不是进程实际目录）认工作目录。三者都已在运行器和命令模板里处理。
+
+## 开发
+
+```bash
+python3 -m unittest discover -s tests     # 用假智能体跑端到端流程，tmux 方式的用例需要本机有 tmux
+```

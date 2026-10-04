@@ -1,0 +1,24 @@
+{
+  "pi": {
+    "format": "pi",
+    "session": "named",
+    "session_id": "ad-{job}-{nonce}",
+    "default_model": "cc-switch-qianwenai-token-plan/qwen3.7-plus",
+    "argv": ["pi", "-p", "--mode", "json", "--model", "{model}", "--session-id", "{session}", "{extra}", "--", "{task}"],
+    "resume_argv": ["pi", "-p", "--mode", "json", "--model", "{model}", "--session-id", "{session}", "{extra}", "--", "{task}"],
+    "interactive_argv": ["pi", "--session-id", "{session}", "--model", "{model}", "{extra}", "{task}"],
+    "session_reader": {"glob": "~/.pi/agent/sessions/*/*_{session}.jsonl"},
+    "attach": "pi --session-id {session}"
+  },
+  "opencode": {
+    "format": "opencode",
+    "session": "named",
+    "session_id": "ses_ad{jobkey}{nonce}",
+    "default_model": "alibaba-coding-plan-cn/qwen3.7-plus",
+    "argv": ["opencode", "run", "--format", "json", "--auto", "--model", "{model}", "--session", "{session}", "{extra}", "{task}"],
+    "resume_argv": ["opencode", "run", "--format", "json", "--auto", "--model", "{model}", "--session", "{session}", "{extra}", "{task}"],
+    "interactive_argv": ["opencode", "--session", "{session}", "--auto", "{extra}", "--prompt", "{task}"],
+    "session_reader": {"argv": ["opencode", "session", "export", "{session}"]},
+    "attach": "opencode --session {session}"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "description": "WMS 自动化测试：派一个执行者完整跑一次场景剧本（at-run）",
+  "cwd": "/Users/wqd1994/WmsProjects/WMS_ZC_C2/Zc_Wms_Test_V2",
+  "backend": "opencode",
+  "mode": "tmux",
+  "models": {},
+  "backend_args": {},
+  "channels": ["pallet", "box", "pda", "lx01", "lx02", "lx03", "lx04"],
+  "default_channels": "all",
+  "timeout_min": 120,
+  "statuses": ["PASS", "FAIL", "BLOCKED", "NEEDS_DECISION"],
+  "brief_template": "wms-test.brief.md",
+  "reply_suffix": "\n\n---\n完成后仍按派工单约定的报告格式结尾（STATUS / RUN_DIR / SUMMARY / EVIDENCE / QUESTION）。主管不在场，不要停下来等人回答。",
+  "runs_root": "runs",
+  "gates": [
+    {"type": "exit_ok"},
+    {"type": "status_reported"},
+    {"type": "run_dir"},
+    {"type": "file", "path": "{run_dir}/report.md"},
+    {"type": "verdicts"}
+  ]
+}

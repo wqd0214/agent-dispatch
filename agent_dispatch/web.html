@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>派工总览</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #1c2128; --muted: #68717d;
+  --blue: #1f6feb; --green: #1a7f37; --red: #cf222e; --amber: #9a6700; --purple: #8250df; --gray: #6e7781;
+  --blue-bg: #ddf4ff; --green-bg: #dafbe1; --red-bg: #ffebe9; --amber-bg: #fff8c5; --purple-bg: #fbefff; --gray-bg: #eaeef2;
+  --code: #f0f2f5;
+}
+/* 主题：默认跟随系统；右上角可固定为亮色或暗色 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117; --panel: #161b22; --line: #2b323b; --text: #e6edf3; --muted: #8b949e;
+    --blue: #58a6ff; --green: #3fb950; --red: #f85149; --amber: #d29922; --purple: #bc8cff; --gray: #8b949e;
+    --blue-bg: #132a46; --green-bg: #12301c; --red-bg: #3d1618; --amber-bg: #3a2c0a; --purple-bg: #2b1f47; --gray-bg: #21262d;
+    --code: #0d1117;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117; --panel: #161b22; --line: #2b323b; --text: #e6edf3; --muted: #8b949e;
+  --blue: #58a6ff; --green: #3fb950; --red: #f85149; --amber: #d29922; --purple: #bc8cff; --gray: #8b949e;
+  --blue-bg: #132a46; --green-bg: #12301c; --red-bg: #3d1618; --amber-bg: #3a2c0a; --purple-bg: #2b1f47; --gray-bg: #21262d;
+  --code: #0d1117;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 -apple-system, "PingFang SC", "Segoe UI", sans-serif; }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header { display: flex; align-items: baseline; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 16px; margin: 0; }
+header .meta { color: var(--muted); font-size: 12px; }
+header .live { font-size: 12px; color: var(--muted); }
+header .theme { margin-left: auto; display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+header .theme button { border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer; }
+header .theme button.on { background: var(--blue-bg); color: var(--blue); }
+header .live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); margin-right: 6px; }
+header .live.off::before { background: var(--red); }
+main { max-width: 1280px; margin: 0 auto; padding: 20px 24px 60px; }
+h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 26px 0 8px; letter-spacing: .02em; }
+h2 small { font-weight: 400; margin-left: 8px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.pad { padding: 12px 16px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+tbody tr.link { cursor: pointer; }
+tbody tr.link:hover { background: var(--gray-bg); }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; background: var(--gray-bg); color: var(--gray); }
+.chip.blue { background: var(--blue-bg); color: var(--blue); } .chip.green { background: var(--green-bg); color: var(--green); }
+.chip.red { background: var(--red-bg); color: var(--red); } .chip.amber { background: var(--amber-bg); color: var(--amber); }
+.chip.purple { background: var(--purple-bg); color: var(--purple); }
+.muted { color: var(--muted); } .small { font-size: 12px; } .nowrap { white-space: nowrap; }
+.task { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity { color: var(--muted); font-size: 12px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; }
+.stats { display: flex; gap: 10px; flex-wrap: wrap; }
+.scopes { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.scopes > .muted { width: 44px; }
+.scope { border: 1px solid var(--line); border-radius: 14px; padding: 2px 12px; color: var(--text); background: var(--panel); }
+.scope:hover { text-decoration: none; border-color: var(--blue); }
+.scope.on { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+.scope .n { margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 400; }
+h2.project { font-size: 15px; color: var(--text); margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--line); }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; min-width: 104px; }
+.stat b { display: block; font-size: 22px; line-height: 1.2; }
+.stat span { color: var(--muted); font-size: 12px; }
+.ask { border-left: 3px solid var(--purple); padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.ask:last-child { border-bottom: 0; }
+.channels { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.channel { border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; font-size: 12px; }
+.channel.busy { border-color: var(--blue); background: var(--blue-bg); }
+pre { margin: 0; padding: 12px 16px; background: var(--code); font: 12px/1.6 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; overflow: auto; }
+pre.log { height: 62vh; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 8px; background: var(--panel); }
+.tabs button { border: 0; background: none; color: var(--muted); padding: 10px 12px; font: inherit; cursor: pointer; border-bottom: 2px solid transparent; }
+.tabs button.on { color: var(--text); border-bottom-color: var(--blue); }
+.grid { display: grid; grid-template-columns: 84px 1fr; gap: 4px 14px; }
+.grid dt { color: var(--muted); } .grid dd { margin: 0; word-break: break-all; }
+code { background: var(--code); padding: 1px 5px; border-radius: 4px; font: 12px ui-monospace, Menlo, monospace; }
+.event { padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.event:last-child { border-bottom: 0; }
+.event .head { display: flex; gap: 10px; align-items: center; font-size: 12px; color: var(--muted); }
+.event pre { margin-top: 6px; border-radius: 6px; max-height: 260px; }
+.files a { display: block; padding: 3px 16px; font: 12px ui-monospace, Menlo, monospace; }
+.empty { padding: 28px; text-align: center; color: var(--muted); }
+.two { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; }
+.two > div:first-child { border-right: 1px solid var(--line); max-height: 62vh; overflow: auto; padding: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="#/" style="color:inherit">派工总览</a></h1>
+  <span class="meta" id="home"></span>
+  <span class="theme" id="theme">
+    <button data-theme-choice="auto">跟随系统</button><button data-theme-choice="light">亮色</button><button data-theme-choice="dark">暗色</button>
+  </span>
+  <span class="live" id="live">只读 · 每 3 秒刷新</span>
+</header>
+<main id="main"></main>
+<script>
+const STATE_COLOR = {running: 'blue', done: 'amber', failed: 'red', interrupted: 'red', stopped: '', held: 'purple', accepted: 'green', rejected: ''};
+const STATUS_COLOR = {PASS: 'green', FAIL: 'red', BLOCKED: 'amber', NEEDS_DECISION: 'purple'};
+const main = document.getElementById('main');
+
+// ---------- 主题 ----------
+function applyTheme(choice) {
+  if (choice === 'light' || choice === 'dark') document.documentElement.setAttribute('data-theme', choice);
+  else { choice = 'auto'; document.documentElement.removeAttribute('data-theme'); }
+  for (const b of document.querySelectorAll('[data-theme-choice]')) b.classList.toggle('on', b.dataset.themeChoice === choice);
+}
+function savedTheme() { try { return localStorage.getItem('ad-theme'); } catch (e) { return null; } }
+for (const b of document.querySelectorAll('[data-theme-choice]')) b.addEventListener('click', () => {
+  try { localStorage.setItem('ad-theme', b.dataset.themeChoice); } catch (e) {}
+  applyTheme(b.dataset.themeChoice);
+});
+applyTheme(new URLSearchParams(location.search).get('theme') || savedTheme());  // 也可用 ?theme=light 指定
+let view = null, timer = null;
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'class') el.className = v; else if (k.startsWith('on')) el.addEventListener(k.slice(2), v); else el.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c.nodeType ? c : String(c));
+  return el;
+}
+const chip = (text, color) => h('span', {class: 'chip ' + (color || '')}, text);
+const stateChip = j => chip(j.state_label, STATE_COLOR[j.state]);
+const statusChip = j => j.status ? chip(j.status, STATUS_COLOR[j.status]) : h('span', {class: 'muted'}, '-');
+function duration(s) {
+  if (s === null || s === undefined) return '-';
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒';
+  return Math.floor(s / 3600) + ' 时 ' + Math.floor(s % 3600 / 60) + ' 分';
+}
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+  return r.json();
+}
+function setLive(ok) {
+  const el = document.getElementById('live');
+  el.classList.toggle('off', !ok);
+  el.textContent = ok ? '只读 · 每 3 秒刷新' : '连接已断开（agent-dispatch web 可能已关闭）';
+}
+
+// ---------- 总览（项目 → 工程 → 批次 → 作业）；数据里 group 存项目名、project 存工程名 ----------
+const groupLabel = g => g || '未归项目';
+const scopeHref = (g, p) => g === undefined ? '#/' : '#/g/' + encodeURIComponent(g || '-') + (p === undefined ? '' : '/' + encodeURIComponent(p));
+function currentScope() {
+  const m = location.hash.match(/^#\/g\/([^/]+)(?:\/(.+))?$/);
+  if (!m) return {};
+  const g = decodeURIComponent(m[1]);
+  return {group: g === '-' ? '' : g, project: m[2] === undefined ? undefined : decodeURIComponent(m[2])};
+}
+const inScope = (x, scope) => (scope.group === undefined || x.group === scope.group) && (scope.project === undefined || x.project === scope.project);
+function tally(jobs) {
+  const count = f => jobs.filter(f).length;
+  return {all: jobs.length, running: count(j => j.state === 'running'), review: count(j => j.state === 'done'),
+    accepted: count(j => j.state === 'accepted'), failed: count(j => ['failed', 'interrupted'].includes(j.state)), asks: count(j => j.needs_user)};
+}
+function jobTable(rows) {
+  return h('div', {class: 'panel'}, h('table', {}, h('thead', {}, h('tr', {}, ['作业', '角色', '状态', '结论', '闸门', '轮', '耗时', '后端', '通道', '任务 / 当前动作'].map(t => h('th', {}, t)))),
+    h('tbody', {}, rows.map(j => h('tr', {class: 'link', onclick: () => location.hash = '#/job/' + j.name},
+      h('td', {class: 'nowrap'}, h('a', {href: '#/job/' + j.name}, j.name)),
+      h('td', {class: 'nowrap small'}, j.role_title || h('span', {class: 'muted'}, '-')),
+      h('td', {class: 'nowrap'}, stateChip(j), j.needs_user ? [' ', chip('待你决定', 'purple')] : null),
+      h('td', {}, statusChip(j)),
+      h('td', {}, j.gate_ok === true ? chip('通过', 'green') : j.gate_ok === false ? chip('未通过', 'red') : h('span', {class: 'muted'}, '-')),
+      h('td', {}, j.turn), h('td', {class: 'nowrap'}, duration(j.seconds)),
+      h('td', {class: 'nowrap'}, j.backend, j.mode === 'tmux' ? ' · tmux' : '', h('div', {class: 'muted small'}, j.model)),
+      h('td', {class: 'small nowrap', title: j.channels.join(', ')}, j.channels.length > 3 ? j.channels.length + ' 个通道' : j.channels.join(', ') || '-'),
+      h('td', {}, h('div', {class: 'task', title: j.task}, j.task),
+        j.activity ? h('div', {class: 'activity', title: j.activity}, j.activity) : j.reason ? h('div', {class: 'small', style: 'color:var(--red)'}, j.reason) : null))))));
+}
+function renderOverview(data) {
+  document.getElementById('home').textContent = data.home;
+  const scope = currentScope();
+  const jobs = data.jobs.filter(j => inScope(j, scope));
+  const nodes = [];
+
+  // 导航：项目一行，选中项目后再出工程一行。已定义但还没有作业的项目和工程也列出来
+  const defs = data.definitions || [];
+  const groups = [...new Set([...data.jobs.map(j => j.group), ...defs.map(d => d.name)])].sort();
+  const tab = (label, n, href, on) => h('a', {class: 'scope' + (on ? ' on' : ''), href}, label, h('span', {class: 'n'}, n));
+  nodes.push(h('div', {class: 'scopes'}, h('span', {class: 'muted small'}, '项目'),
+    tab('全部', data.jobs.length, scopeHref(), scope.group === undefined),
+    groups.map(g => tab(groupLabel(g), data.jobs.filter(j => j.group === g).length, scopeHref(g), scope.group === g))));
+  const def = defs.find(d => d.name === scope.group);
+  if (scope.group !== undefined) {
+    const inGroup = data.jobs.filter(j => j.group === scope.group);
+    const projects = [...new Set([...inGroup.map(j => j.project), ...(def ? def.repos.map(r => r.name) : [])])].sort();
+    nodes.push(h('div', {class: 'scopes'}, h('span', {class: 'muted small'}, '工程'),
+      tab('全部', inGroup.length, scopeHref(scope.group), scope.project === undefined),
+      projects.map(p => tab(p, inGroup.filter(j => j.project === p).length, scopeHref(scope.group, p), scope.project === p))));
+  }
+
+  const t = tally(jobs);
+  nodes.push(h('div', {class: 'stats'}, [['作业', t.all], ['运行中', t.running], ['待审查', t.review], ['已验收', t.accepted], ['失败/中断', t.failed], ['待你决定', t.asks]]
+    .map(([label, n]) => h('div', {class: 'stat'}, h('b', {}, n), h('span', {}, label)))));
+
+  const asks = jobs.filter(j => j.needs_user);
+  if (asks.length) nodes.push(h('h2', {}, '等你决定'), h('div', {class: 'panel'}, asks.map(j =>
+    h('div', {class: 'ask'}, h('a', {href: '#/job/' + j.name}, j.name), ' ', h('span', {class: 'muted small'}, `${j.project} · ${j.needs_user.at}`),
+      h('div', {}, j.needs_user.question)))));
+
+  // 没有选定单个工程时：先给一张工程一览（含已定义但还没有作业的工程）
+  const keys = [...new Set(jobs.map(j => j.group + '\u0000' + j.project))].sort().map(k => k.split('\u0000'));
+  if (scope.project === undefined) {
+    const defined = defs.filter(d => scope.group === undefined || d.name === scope.group).flatMap(d => d.repos.map(r => [d.name, r.name]));
+    const all = [...new Set([...keys, ...defined].map(k => k.join('\u0000')))].sort().map(k => k.split('\u0000'));
+    if (all.length) nodes.push(h('h2', {}, '工程一览', h('small', {}, all.length + ' 个工程')),
+      h('div', {class: 'panel'}, h('table', {}, h('thead', {}, h('tr', {}, ['项目', '工程', '作业', '运行中', '待审查', '已验收', '失败/中断', '待你决定', '最近派出'].map(x => h('th', {}, x)))),
+        h('tbody', {}, all.map(([g, p]) => {
+          const rows = jobs.filter(j => j.group === g && j.project === p), n = tally(rows);
+          const num = (v, color) => v ? chip(v, color) : h('span', {class: 'muted'}, '0');
+          return h('tr', {class: 'link', onclick: () => location.hash = scopeHref(g, p)},
+            h('td', {class: 'nowrap'}, h('a', {href: scopeHref(g)}, groupLabel(g))), h('td', {class: 'nowrap'}, h('a', {href: scopeHref(g, p)}, p)),
+            h('td', {}, n.all || h('span', {class: 'muted'}, '0')), h('td', {}, num(n.running, 'blue')), h('td', {}, num(n.review, 'amber')), h('td', {}, num(n.accepted, 'green')),
+            h('td', {}, num(n.failed, 'red')), h('td', {}, num(n.asks, 'purple')), h('td', {class: 'small muted nowrap'}, rows.length ? rows[0].created : '-'));
+        })))));
+  }
+
+  // 选中了一个已定义的项目：列出它的角色
+  if (def) {
+    const repoName = id => (def.repos.find(r => r.id === id) || {name: id}).name;
+    const roles = def.roles.filter(r => scope.project === undefined || !r.repos.length || r.repos.some(id => repoName(id) === scope.project));
+    if (roles.length) nodes.push(h('h2', {}, '角色', h('small', {}, `派工：agent-dispatch start <作业名> --project ${def.id} --role <角色ID> "任务"`)),
+      h('div', {class: 'panel'}, h('table', {}, h('thead', {}, h('tr', {}, ['角色', '角色ID', '负责的工程', '后端 · 方式', '作业', '说明'].map(x => h('th', {}, x)))),
+        h('tbody', {}, roles.map(r => h('tr', {}, h('td', {class: 'nowrap'}, h('b', {}, r.title)), h('td', {class: 'nowrap'}, h('code', {}, r.id)),
+          h('td', {class: 'small'}, r.repos.length ? r.repos.map(repoName).join('、') : h('span', {class: 'muted'}, '派工时指定')),
+          h('td', {class: 'nowrap small'}, `${r.backend || '-'} · ${r.mode}`),
+          h('td', {}, jobs.filter(j => j.role === r.id).length || h('span', {class: 'muted'}, '0')), h('td', {class: 'small'}, r.description)))))));
+  }
+
+  for (const c of data.channels.filter(c => inScope(c, scope))) {
+    nodes.push(h('h2', {}, '浏览器通道', h('small', {}, `${c.project} · ${c.profile}`)), h('div', {class: 'channels'},
+      Object.entries(c.table).map(([ch, holder]) => h('span', {class: 'channel' + (holder ? ' busy' : '')}, ch,
+        holder ? [' · ', h('a', {href: '#/job/' + holder}, holder)] : h('span', {class: 'muted'}, ' · 空闲')))));
+  }
+
+  if (!data.jobs.length) nodes.push(h('div', {class: 'panel empty'}, '还没有作业。用 agent-dispatch start 派出第一个。'));
+  for (const [g, p] of keys) {
+    const mine = jobs.filter(j => j.group === g && j.project === p);
+    if (keys.length > 1) nodes.push(h('h2', {class: 'project'}, h('a', {href: scopeHref(g)}, groupLabel(g)), ' / ', h('a', {href: scopeHref(g, p)}, p)));
+    for (const batch of [...new Set(mine.map(j => j.batch))]) {
+      const rows = mine.filter(j => j.batch === batch);
+      nodes.push(h('h2', {}, batch ? '批次 ' + batch : '未分批次', h('small', {}, rows.length + ' 个作业')), jobTable(rows));
+    }
+  }
+
+  const cases = data.cases.filter(x => inScope(x, scope));
+  if (cases.length) {
+    const c = v => cases.filter(x => x.verdict === v).length;
+    nodes.push(h('h2', {}, '用例判定', h('small', {}, `PASS ${c('PASS')} · FAIL ${c('FAIL')} · BLOCKED ${c('BLOCKED')}`)),
+      h('div', {class: 'panel'}, h('table', {}, h('thead', {}, h('tr', {}, ['用例', '判定', '证据', '备注', '工程', '作业', 'run'].map(x => h('th', {}, x)))),
+        h('tbody', {}, cases.map(x => h('tr', {}, h('td', {class: 'nowrap'}, x.tc), h('td', {}, chip(x.verdict, STATUS_COLOR[x.verdict])),
+          h('td', {class: 'small'}, x.evidence || '-'), h('td', {class: 'small'}, x.note || ''), h('td', {class: 'small nowrap'}, x.project),
+          h('td', {}, h('a', {href: '#/job/' + x.job}, x.job)), h('td', {class: 'small muted'}, x.run)))))));
+  }
+  main.replaceChildren(...nodes);
+}
+
+// ---------- 作业详情 ----------
+function buildJobView(name) {
+  const v = {name, tab: 'log', offset: -1, head: h('div'), body: h('div', {class: 'panel'}), log: h('pre', {class: 'log'}), viewer: h('pre', {class: 'log'}, '点左侧文件查看内容'), detail: null};
+  v.crumb = h('p', {}, h('a', {href: '#/'}, '← 总览'));
+  main.replaceChildren(v.crumb, v.head, h('div', {style: 'height:14px'}), v.body);
+  return v;
+}
+function renderJob(v, d) {
+  v.detail = d;
+  v.crumb.replaceChildren(h('a', {href: '#/'}, '← 总览'), ' / ', h('a', {href: scopeHref(d.group)}, groupLabel(d.group)), ' / ', h('a', {href: scopeHref(d.group, d.project)}, d.project));
+  v.head.replaceChildren(h('div', {class: 'panel pad'},
+    h('div', {style: 'display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap'}, h('b', {style: 'font-size:16px'}, d.name), stateChip(d), d.status ? statusChip(d) : null,
+      d.batch ? h('span', {class: 'muted small'}, '批次 ' + d.batch) : null),
+    d.needs_user ? h('div', {class: 'ask', style: 'margin:0 -16px 10px'}, h('b', {}, '等你决定：'), d.needs_user.question) : null,
+    h('dl', {class: 'grid'},
+      h('dt', {}, '任务'), h('dd', {}, d.task),
+      d.role_title ? [h('dt', {}, '角色'), h('dd', {}, d.role_title, ' ', h('code', {}, d.role))] : null,
+      h('dt', {}, '进度'), h('dd', {}, `第 ${d.turn} 轮 · ${duration(d.seconds)}`, d.reason ? h('span', {style: 'color:var(--red)'}, ' · ' + d.reason) : null),
+      h('dt', {}, '后端'), h('dd', {}, `${d.backend} · ${d.model}`),
+      h('dt', {}, '通道'), h('dd', {}, d.channels.join(', ') || '-'),
+      h('dt', {}, '工作目录'), h('dd', {}, h('code', {}, d.cwd)),
+      h('dt', {}, '会话'), h('dd', {}, d.session_id ? h('code', {}, d.session_id) : '（尚未取得）'),
+      h('dt', {}, '方式'), h('dd', {}, d.mode, d.mode === 'tmux' ? (d.tmux_alive ? ' · 界面开着' : ' · 界面已关闭') : ''),
+      d.attach ? (d.tmux_alive ? [h('dt', {}, '接入界面'), h('dd', {}, h('code', {}, `agent-dispatch attach ${d.name}`), ' 可直接看和打字')]
+        : [h('dt', {}, '接手'), h('dd', {}, h('code', {}, `agent-dispatch take ${d.name} && ${d.attach}`))]) : null,
+      h('dt', {}, '叫停 / 续派'), h('dd', {}, h('code', {}, `agent-dispatch stop ${d.name}`), ' ', h('code', {}, `agent-dispatch reply ${d.name} "…"`)))));
+  const tabs = [['log', '实时输出'], ['events', `时间线 (${d.events.length})`], ['result', '结论与裁决'], ['brief', '派工单'], ['files', `run 文件 (${d.run_files.length})`]];
+  const bar = h('div', {class: 'tabs'}, tabs.map(([id, label]) => h('button', {class: v.tab === id ? 'on' : '', onclick: () => { v.tab = id; renderJob(v, v.detail); }}, label)));
+  let content;
+  if (v.tab === 'log') content = v.log;
+  else if (v.tab === 'events') content = d.events.length ? h('div', {}, d.events.slice().reverse().map(renderEvent)) : h('div', {class: 'empty'}, '还没有事件');
+  else if (v.tab === 'brief') content = h('pre', {}, d.brief);
+  else if (v.tab === 'files') content = d.run_files.length ? h('div', {class: 'two'},
+      h('div', {class: 'files'}, h('div', {class: 'muted small', style: 'padding:0 16px 6px'}, d.run_dir), d.run_files.map(f => h('a', {href: '#', onclick: e => { e.preventDefault(); openFile(v, f.path); }}, f.path))), v.viewer)
+    : h('div', {class: 'empty'}, d.state === 'running' ? '运行结束后才定位 run 目录' : '没有找到本次的 run 目录');
+  else content = renderResult(d);
+  v.body.replaceChildren(bar, content);
+}
+function renderEvent(e) {
+  const text = x => typeof x === 'string' ? x : JSON.stringify(x, null, 2);
+  const head = h('div', {class: 'head'}, h('span', {}, (e.t || '').slice(11)), h('span', {}, '第 ' + e.turn + ' 轮'));
+  if (e.kind === 'tool') {
+    head.append(chip('工具 ' + e.name, e.error ? 'red' : 'blue'), e.ms !== null && e.ms !== undefined ? h('span', {}, e.ms + ' ms') : '');
+    return h('div', {class: 'event'}, head, h('pre', {}, text(e.input)), h('pre', {}, text(e.output ?? '')));
+  }
+  if (e.kind === 'text') { head.append(chip('回复', 'green')); return h('div', {class: 'event'}, head, h('pre', {}, e.text)); }
+  head.append(chip('错误', 'red'));
+  return h('div', {class: 'event'}, head, h('pre', {}, e.message));
+}
+function renderResult(d) {
+  const nodes = [h('h2', {style: 'margin:14px 16px 6px'}, '执行者的结论'), h('pre', {}, d.result || '（还没有结论）')];
+  if (d.gate) nodes.push(h('h2', {style: 'margin:14px 16px 6px'}, '机械闸门', h('small', {}, (d.gate.ok ? '通过' : '未通过') + ' · ' + d.gate.at)),
+    h('table', {}, h('tbody', {}, d.gate.checks.map(c => h('tr', {}, h('td', {style: 'width:40px'}, c.ok ? chip('✓', 'green') : chip(c.level === 'hard' ? '✗' : '⚠', c.level === 'hard' ? 'red' : 'amber')),
+      h('td', {class: 'nowrap'}, c.gate), h('td', {}, c.detail))))));
+  else nodes.push(h('div', {class: 'pad muted small'}, '还没有跑过闸门（agent-dispatch gate ' + d.name + '）'));
+  nodes.push(h('h2', {style: 'margin:14px 16px 6px'}, '裁决记录'));
+  nodes.push(d.decisions.length ? h('table', {}, h('tbody', {}, d.decisions.map(x => h('tr', {}, h('td', {class: 'nowrap muted small'}, x.at), h('td', {class: 'nowrap'}, '第 ' + x.turn + ' 轮'),
+    h('td', {class: 'nowrap'}, chip(x.action)), h('td', {}, x.note || ''))))) : h('div', {class: 'pad muted small'}, '暂无'));
+  return h('div', {}, nodes);
+}
+async function openFile(v, path) {
+  const url = `/api/job/${encodeURIComponent(v.name)}/file?path=${encodeURIComponent(path)}`;
+  if (/\.(png|jpe?g|gif|webp)$/i.test(path)) { window.open(url, '_blank'); return; }
+  const r = await fetch(url);
+  v.viewer.textContent = r.ok ? await r.text() : '无法读取该文件';
+  v.viewer.scrollTop = 0;
+}
+async function pollLog(v) {
+  const data = await api(`/api/job/${encodeURIComponent(v.name)}/log?offset=${v.offset}`);
+  if (data.text) {
+    const pinned = v.log.scrollTop + v.log.clientHeight >= v.log.scrollHeight - 30;
+    v.log.append(data.text);
+    if (pinned || v.offset === -1) v.log.scrollTop = v.log.scrollHeight;
+  }
+  v.offset = data.offset;
+}
+
+// ---------- 路由与轮询 ----------
+async function tick() {
+  try {
+    const match = location.hash.match(/^#\/job\/(.+)$/);
+    if (match) {
+      const name = decodeURIComponent(match[1]);
+      if (!view || view.name !== name) view = buildJobView(name);
+      const current = view;
+      const detail = await api('/api/job/' + encodeURIComponent(name));
+      if (current !== view) return;
+      // 时间线和文件页在读内容时不重绘，避免滚动位置被打断
+      if (!current.detail || ['log', 'result'].includes(current.tab) || detail.state !== current.detail.state) renderJob(current, detail);
+      else current.detail = detail;
+      await pollLog(current);
+    } else {
+      view = null;
+      renderOverview(await api('/api/overview'));
+    }
+    setLive(true);
+  } catch (err) {
+    if (err instanceof TypeError) setLive(false); else main.replaceChildren(h('div', {class: 'panel empty'}, String(err.message || err)), h('p', {}, h('a', {href: '#/'}, '← 返回总览')));
+  }
+}
+function start() { clearInterval(timer); tick(); timer = setInterval(tick, 3000); }
+window.addEventListener('hashchange', start);
+start();
+</script>
+</body>
+</html>

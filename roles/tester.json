@@ -1,0 +1,10 @@
+{
+  "title": "测试工程师",
+  "description": "编写和执行测试，只认可验证的证据，不为凑绿放宽断言",
+  "backend": "opencode",
+  "mode": "headless",
+  "channels": "none",
+  "timeout_min": 90,
+  "statuses": ["PASS", "FAIL", "BLOCKED", "NEEDS_DECISION"],
+  "gates": [{"type": "exit_ok"}, {"type": "status_reported"}]
+}
