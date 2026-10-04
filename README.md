@@ -111,6 +111,23 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 - 网页同样提供 `/api/mcp`、`/api/skills` 一套接口（候选按名称分组、导入、增删改，写操作要求本机页面请求头），
   角色的 mcp / skills 在配置中心里和其它字段一样分层配置、可恢复继承。
 
+### 按作业下发（派工时真正生效）
+
+角色管了 MCP / 技能时，派工命令会附带下发参数；临时文件统一放在该作业自己的目录下
+（`~/.agent-dispatch/jobs/<作业名>/inject/`，权限 600，含凭据），续派（reply）复用同一套、每轮重新生成，
+作业结束（验收 / 驳回 / 叫停）后删除；`status <作业名>` 里显示的「接手」命令自带同样的环境变量与参数。
+不修改任何工程目录，也不修改用户的 pi / OpenCode 配置。
+
+- **pi**：技能用 `--no-skills` 加每个选中目录一个 `--skill`，只加载选中的；MCP 用 `PI_CODING_AGENT_DIR`
+  指向作业私有的临时 agent 目录——`mcp.json` 从登记表生成，`auth.json` / `models.json` / `sessions` 符号链接
+  回 `~/.pi/agent`（绝不复制或改写），并加 `--no-approve` 不读工程 `.pi/mcp.json`。实测这样用户全局与工程级
+  的服务都不会加载；局限：`~/.pi/agent/settings.json` 里配置的扩展包（及其技能）也不加载。
+- **OpenCode**：`OPENCODE_CONFIG_CONTENT` 注入——`mcp` 段写选中服务的完整定义，工程 `opencode.json` 与
+  全局配置里有但本次没选中的服务写「同名完整定义 + enabled:false」关掉（只读这些文件）；技能写 `skills.paths`；
+  无头命令加 `--standalone`（env 配置只在独立进程里生效）。局限：无法排除执行者自己的全局技能，只能追加。
+- 派工单预览（`/api/jobs/preview`、`start --dry-run`）和 `status <作业名>` 会列出「本次下发」：管理了哪些
+  MCP（name 与登记 ID）、哪些技能、各自的局限说明，凭据一律遮罩；未管理时显示「未管理：执行者使用自己的配置」。
+
 ## 快速开始
 
 ```bash

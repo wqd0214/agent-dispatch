@@ -8,7 +8,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import backends, cli, definitions, gates, models, registry, store, tmux
+from . import backends, cli, definitions, gates, inject, models, registry, store, tmux
 
 UI_DIST = os.environ.get("AGENT_DISPATCH_UI_DIST") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_dist")
 TEXT_SUFFIXES = (".md", ".json", ".jsonl", ".txt", ".log", ".sql", ".csv")
@@ -290,6 +290,7 @@ def job_detail(name):
         "followed_by": [j["name"] for j in store.all_jobs() if job["name"] in (j.get("follows") or [])],
         "cwd": job.get("cwd"), "session_id": job.get("session_id"), "attach": attach,
         "mode": job.get("mode", "headless"), "tmux_alive": tmux.alive(job.get("tmux")),
+        "inject": inject.describe_job(job),
         "report": job.get("report") or {}, "gate": job.get("gate"), "decisions": job.get("decisions") or [],
         "turns": job.get("turns") or [], "brief": store.read_text(store.job_path(name, "brief.md"), ""),
         "result": store.read_text(store.job_path(name, "result.md"), ""), "events": cli.read_events(name)[-500:],

@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 
-from . import backends, models, store, tmux
+from . import backends, inject, models, store, tmux
 from .store import DispatchError
 
 STATUS_RE = re.compile(r"^[\s>*#-]*STATUS\**\s*[:：]\s*\**\s*([A-Za-z_]+)\**[ \t]*$", re.M)
@@ -195,11 +195,13 @@ def install_stop(flags, on_stop):
 
 def run_headless(name, job, backend, task):
     turn = job["turn"]
-    argv = backends.build_argv(backend, job, task, job.get("backend_args"))
+    inject_args, inject_env = inject.runtime(name, backend, job)  # 角色管了 MCP / 技能时的下发参数
+    argv = backends.build_argv(backend, job, task, list(job.get("backend_args") or []) + inject_args)
     normalize = backends.NORMALIZERS[backend["format"]]
     flags = {"stopped": False, "timed_out": False}
     # PWD 必须跟着改：OpenCode 以环境变量 PWD 而不是进程的实际目录来认工作目录
-    proc = subprocess.Popen(argv, cwd=job["cwd"], env=dict(os.environ, PWD=job["cwd"], AGENT_DISPATCH_WORKER=name),
+    proc = subprocess.Popen(argv, cwd=job["cwd"],
+                            env=dict(os.environ, PWD=job["cwd"], AGENT_DISPATCH_WORKER=name, **inject_env),
                             stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
     store.update(name, child_pid=proc.pid)
@@ -294,8 +296,11 @@ def run_tmux(name, job, backend, task):
         time.sleep(0.5)
         tmux.press_enter(session)
     else:
-        tmux.new_session(session, job["cwd"], backends.build_interactive_argv(backend, job, task, job.get("backend_args")),
-                         {"AGENT_DISPATCH_WORKER": name})
+        inject_args, inject_env = inject.runtime(name, backend, job)  # 角色管了 MCP / 技能时的下发参数
+        argv = backends.build_interactive_argv(backend, job, task, list(job.get("backend_args") or []) + inject_args)
+        # tmux 的 opencode 模板自带 env OPENCODE_CONFIG_CONTENT，把下发配置并进那个值，不能各设各的
+        inject_env = inject.merge_tmux_opencode(argv, inject_env)
+        tmux.new_session(session, job["cwd"], argv, {"AGENT_DISPATCH_WORKER": name, **inject_env})
     sent_at = time.time()
     deadline = sent_at + job["timeout_min"] * 60 if job.get("timeout_min") else None
     retried = False

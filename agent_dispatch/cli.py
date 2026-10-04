@@ -14,7 +14,7 @@ import time
 import unicodedata
 import webbrowser
 
-from . import backends, definitions, gates, models, runner, store, tmux
+from . import backends, definitions, gates, inject, models, runner, store, tmux
 from .store import DispatchError, identify_dispatcher, touch_session, who_dispatches
 
 STATE_LABEL = {"running": "运行中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
@@ -158,8 +158,17 @@ def close_session(job):
 def how_to_attach(job):
     if tmux.alive(job.get("tmux")) or (job.get("tmux") and job.get("state") == "running"):
         return tmux.attach_command(job["tmux"])  # 刚派出时界面可能还在启动
-    attach = backends.attach_command(backends.get(job["backend"]), job)
-    return f"cd {job['cwd']} && {attach}" if attach else None
+    backend = backends.get(job["backend"])
+    attach = backends.attach_command(backend, job)
+    if not attach:
+        return None
+    # 下发用的环境变量与参数要一并带上，接手后的会话才和执行者看到同样的 MCP / 技能
+    prefix, suffix = inject.takeover_prefix(job["name"], backend, job)
+    parts = ["cd", job["cwd"], "&&"]
+    parts += ["env", *prefix] if prefix else []
+    parts.append(attach)
+    parts += suffix
+    return " ".join(parts)
 
 
 def decision_entry(job, action, note=None):
@@ -243,6 +252,8 @@ def cmd_start(a):
     task = read_task(a)
     if not task:
         raise DispatchError("任务为空（用位置参数、-f 文件或标准输入传入）")
+    inject_sel = inject.selection(profile)  # 角色管了 MCP / 技能时，派工命令要附带下发参数
+    inject_desc = inject.describe(inject_sel, backend["format"])
     for followed in a.follows or []:  # 关联：这张单是因为那张单才派的
         if not store.exists(followed):
             raise DispatchError(f"--follows 的作业不存在：{followed}")
@@ -266,9 +277,14 @@ def cmd_start(a):
                 "role_title": profile.get("title"), "backend": backend_name, "model": model,
                 "model_alias": model_alias, "mode": mode, "cwd": cwd,
                 "channels": channels, "channels_busy": busy,
+                "inject": inject_desc,
             }, ensure_ascii=False))
         else:
             print(brief)
+            if inject_desc["managed"]:
+                print("\n## 本次下发\n")
+                for line in inject.render(inject_desc):
+                    print(line)
         return 0
 
     now_ts = time.time()
@@ -289,6 +305,7 @@ def cmd_start(a):
         "turn": 1, "channels": channels, "task": task, "follows": a.follows or [],
         "timeout_min": a.timeout if a.timeout is not None else profile.get("timeout_min"),
         "backend_args": backend_args(profile, backend_name),
+        "inject": inject.summarize(inject_sel),
         "created": store.now(), "created_ts": now_ts, "turn_started": store.now(), "turn_started_ts": now_ts,
         "runner_pid": os.getpid(),  # 运行器接管前先用本进程占位，避免被判成意外中断
         "turns": [], "decisions": [],
@@ -513,6 +530,8 @@ def print_job_detail(job):
     if dispatcher:
         print(f"派工者    {dispatcher['kind']}  {dispatcher.get('title') or dispatcher.get('session_id') or ''}")
     print(f"方式      {job.get('mode', 'headless')}" + (f"   界面{'开着' if tmux.alive(job.get('tmux')) else '已关闭'}" if job.get("tmux") else ""))
+    if job.get("inject"):
+        print("下发      " + "\n          ".join(inject.render(inject.describe_job(job))))
     attach = how_to_attach(job)
     if attach and tmux.alive(job.get("tmux")):
         print(f"接入      agent-dispatch attach {job['name']}   （即 {attach}；可直接看和打字）")
@@ -635,11 +654,14 @@ def cmd_stop(a):
     if not stopped:
         if tmux.alive(job.get("tmux")) and job["state"] != "held":
             close_session(job)
+            inject.cleanup(a.job)
             store.info(f"作业 {a.job} 本轮已结束（{STATE_LABEL.get(job['state'], job['state'])}），已关闭它的界面并释放通道")
             return 0
+        inject.cleanup(a.job)  # 下发文件里含凭据，叫停就删；续派时会重新生成
         store.info(f"作业 {a.job} 不在运行（{STATE_LABEL.get(job['state'], job['state'])}）")
         return 0
     store.update(a.job, decisions=(job.get("decisions") or []) + [decision_entry(job, "stop", a.reason)])
+    inject.cleanup(a.job)  # 下发文件里含凭据，叫停就删；续派时会重新生成
     print(summary_line(job))
     return 0
 
@@ -724,6 +746,7 @@ def cmd_accept(a):
         decide(job, "accept" + ("(force)" if a.force else ""), a.note)
         store.save(job)
     close_session(job)
+    inject.cleanup(a.job)  # 下发文件里含凭据，作业结束就删
     store.info(f"{a.job} 已验收")
     return 0
 
@@ -737,6 +760,7 @@ def cmd_reject(a):
         decide(job, "reject", a.reason)
         store.save(job)
     close_session(job)
+    inject.cleanup(a.job)  # 下发文件里含凭据，作业结束就删
     store.info(f"{a.job} 已驳回")
     return 0
 
@@ -1062,6 +1086,10 @@ def cmd_roles(a):
         role = definitions._merged_role(project, definitions.find_role_id(project, a.name))
         public = {k: v for k, v in role.items() if not k.startswith("_")}
         print(json.dumps(public, ensure_ascii=False, indent=2))
+        if "mcp" in role or "skills" in role:
+            print()
+            for line in inject.role_notes():
+                print(line)
         print(f"\n派工单模板：{role['_brief_path'] or '（无，任务原文直接作为派工单）'}")
         if role["_brief_path"]:
             print("\n" + (store.read_text(role["_brief_path"]) or ""))

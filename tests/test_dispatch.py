@@ -13,7 +13,10 @@ FAKE = os.path.join(ROOT, "tests", "fake_agent.py")
 FAKE_TUI = os.path.join(ROOT, "tests", "fake_tui.py")
 
 
-class DispatchTest(unittest.TestCase):
+class DispatchBase(unittest.TestCase):
+    """公共的环境搭建与辅助方法，不含测试用例：各测试类继承它，
+    避免基类的用例被每个子类重复跑一遍。"""
+
     def setUp(self):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="ad-test-"))
         self.home = os.path.join(self.tmp, "home")
@@ -76,6 +79,41 @@ class DispatchTest(unittest.TestCase):
         directory = os.path.join(self.home, "jobs")
         return os.listdir(directory) if os.path.isdir(directory) else []
 
+    def make_project(self):
+        """项目 p1（显示名 产品线A）：两个工程 app / web；角色 dev（专属，负责 app）、qa（覆盖全局，负责两个）。"""
+        self.web_dir = os.path.join(self.tmp, "web-repo")
+        os.makedirs(self.web_dir)
+        os.makedirs(os.path.join(self.web_dir, "src"))
+        self.ok("projects", "add", "p1", "--name", "产品线A", "--repo", f"app={self.work}")
+        self.ok("projects", "add-repo", "p1", f"web={self.web_dir}", "--channels", "c1,c2")
+        self.ok("roles", "add", "dev", "-P", "p1", "--title", "后端开发工程师", "--repos", "app", "--backend", "fakepi")
+        os.makedirs(os.path.join(self.home, "roles"))
+        with open(os.path.join(self.home, "roles", "qa.json"), "w") as f:
+            json.dump({"title": "测试工程师", "backend": "fakepi", "channels": "all", "statuses": ["PASS", "FAIL"],
+                       "gates": [{"type": "status_reported"}, {"type": "run_dir", "when": "run_dir"}], "runs_root": "runs"}, f)
+        with open(os.path.join(self.home, "roles", "qa.brief.md"), "w") as f:
+            f.write("你是{{role}}，在 {{project}} / {{repo}} 干活，通道 {{channels}}\n{{task}}\n")
+        self.ok("roles", "add", "qa", "-P", "p1", "--repos", "app,web")
+
+
+    def make_pool(self, role, *pairs):
+        for alias, model_id in (("fa", "m-a"), ("fb", "m-b")):
+            if alias not in self.ok("models").stdout:
+                self.ok("models", "add", alias, "--backend", "fakepi", "--id", model_id)
+        self.ok("roles", "pool", role, "-P", "p1", *pairs)
+
+
+    def start_web(self):
+        """起一个临时网页服务，返回端口；tearDown 的 stop 会停掉它。"""
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        self.ok("web", "start", "--port", port)
+        return port
+
+
+class DispatchTest(DispatchBase):
     def test_start_wait_gate_accept(self):
         self.ok("start", "j1", "-p", "t", "--batch", "b1", "MKRUN r1\nSTATUS: PASS\nRUN_DIR: runs/r1")
         self.ok("wait", "j1", "--timeout", "20")
@@ -281,21 +319,6 @@ class DispatchTest(unittest.TestCase):
             self.ok("web", "stop")
         self.assertIn("没有在运行", self.ok("web", "status").stdout)
 
-    def make_project(self):
-        """项目 p1（显示名 产品线A）：两个工程 app / web；角色 dev（专属，负责 app）、qa（覆盖全局，负责两个工程）。"""
-        self.web_dir = os.path.join(self.tmp, "web-repo")
-        os.makedirs(os.path.join(self.web_dir, "src"))
-        self.ok("projects", "add", "p1", "--name", "产品线A", "--repo", f"app={self.work}")
-        self.ok("projects", "add-repo", "p1", f"web={self.web_dir}", "--channels", "c1,c2")
-        self.ok("roles", "add", "dev", "-P", "p1", "--title", "后端开发工程师", "--repos", "app", "--backend", "fakepi")
-        os.makedirs(os.path.join(self.home, "roles"))
-        with open(os.path.join(self.home, "roles", "qa.json"), "w") as f:
-            json.dump({"title": "测试工程师", "backend": "fakepi", "channels": "all", "statuses": ["PASS", "FAIL"],
-                       "gates": [{"type": "status_reported"}, {"type": "run_dir", "when": "run_dir"}], "runs_root": "runs"}, f)
-        with open(os.path.join(self.home, "roles", "qa.brief.md"), "w") as f:
-            f.write("你是{{role}}，在 {{project}} / {{repo}} 干活，通道 {{channels}}\n{{task}}\n")
-        self.ok("roles", "add", "qa", "-P", "p1", "--repos", "app,web")
-
     def test_project_role_dispatch(self):
         self.make_project()
         listing = self.ok("roles", "-P", "p1").stdout
@@ -341,12 +364,6 @@ class DispatchTest(unittest.TestCase):
         self.ok("wait", "g1", "--timeout", "20")
         job = self.job("g1")
         self.assertEqual((job["role"], job["project"], job["project_id"]), ("qa", "elsewhere", None))
-
-    def make_pool(self, role, *pairs):
-        for alias, model_id in (("fa", "m-a"), ("fb", "m-b")):
-            if alias not in self.ok("models").stdout:
-                self.ok("models", "add", alias, "--backend", "fakepi", "--id", model_id)
-        self.ok("roles", "pool", role, "-P", "p1", *pairs)
 
     def test_model_pool_strict_ratio(self):
         self.make_project()
@@ -611,15 +628,6 @@ class DispatchTest(unittest.TestCase):
         finally:
             self.ok("stop", "r4")
 
-    def start_web(self):
-        """起一个临时网页服务，返回 (port, 关闭函数)。"""
-        import socket
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = str(sock.getsockname()[1])
-        self.ok("web", "start", "--port", port)
-        return port
-
     def test_web_serves_ui_dist(self):
         """有 ui_dist 时托管前端页面：前端路由回退到 index.html，静态文件给对 Content-Type，穿越被拒。"""
         import socket, urllib.error, urllib.request
@@ -726,7 +734,7 @@ class DispatchTest(unittest.TestCase):
             self.ok("web", "stop")
 
 
-class ConfigApiTest(DispatchTest):
+class ConfigApiTest(DispatchBase):
     """配置中心的纯函数与网页接口：字段来源、恢复继承、项目与主管规则的读写。"""
 
     SHIPPED = os.path.join(ROOT, "roles")
@@ -1054,7 +1062,7 @@ class ConfigApiTest(DispatchTest):
             self.ok("web", "stop")
 
 
-class BatchTopicTest(DispatchTest):
+class BatchTopicTest(DispatchBase):
     """事项：批次的标题/原因登记、follows 关联、batches/batch 命令与网页接口。"""
 
     SUP = {"AGENT_DISPATCH_SESSION": "s-batch", "AGENT_DISPATCH_SESSION_KIND": "pi"}
@@ -1198,7 +1206,7 @@ class BatchTopicTest(DispatchTest):
             self.ok("web", "stop")
 
 
-class DispatcherSessionTest(DispatchTest):
+class DispatcherSessionTest(DispatchBase):
     """派工者登记：识别、会话文件、sessions 查询、网页接口。"""
 
     def test_identify_dispatcher_four_cases(self):
@@ -1373,7 +1381,7 @@ class RunCliStdoutTest(unittest.TestCase):
         self.assertIn("无关输出", text)  # 提示文字仍然能看到
 
 
-class McpSkillRegistryTest(DispatchTest):
+class McpSkillRegistryTest(DispatchBase):
     """MCP 与技能的登记（登记 ID 唯一、name 下发）、导入合并、遮罩和按角色配置。
     导入来源全在临时目录，不读真实的 ~/.pi 等配置。"""
 
@@ -1437,19 +1445,6 @@ class McpSkillRegistryTest(DispatchTest):
             return
         self._project_made = True
         super().make_project()
-
-    # 对时间敏感的 tmux 用例在 DispatchTest 里已跑过；子类重复跑只会加重机器负载、诱发时长糖乱
-    @unittest.skip("基类已覆盖，不重复跑时间敏感的 tmux 用例")
-    def test_tmux_mode_keeps_session_alive_between_turns(self):
-        pass
-
-    @unittest.skip("基类已覆盖，不重复跑时间敏感的 tmux 用例")
-    def test_tmux_mode_take_while_running_and_stop(self):
-        pass
-
-    @unittest.skip("基类已覆盖，不重复跑时间敏感的 tmux 用例")
-    def test_follow_reattaches_to_running_session(self):
-        pass
 
     def _snapshot_sources(self):
         paths = [self.fakehome, os.path.join(self.work, ".pi"), os.path.join(self.work, ".agents"),
@@ -1758,6 +1753,151 @@ def registry_load(test, kind):
     path = os.path.join(test.home, f"{kind}.json")
     with open(path) as f:
         return json.load(f)
+
+
+
+class InjectTest(DispatchBase):
+    """按作业下发 MCP / 技能：字段不存在 = 命令与原先一样；存在 = 只带选中的
+    （pi 换作业私有 agent 目录，OpenCode 走 OPENCODE_CONFIG_CONTENT）。全用假后端，不碰真实的 ~/.pi、~/.config/opencode。"""
+
+    def setUp(self):
+        super().setUp()
+        # 假的 pi agent 源目录与 OpenCode 全局配置（下发时只读它们，绝不读真实配置）
+        self.pi_agent = os.path.join(self.tmp, "piagent-src")
+        os.makedirs(os.path.join(self.pi_agent, "sessions"))
+        for name in ("auth.json", "models.json", "models-store.json"):
+            with open(os.path.join(self.pi_agent, name), "w") as f:
+                f.write("{}")
+        with open(os.path.join(self.pi_agent, "settings.json"), "w") as f:  # 不应被链接进作业的 agent 目录
+            f.write('{"packages": ["git:example/pkg"]}')
+        self.oc_global = os.path.join(self.tmp, "ocglobal.json")
+        with open(self.oc_global, "w") as f:
+            json.dump({"mcp": {"gsvc": {"type": "local", "command": ["g-run", "--x=1"]}}}, f)
+        with open(os.path.join(self.work, "opencode.json"), "w") as f:  # 工程级配置也是只读来源
+            json.dump({"mcp": {"psvc": {"type": "local", "command": ["p-run"]}}}, f)
+        self.inject_env = {"AGENT_DISPATCH_PI_AGENT_DIR": self.pi_agent, "AGENT_DISPATCH_OPENCODE_GLOBAL": self.oc_global}
+        # 登记两个 MCP 服务（local 带凭据 env、remote 带凭据 headers）和一个技能
+        self.ok("mcp", "add", "svc1", "--command", "run-a", "--env", "TOKEN=tok1", env_extra=self.inject_env)
+        self.ok("mcp", "add", "svc2", "--url", "https://example.internal/sse", "--headers", "Authorization=Bearer zz",
+                env_extra=self.inject_env)
+        self.skill_dir = os.path.join(self.tmp, "skill-one")
+        os.makedirs(self.skill_dir)
+        with open(os.path.join(self.skill_dir, "SKILL.md"), "w") as f:
+            f.write("---\ndescription: 注入测试技能\n---\n")
+        self.ok("skills", "add", "skill1", self.skill_dir, env_extra=self.inject_env)
+        # 命令行里带 {extra} 的后端，才能看到下发的参数
+        with open(self.backends) as f:
+            backends = json.load(f)
+        backends["fakepi2"] = {"format": "pi", "session": "named", "default_model": "m",
+                               "argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}", "{extra}"],
+                               "resume_argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}", "{extra}"],
+                               "attach": "fakepi2 --session-id {session}"}
+        backends["fakeoc2"] = {"format": "opencode", "session": "assigned", "default_model": "m",
+                               "argv": [sys.executable, FAKE, "opencode", "", "{task}", "{extra}"]}
+        with open(self.backends, "w") as f:
+            json.dump(backends, f)
+        os.makedirs(os.path.join(self.home, "roles"))
+        for role_id, fields in (("r1", {"backend": "fakepi2", "mcp": ["svc1"], "skills": ["skill1"]}),
+                                ("r2", {"backend": "fakeoc2", "mcp": ["svc1", "svc2"], "skills": ["skill1"]}),
+                                ("r0", {"backend": "fakepi2"})):
+            with open(os.path.join(self.home, "roles", f"{role_id}.json"), "w") as f:
+                json.dump({"title": f"角色{role_id}", **fields}, f)
+
+    def test_pi_managed_strict_injection(self):
+        self.ok("start", "ij1", "--role", "r1", "--cwd", self.work, "INJECTDUMP\nSTATUS: PASS", env_extra=self.inject_env)
+        self.ok("wait", "ij1", "--timeout", "20")
+        report = self.job("ij1")["report"]
+        agent = os.path.join(self.home, "jobs", "ij1", "inject", "pi-agent")
+        self.assertEqual(report["PI_DIR"], agent)
+        argv = json.loads(report["ARGV"])
+        for flag in ("--no-skills", "--no-approve"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--skill") + 1], self.skill_dir)
+        # 临时 agent 目录：mcp.json 只含选中的服务（600 权限），其余文件符号链接回源目录
+        with open(os.path.join(agent, "mcp.json")) as f:
+            servers = json.load(f)["mcpServers"]
+        self.assertEqual(list(servers), ["svc1"])
+        self.assertEqual(servers["svc1"]["env"]["TOKEN"], "tok1")
+        self.assertEqual(os.stat(os.path.join(agent, "mcp.json")).st_mode & 0o777, 0o600)
+        self.assertTrue(os.path.islink(os.path.join(agent, "models.json")))
+        self.assertEqual(os.path.realpath(os.path.join(agent, "models.json")), os.path.join(self.pi_agent, "models.json"))
+        self.assertFalse(os.path.exists(os.path.join(agent, "settings.json")))  # 扩展包配置不带进来
+        self.assertEqual(self.job("ij1")["inject"],
+                         {"mcp": [{"id": "svc1", "name": "svc1"}],
+                          "skills": [{"id": "skill1", "name": "skill-one", "path": self.skill_dir}]})
+        self.assertIn("svc1", self.ok("status", "ij1", env_extra=self.inject_env).stdout)
+
+    def test_unmanaged_command_unchanged(self):
+        self.ok("start", "ij0", "--role", "r0", "--cwd", self.work, "INJECTDUMP\nSTATUS: PASS", env_extra=self.inject_env)
+        self.ok("wait", "ij0", "--timeout", "20")
+        report = self.job("ij0")["report"]
+        self.assertEqual(report["PI_DIR"], "-")
+        self.assertNotIn("--no-skills", report["ARGV"])
+        self.assertIsNone(self.job("ij0")["inject"])
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "ij0", "inject")))
+        status = self.ok("status", "ij0", env_extra=self.inject_env).stdout
+        self.assertNotIn("下发      ", status)
+
+    def test_opencode_managed_env_config(self):
+        self.ok("start", "ij2", "--role", "r2", "--cwd", self.work, "INJECTDUMP\nSTATUS: PASS", env_extra=self.inject_env)
+        self.ok("wait", "ij2", "--timeout", "20")
+        report = self.job("ij2")["report"]
+        config = json.loads(report["OC_CFG"])
+        self.assertIn("--standalone", report["ARGV"])
+        self.assertEqual(config["skills"]["paths"], [self.skill_dir])
+        mcp = config["mcp"]
+        self.assertEqual(mcp["svc1"]["command"], ["run-a"])
+        self.assertTrue(mcp["svc1"]["enabled"])
+        self.assertEqual(mcp["svc2"]["url"], "https://example.internal/sse")
+        # 工程与全局配置里有、没选中的服务：同名完整定义 + enabled:false
+        self.assertEqual((mcp["psvc"]["command"], mcp["psvc"]["enabled"]), (["p-run"], False))
+        self.assertEqual((mcp["gsvc"]["command"], mcp["gsvc"]["enabled"]), (["g-run", "--x=1"], False))
+        path = os.path.join(self.home, "jobs", "ij2", "inject", "opencode-config.json")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        status = self.ok("status", "ij2", env_extra=self.inject_env).stdout
+        self.assertIn("无法排除执行者自己的全局技能", status)
+
+    def test_takeover_command_and_cleanup(self):
+        self.ok("start", "ij3", "--role", "r1", "--cwd", self.work, "STATUS: PASS", env_extra=self.inject_env)
+        self.ok("wait", "ij3", "--timeout", "20")
+        status = self.ok("status", "ij3", env_extra=self.inject_env).stdout
+        agent = os.path.join(self.home, "jobs", "ij3", "inject", "pi-agent")
+        self.assertIn(f"接手      agent-dispatch take ij3 之后：cd ", status)
+        self.assertIn(f"env PI_CODING_AGENT_DIR={agent} fakepi2 --session-id", status)
+        self.assertIn(f"--skill {self.skill_dir} --no-approve", status)
+        self.ok("accept", "ij3")
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "ij3", "inject")))  # 凭据文件已清理
+        self.ok("start", "ij4", "--role", "r2", "--cwd", self.work, "STATUS: PASS", env_extra=self.inject_env)
+        self.ok("wait", "ij4", "--timeout", "20")
+        self.ok("stop", "ij4")
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "ij4", "inject")))
+
+    def test_dry_run_shows_injection(self):
+        result = self.ok("start", "ij5", "--role", "r1", "--cwd", self.work, "任务", "--dry-run", "--json",
+                         env_extra=self.inject_env)
+        preview = json.loads(result.stdout)
+        self.assertTrue(preview["inject"]["managed"])
+        self.assertEqual(preview["inject"]["mcp"]["services"], [{"id": "svc1", "name": "svc1"}])
+        self.assertIn("严格模式", preview["inject"]["mcp"]["note"])
+        plain = self.ok("start", "ij5", "--role", "r0", "--cwd", self.work, "任务", "--dry-run", env_extra=self.inject_env).stdout
+        self.assertNotIn("本次下发", plain)
+        managed = self.ok("start", "ij5", "--role", "r1", "--cwd", self.work, "任务", "--dry-run",
+                          env_extra=self.inject_env).stdout
+        self.assertIn("本次下发", managed)
+        self.assertIn("svc1", managed)
+        unmanaged = json.loads(self.ok("start", "ij5", "--role", "r0", "--cwd", self.work, "任务",
+                                       "--dry-run", "--json", env_extra=self.inject_env).stdout)["inject"]
+        self.assertFalse(unmanaged["managed"])
+        self.assertIn("未管理", unmanaged["note"])
+
+    def test_merge_tmux_opencode_config(self):
+        sys.path.insert(0, ROOT)
+        from agent_dispatch import inject
+        argv = ["env", 'OPENCODE_CONFIG_CONTENT={"model": "m"}', "opencode", "--session", "s"]
+        env = inject.merge_tmux_opencode(argv, {"OPENCODE_CONFIG_CONTENT": '{"mcp": {"a": {"enabled": true}}}'})
+        self.assertEqual(env, {})
+        self.assertEqual(json.loads(argv[1].split("=", 1)[1]), {"model": "m", "mcp": {"a": {"enabled": True}}})
+        self.assertEqual(inject.merge_tmux_opencode(argv, {}), {})
 
 
 if __name__ == "__main__":

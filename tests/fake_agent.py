@@ -68,6 +68,10 @@ if model and f"FAILAFTERTOOL {model}" in task:  # 干了一半才被服务商拒
 if "PWDCHECK" in task:  # 有的智能体按环境变量 PWD 认工作目录
     same = os.path.realpath(os.environ.get("PWD", "")) == os.path.realpath(os.getcwd())
     reply += f"\nPWD_OK: {'yes' if same else 'no'}"
+if "INJECTDUMP" in task:  # 按作业下发 MCP / 技能的测试：报告拿到的环境变量与命令行
+    reply += f"\nPI_DIR: {os.environ.get('PI_CODING_AGENT_DIR', '-')}"
+    reply += f"\nOC_CFG: {os.environ.get('OPENCODE_CONFIG_CONTENT', '-')}"
+    reply += f"\nARGV: {json.dumps(sys.argv[1:])}"
 if "NESTED" in task:  # 执行者试图再派工
     import subprocess
     nested = subprocess.run([sys.executable, "-m", "agent_dispatch", "start", "nested", "--cwd", os.getcwd(), "-b", "fakepi", "x"],
