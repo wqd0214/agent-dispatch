@@ -9,7 +9,8 @@ import type { CandidateGroup, ConfigOverview, McpEntry, RoleDetail, SkillEntry }
 import { useCurrentProject } from '../composables/useProject'
 import {
   DISPATCH_PENDING_NOTE, STATUS_LABEL, discoveredCandidateIds, duplicateNameError, filterCandidateGroups,
-  mergeRegistryRows, mcpEntrySummary, selectableCandidateIds, toggleRegistryId,
+  mergeRegistryRows, mcpEntrySummary, relativePathLabel, selectableCandidateIds, shortSourceLabel, toggleRegistryId,
+  variantDiffNote,
 } from '../lib/registry'
 import type { RegistryRow } from '../lib/registry'
 import { projectRoleRows, type RoleListRow } from '../lib/roles'
@@ -69,20 +70,31 @@ function ownerLabel(row: RegistryRow): string {
   if (inProject.value) return row.owner === projectId.value ? '本项目' : '全局'
   return '全局'
 }
+// 归属列的短写：本项目 / 全局 + 工程与文件名（不截断关键信息）
+function ownerDetail(row: RegistryRow): string {
+  return row.sources.length ? shortSourceLabel(row.sources[0]) : ''
+}
+const repoDirs = computed(() =>
+  (config.value?.projects.find(p => p.id === projectId.value)?.repos ?? []).map(r => ({ id: r.id, cwd: r.cwd })))
 function rowSummary(row: RegistryRow): string {
   if (!isMcp.value) return row.path ?? ''
   return mcpEntrySummary(row.entry)
+}
+// 技能目录列：项目视图下相对工程目录的短写法，完整路径放悬停
+function skillPathLabel(row: RegistryRow): string {
+  if (!row.path) return ''
+  return inProject.value && row.owner === projectId.value ? relativePathLabel(row.path, repoDirs.value) : row.path
 }
 function statusTone(status: RegistryRow['status']): 'success' | 'info' | 'warning' {
   return status === 'enabled' ? 'success' : status === 'discovered' ? 'warning' : 'info'
 }
 const statusLine = computed(() => {
   if (!inProject.value) return null
-  if (!managed.value) return `本项目未管理${kindLabel.value}：执行者照旧用工程里自己的配置`
+  if (!managed.value) return `本项目未管理 ${kindLabel.value}：执行者照旧用工程里自己的配置`
   const n = enabled.value.length
   const overridden = pageRoles.value.filter(r => r.override)
   const extra = overridden.length ? `；${overridden.map(r => r.title).join('、')}另有单独配置` : ''
-  return `本项目派工时带 ${n} 个${kindLabel.value}${extra}`
+  return `本项目派工时带 ${n} 个 ${kindLabel.value}${extra}`
 })
 
 async function reloadRoleDetails() {
@@ -334,33 +346,36 @@ async function doImport() {
         <el-tooltip content="打开 = 本项目派工时只带勾选的下发；关闭 = 恢复未管理" placement="top">
           <el-switch :model-value="managed" :loading="saving" @change="(v: string | number | boolean) => toggleManaged(!!v)" />
         </el-tooltip>
-        <span class="sub">由 agent-dispatch 管理本项目的{{ kindLabel }}</span>
+        <span class="sub">由 agent-dispatch 管理本项目的 {{ kindLabel }}</span>
       </div>
       <el-alert v-else type="info" :closable="false" show-icon class="note"
-        :title="`全部项目视图：只看全局登记${kind === 'mcp' ? '的 MCP' : '的技能'}与全局角色层。项目里的${kindLabel}请先在左上角选择项目`" />
+        :title="`全部项目视图：只看全局登记${kind === 'mcp' ? '的 MCP' : '的技能'}与全局角色层。项目里的 ${kindLabel} 请先在左上角选择项目`" />
 
       <!-- 2. 主表：已登记的（本项目 + 全局）与发现未纳入的 -->
       <div class="tbl-head">
-        <h2>{{ inProject ? '本项目的' : '全局' }}{{ kindLabel }}</h2>
+        <h2>{{ inProject ? '本项目的' : '全局' }} {{ kindLabel }}</h2>
         <div>
           <el-button size="small" @click="openImport">从现有配置导入</el-button>
-          <el-button size="small" type="primary" @click="openCreate">登记{{ kindLabel }}</el-button>
+          <el-button size="small" type="primary" @click="openCreate">登记 {{ kindLabel }}</el-button>
         </div>
       </div>
       <el-table :data="rows" size="small" class="tbl">
-        <el-table-column label="名称" min-width="180">
+        <el-table-column label="名称" min-width="170">
           <template #default="{ row }">
             <div class="mono">{{ row.name }}</div>
             <div class="sub mono">{{ row.id }}</div>
-            <div v-if="row.diff" class="sub mono diff">{{ row.diff }}</div>
           </template>
         </el-table-column>
         <el-table-column :label="isMcp ? '命令 / 地址（遮罩）' : '目录'" min-width="220">
-          <template #default="{ row }"><span class="mono">{{ rowSummary(row) }}</span></template>
-        </el-table-column>
-        <el-table-column label="归属" min-width="140" show-overflow-tooltip>
           <template #default="{ row }">
-            {{ ownerLabel(row) }}<span v-if="row.sources.length" class="sub"> · {{ row.sources[0] }}</span>
+            <div v-if="isMcp" class="mono clamp" :title="rowSummary(row)">{{ rowSummary(row) }}</div>
+            <div v-else class="mono clamp" :title="row.path">{{ skillPathLabel(row) }}</div>
+            <div v-if="row.diff" class="sub mono oneline" :title="row.diff">{{ row.diff }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="归属" min-width="170" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ ownerLabel(row) }}<span v-if="ownerDetail(row)" class="sub"> · {{ ownerDetail(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="120">
@@ -388,7 +403,7 @@ async function doImport() {
         </el-table-column>
       </el-table>
       <div v-if="!rows.length" class="sub empty">
-        还没有内容：本项目工程和全局来源里都没有发现{{ kindLabel }}，可以先登记一个
+        还没有内容：本项目工程和全局来源里都没有发现 {{ kindLabel }}，可以先登记一个
       </div>
 
       <!-- 3. 按角色调整（可选，默认折叠） -->
@@ -440,7 +455,7 @@ async function doImport() {
 
     <div class="footnote sub">{{ DISPATCH_PENDING_NOTE }}</div>
 
-    <el-dialog v-model="editOpen" :title="editing ? `修改${kindLabel}登记` : `登记${kindLabel}`" width="560px">
+    <el-dialog v-model="editOpen" :title="editing ? `修改 ${kindLabel} 登记` : `登记 ${kindLabel}`" width="560px">
       <el-form label-width="110px">
         <el-form-item label="登记 ID" required>
           <el-input v-if="isMcp" v-model="mcpForm.id" :disabled="editing" class="mono" placeholder="如 playwright@a04-test" />
@@ -488,7 +503,7 @@ async function doImport() {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="importOpen" :title="`从现有配置导入${kindLabel}`" width="720px">
+    <el-dialog v-model="importOpen" :title="`从现有配置导入 ${kindLabel}`" width="720px">
       <div class="sub" style="margin-bottom: 8px">只读取、不修改这些配置文件；同名有多个变体的按登记 ID 和来源区分</div>
       <el-alert v-if="importError" type="error" :closable="false" show-icon :title="importError" style="margin-bottom: 8px" />
       <div class="toolbar">
@@ -510,10 +525,7 @@ async function doImport() {
             <span v-if="!isMcp" class="sub mono">{{ v.path }}</span>
             <span v-if="v.description" class="sub desc">{{ v.description }}</span>
             <template v-if="g.conflict">
-              <span class="sub mono diff">
-                {{ isMcp ? mcpEntrySummary(v.entry) : '' }}
-                {{ Object.entries(v.diff ?? {}).map(([k, x]) => `${k}=${JSON.stringify(x)}`).join(' ') }}
-              </span>
+              <span class="sub mono diff">{{ variantDiffNote(v.diff) }}</span>
             </template>
           </div>
         </div>
@@ -553,6 +565,8 @@ async function doImport() {
 .cand-var.regd { opacity: .55; }
 .cand-var .desc { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cand-var .diff, .diff { max-width: 100%; }
+.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; word-break: break-all; }
+.oneline { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .footnote { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--el-border-color); }
 .mono { font-family: var(--el-font-family-mono, monospace); font-size: 12px; }
 .sub { color: var(--el-text-color-secondary); font-size: 12px; }

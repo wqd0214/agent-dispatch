@@ -42,6 +42,32 @@ export const STATUS_LABEL: Record<RegistryRow['status'], string> = {
   enabled: '已启用', included: '已纳入未启用', unmanaged: '未管理', discovered: '发现未纳入',
 }
 
+/** 候选来源标签的短写法：「项目 p1/app 的 .pi/mcp.json」→「app 工程 · .pi/mcp.json」 */
+export function shortSourceLabel(source: string): string {
+  const m = /^项目 [^/]+\/(\S+) 的 (\S+)$/.exec(source)
+  if (m) return `${m[1]} 工程 · ${m[2]}`
+  return source
+}
+
+/** 同名变体之间的一行差异说明：只列不同的参数（标量给值，其余只给参数名），
+ *  不展示 source 这类来源字段和 args=[…] 原始数组 */
+export function variantDiffNote(diff?: Record<string, unknown>): string {
+  if (!diff) return ''
+  const parts = Object.entries(diff).filter(([k]) => k !== 'source')
+    .map(([k, v]) => (typeof v === 'string' ? `${k}=${v}` : k))
+  return parts.length ? `与其它变体不同：${parts.join('、')}` : ''
+}
+
+/** 技能目录相对工程的短写法：命中工程目录前缀时给「工程 · 相对路径」，否则原样 */
+export function relativePathLabel(path: string, repoDirs: { id: string; cwd: string }[]): string {
+  for (const repo of repoDirs) {
+    if (path === repo.cwd || path.startsWith(repo.cwd + '/')) {
+      return `${repo.id} 工程 · ${path.slice(repo.cwd.length + 1)}`
+    }
+  }
+  return path
+}
+
 /** 把登记条目与候选变体合并成主表行：scope 是当前项目 ID（'' = 全局视图）。
  * 已登记条目的状态看本项目是否管理、是否在启用清单里；候选只显示归属同一范围的未登记变体。 */
 export function mergeRegistryRows(
@@ -62,9 +88,7 @@ export function mergeRegistryRows(
         key: `cand:${v.id}`, id: v.id, name: v.name, kind: 'candidate', status: 'discovered',
         owner: v.project ?? '', entry: v.entry, path: v.path, description: v.description ?? '',
         sources: v.sources ?? [], variant: v,
-        diff: g.conflict
-          ? [mcpEntrySummary(v.entry), ...Object.entries(v.diff ?? {}).map(([k, x]) => `${k}=${JSON.stringify(x)}`)].filter(Boolean).join(' ')
-          : '',
+        diff: variantDiffNote(v.diff),
       })
     }
   }

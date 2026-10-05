@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   DISPATCH_PENDING_NOTE, discoveredCandidateIds, duplicateNameError, filterCandidateGroups,
-  mergeRegistryRows, mcpEntrySummary, selectableCandidateIds, toggleRegistryId, usedByLabel,
+  mergeRegistryRows, mcpEntrySummary, relativePathLabel, selectableCandidateIds, shortSourceLabel,
+  toggleRegistryId, usedByLabel, variantDiffNote,
 } from '../src/lib/registry'
 
 const groups = [
@@ -107,4 +108,30 @@ describe('mergeRegistryRows', () => {
     expect(discoveredCandidateIds(candidates, 'p1')).toEqual(['found', 'dual@a'])
     expect(discoveredCandidateIds(candidates, '')).toEqual(['gfound'])
   })
+})
+
+describe('shortSourceLabel / variantDiffNote / relativePathLabel', () => {
+  it('来源标签改成「工程 · 文件」短写，全局来源原样', () => {
+    expect(shortSourceLabel('项目 p1/test 的 .pi/mcp.json')).toBe('test 工程 · .pi/mcp.json')
+    expect(shortSourceLabel('项目 a04/web 的 opencode.json')).toBe('web 工程 · opencode.json')
+    expect(shortSourceLabel('pi 全局 ~/.pi/agent/mcp.json')).toBe('pi 全局 ~/.pi/agent/mcp.json')
+    expect(shortSourceLabel('~/.claude/skills')).toBe('~/.claude/skills')
+  })
+  it('变体差异只列参数（标量给值），不带 args=[…] / source= 原始字段', () => {
+    expect(variantDiffNote({ url: 'https://x', args: ['a', 'b'] })).toBe('与其它变体不同：url=https://x、args')
+    expect(variantDiffNote()).toBe('')
+    expect(variantDiffNote({})).toBe('')
+    expect(variantDiffNote({ args: ['a'] })).not.toContain('[')
+  })
+  it('技能目录相对工程目录显示，命中前缀才缩写', () => {
+    const repos = [{ id: 'test', cwd: '/x/wms' }, { id: 'web', cwd: '/x/web' }]
+    expect(relativePathLabel('/x/wms/.claude/skills/at-run', repos)).toBe('test 工程 · .claude/skills/at-run')
+    expect(relativePathLabel('/x/web/.pi/skills/dt', repos)).toBe('web 工程 · .pi/skills/dt')
+    expect(relativePathLabel('/other/skills/dt', repos)).toBe('/other/skills/dt')
+  })
+})
+
+it('变体差异不出现 source= 与数组原文', () => {
+  expect(variantDiffNote({ args: ['a'], source: '项目 p1/test 的 .pi/mcp.json' })).toBe('与其它变体不同：args')
+  expect(variantDiffNote({ source: 'x' })).toBe('')
 })
