@@ -9,6 +9,7 @@ export interface CandidateVariant {
   registered: boolean
   source: string
   sources?: string[]
+  project?: string
   path?: string
   description?: string
   diff?: Record<string, unknown>
@@ -19,6 +20,60 @@ export interface CandidateGroup {
   name: string
   conflict: boolean
   variants: CandidateVariant[]
+}
+
+/** 按项目视图合并后的主表行：已登记的（本项目 + 全局）与发现未纳入的候选在一棵表里 */
+export interface RegistryRow {
+  key: string
+  id: string
+  name: string
+  kind: 'entry' | 'candidate'
+  status: 'enabled' | 'included' | 'unmanaged' | 'discovered'
+  owner: string // '' = 全局，否则项目 ID
+  entry?: Record<string, unknown>
+  path?: string
+  description?: string
+  sources: string[]
+  diff?: string
+  variant?: CandidateVariant
+}
+
+export const STATUS_LABEL: Record<RegistryRow['status'], string> = {
+  enabled: '已启用', included: '已纳入未启用', unmanaged: '未管理', discovered: '发现未纳入',
+}
+
+/** 把登记条目与候选变体合并成主表行：scope 是当前项目 ID（'' = 全局视图）。
+ * 已登记条目的状态看本项目是否管理、是否在启用清单里；候选只显示归属同一范围的未登记变体。 */
+export function mergeRegistryRows(
+  entries: { id: string; name: string; project?: string; sources?: string[]; description?: string; path?: string; [k: string]: unknown }[],
+  candidates: CandidateGroup[],
+  opts: { managed: boolean; enabled: string[]; scope: string },
+): RegistryRow[] {
+  const rows: RegistryRow[] = entries.map(e => ({
+    key: e.id, id: e.id, name: e.name, kind: 'entry',
+    status: !opts.managed ? 'unmanaged' : (opts.enabled.includes(e.id) ? 'enabled' : 'included'),
+    owner: e.project ?? '', entry: e as Record<string, unknown>, path: e.path,
+    description: e.description ?? '', sources: e.sources ?? [],
+  }))
+  for (const g of candidates) {
+    for (const v of g.variants) {
+      if (v.registered || (v.project ?? '') !== opts.scope) continue
+      rows.push({
+        key: `cand:${v.id}`, id: v.id, name: v.name, kind: 'candidate', status: 'discovered',
+        owner: v.project ?? '', entry: v.entry, path: v.path, description: v.description ?? '',
+        sources: v.sources ?? [], variant: v,
+        diff: g.conflict
+          ? [mcpEntrySummary(v.entry), ...Object.entries(v.diff ?? {}).map(([k, x]) => `${k}=${JSON.stringify(x)}`)].filter(Boolean).join(' ')
+          : '',
+      })
+    }
+  }
+  return rows
+}
+
+/** 「全部纳入」要导入的候选登记 ID（当前范围内未登记的变体） */
+export function discoveredCandidateIds(candidates: CandidateGroup[], scope: string): string[] {
+  return candidates.flatMap(g => g.variants.filter(v => !v.registered && (v.project ?? '') === scope).map(v => v.id))
 }
 
 /** 按搜索词过滤候选分组（匹配名称 / 登记 ID / 来源 / 说明），过滤后没有变体的组不显示 */

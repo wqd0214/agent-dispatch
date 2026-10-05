@@ -1,0 +1,1 @@
+import{R as e}from"./RegistryManager-ejNse7tE.js";import{d as o,g as r,o as a}from"./index-B-21AfrQ.js";const m=o({__name:"McpView",setup(t){return(n,c)=>(a(),r(e,{kind:"mcp"}))}});export{m as default};

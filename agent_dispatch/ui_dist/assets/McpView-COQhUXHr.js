@@ -1,1 +1,0 @@
-import{R as e}from"./RegistryManager-DJ4UG-rC.js";import{d as o,g as r,o as a}from"./index-Dosv0aLL.js";const m=o({__name:"McpView",setup(t){return(n,c)=>(a(),r(e,{kind:"mcp"}))}});export{m as default};

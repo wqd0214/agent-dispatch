@@ -229,6 +229,7 @@ export interface RegistryUser { project: string; role: string }
 export interface McpEntry {
   id: string
   name: string
+  project?: string
   type?: 'local' | 'remote'
   command?: string
   args?: string[]
@@ -243,6 +244,7 @@ export interface McpEntry {
 export interface SkillEntry {
   id: string
   name: string
+  project?: string
   path: string
   paths?: string[]
   description?: string
@@ -256,6 +258,7 @@ export interface CandidateVariant {
   registered: boolean
   source: string
   sources?: string[]
+  project?: string
   path?: string
   description?: string
   diff?: Record<string, unknown>
@@ -263,3 +266,13 @@ export interface CandidateVariant {
 }
 
 export interface CandidateGroup { name: string; conflict: boolean; variants: CandidateVariant[] }
+
+/** MCP / 技能页的项目视图信息：本项目是否管理、启用清单、各角色是否单独覆盖 */
+export interface RegistryPage<T> {
+  managed: boolean
+  enabled: string[]
+  roles: { id: string; title: string; managed: boolean; value: string[] | null; override: boolean; source: string | null }[]
+}
+
+export interface McpPage extends RegistryPage<McpEntry> { mcp: McpEntry[] }
+export interface SkillPage extends RegistryPage<SkillEntry> { skills: SkillEntry[] }

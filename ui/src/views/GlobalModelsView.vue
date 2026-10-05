@@ -19,6 +19,10 @@ const defaultLimit = ref<number>(5)
 const importDlg = reactive({ open: false, backend: '', loading: false, query: '', checked: [] as string[], candidates: [] as ModelCandidate[], error: '' })
 
 function msg(e: unknown): string { return e instanceof Error ? e.message : String(e) }
+// 「用在哪些角色」的标签文字：项目 · 角色 ×比例
+function usedByLabel(u: ModelPage['models'][number]['used_by'][number]): string {
+  return u.project ? `${u.project_name || u.project} · ${u.role_title} ×${u.weight}` : `${u.role_title} ×${u.weight}`
+}
 async function reload() {
   loading.value = true
   try {
@@ -191,13 +195,17 @@ function gotoRole(project: string, role: string) {
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="用在哪些角色" min-width="150">
+      <el-table-column label="用在哪些角色" min-width="220">
         <template #default="{ row }">
           <template v-if="row.used_by.length">
-            <el-button v-for="u in row.used_by" :key="u.project + u.role" link size="small"
+            <el-button v-for="u in row.used_by.slice(0, 3)" :key="u.project + u.role" link size="small"
               @click="gotoRole(u.project, u.role)">
-              {{ u.project ? `${u.project_name || u.project} · ${u.role_title} ×${u.weight}` : `${u.role_title} ×${u.weight}` }}
+              {{ usedByLabel(u) }}
             </el-button>
+            <el-tooltip v-if="row.used_by.length > 3" placement="top"
+              :content="row.used_by.map((u: ModelPage['models'][number]['used_by'][number]) => usedByLabel(u)).join('、')">
+              <span class="more">等 {{ row.used_by.length }} 个</span>
+            </el-tooltip>
           </template>
           <span v-else class="sub">-</span>
         </template>
@@ -268,6 +276,7 @@ h2 { font-size: 15px; margin: 14px 0 4px; }
 .tbl { margin: 8px 0 4px; }
 .toolbar { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .sub { color: var(--el-text-color-secondary); font-size: 12px; }
+.more { color: var(--el-color-primary); font-size: 12px; cursor: default; white-space: nowrap; }
 .mono { font-family: var(--el-font-family-mono, monospace); font-size: 12px; }
 .full { color: var(--el-color-danger); font-weight: 600; }
 .full-tag { color: var(--el-color-danger); }

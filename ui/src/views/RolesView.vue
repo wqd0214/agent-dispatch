@@ -138,11 +138,23 @@ async function restoreInherit() {
 
 // ---------- MCP / 技能（只展示选中条目和来源层，勾选去对应页做）----------
 const regNames = { mcp: ref<Record<string, string>>({}), skills: ref<Record<string, string>>({}) }
-void mcpApi.page().then(r => { regNames.mcp.value = Object.fromEntries(r.mcp.map(e => [e.id, e.name])) }).catch(() => {})
-void skillApi.page().then(r => { regNames.skills.value = Object.fromEntries(r.skills.map(e => [e.id, e.name])) }).catch(() => {})
+function loadRegNames() {
+  const p = projectDefined.value ? projectId.value : undefined
+  void mcpApi.page(p).then(r => { regNames.mcp.value = Object.fromEntries(r.mcp.map(e => [e.id, e.name])) }).catch(() => {})
+  void skillApi.page(p).then(r => { regNames.skills.value = Object.fromEntries(r.skills.map(e => [e.id, e.name])) }).catch(() => {})
+}
+watch(projectId, loadRegNames, { immediate: true })
 function regField(key: 'mcp' | 'skills'): string[] | null {
   const f = detail.value?.fields[key]
   return f === undefined ? null : (f.value as string[])
+}
+// 值来自哪一层：项目视图下区分「跟随项目」与「单独配置」
+function regSourceLabel(key: 'mcp' | 'skills'): string {
+  const src = sourceOf(key)
+  if (src === '项目默认') return '跟随项目（项目默认）'
+  if (src === '项目') return '单独配置（本项目角色）'
+  if (src === '本机全局') return '单独配置（全局角色）'
+  return src
 }
 
 // ---------- 模型池 ----------
@@ -363,13 +375,13 @@ async function ElMessageBoxConfirm() {
         <div v-for="key in (['mcp', 'skills'] as const)" :key="key" class="regs">
           <b>{{ key === 'mcp' ? 'MCP 服务' : '技能' }}</b>
           <span v-if="regField(key) === null" class="sub">未管理：执行者照旧用它自己的配置</span>
-          <span v-else-if="!regField(key)!.length" class="sub">由 agent-dispatch 管理，一个都不带（来源：{{ sourceOf(key) }}）</span>
+          <span v-else-if="!regField(key)!.length" class="sub">由 agent-dispatch 管理，一个都不带（{{ regSourceLabel(key) }}）</span>
           <template v-else>
             <el-tag v-for="id in regField(key)!" :key="id" size="small" class="reg-tag"
               :title="`登记 ID ${id}，下发名 ${regNames[key].value[id] ?? id}`">
               {{ regNames[key].value[id] ?? id }}
             </el-tag>
-            <span class="sub">来源：{{ sourceOf(key) }}</span>
+            <span class="sub">{{ regSourceLabel(key) }}</span>
           </template>
           <el-button link size="small" type="primary"
             @click="router.push(key === 'mcp' ? '/settings/mcp' : '/settings/skills')">

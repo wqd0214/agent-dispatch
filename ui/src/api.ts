@@ -91,27 +91,33 @@ export const configApi = {
 }
 
 // ---------- MCP / 技能登记表与项目配置 ----------
-import type { CandidateGroup, McpEntry, SkillEntry } from './types'
+import type { CandidateGroup, McpEntry, McpPage, SkillEntry, SkillPage } from './types'
 
 export const mcpApi = {
-  page: () => getJson<{ mcp: McpEntry[] }>('/api/mcp'),
-  save: (id: string, entry: Record<string, unknown>) => post('/api/mcp', { name: id, entry }),
+  page: (project?: string) =>
+    getJson<McpPage>(`/api/mcp${project ? `?project=${encodeURIComponent(project)}` : ''}`),
+  save: (id: string, entry: Record<string, unknown>, project?: string) => post('/api/mcp', { name: id, entry, project }),
   remove: (id: string) => del(`/api/mcp/${encodeURIComponent(id)}`),
-  candidates: () => getJson<{ candidates: CandidateGroup[] }>('/api/mcp/candidates'),
-  importIds: (names: string[]) => post<{ added: string[] }>('/api/mcp/import', { names }),
+  // scope：undefined = 全部来源；'' = 只看全局；项目 ID = 该项目工程 + 全局
+  candidates: (scope?: string) =>
+    getJson<{ candidates: CandidateGroup[] }>(`/api/mcp/candidates${scope === undefined ? '' : `?project=${encodeURIComponent(scope)}`}`),
+  importIds: (names: string[], project?: string) => post<{ added: string[] }>('/api/mcp/import', { names, project }),
 }
 
 export const skillApi = {
-  page: () => getJson<{ skills: SkillEntry[] }>('/api/skills'),
-  save: (id: string, path: string, skillName?: string) => post('/api/skills', { name: id, path, skill_name: skillName }),
+  page: (project?: string) =>
+    getJson<SkillPage>(`/api/skills${project ? `?project=${encodeURIComponent(project)}` : ''}`),
+  save: (id: string, path: string, skillName?: string, project?: string) =>
+    post('/api/skills', { name: id, path, skill_name: skillName, project }),
   remove: (id: string) => del(`/api/skills/${encodeURIComponent(id)}`),
-  candidates: () => getJson<{ candidates: CandidateGroup[] }>('/api/skills/candidates'),
-  importIds: (names: string[]) => post<{ added: string[] }>('/api/skills/import', { names }),
+  candidates: (scope?: string) =>
+    getJson<{ candidates: CandidateGroup[] }>(`/api/skills/candidates${scope === undefined ? '' : `?project=${encodeURIComponent(scope)}`}`),
+  importIds: (names: string[], project?: string) => post<{ added: string[] }>('/api/skills/import', { names, project }),
 }
 
 export const projectApi = {
   add: (body: { id: string; name?: string; repos?: Record<string, string> }) => post('/api/config/projects', body),
-  update: (id: string, body: { name?: string; default_role?: string }) =>
+  update: (id: string, body: { name?: string; default_role?: string; defaults?: Record<string, unknown> }) =>
     post(`/api/config/projects/${encodeURIComponent(id)}`, body),
   addRepo: (id: string, body: { id: string; cwd: string; channels?: string[]; channel_namespace?: string }) =>
     post(`/api/config/projects/${encodeURIComponent(id)}/repos`, body),
