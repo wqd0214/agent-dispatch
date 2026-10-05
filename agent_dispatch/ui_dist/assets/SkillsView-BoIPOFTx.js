@@ -1,0 +1,1 @@
+import{R as e}from"./RegistryManager-DJ4UG-rC.js";import{d as o,g as r,o as s}from"./index-Dosv0aLL.js";const p=o({__name:"SkillsView",setup(a){return(t,n)=>(s(),r(e,{kind:"skills"}))}});export{p as default};

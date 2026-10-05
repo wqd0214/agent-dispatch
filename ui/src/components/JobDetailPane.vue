@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, toRef, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../api'
 import { useJobDetail, useJobLog } from '../composables/useJob'
@@ -38,18 +38,33 @@ function eventKey(e: JobEvent, i: number): string { return `${e.t}-${i}` }
 // ---- 实时输出：运行中自动滚到底，用户往上翻时不强滚 ----
 const logBox = ref<HTMLElement | null>(null)
 const stick = ref(true)
+// 首次拉到日志后跳到底部一次（已结束的作业看不到尾部，用户没往上翻前都跟随）
+let jumped = false
 function onScroll() {
   const el = logBox.value
   if (el) stick.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
 }
-watch(() => log.state.value.text, async () => {
-  if (stick.value && running.value) {
-    await nextTick()
-    const el = logBox.value
-    if (el) el.scrollTop = el.scrollHeight
-  }
-})
-
+function toBottom() {
+  stick.value = true
+  const el = logBox.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+async function jumpIfDue() {
+  if (!stick.value) return
+  await nextTick()
+  const el = logBox.value
+  if (!el || !el.textContent || el.offsetHeight === 0) return // 页签未打开时不标记
+  if (jumped && !running.value) return
+  jumped = true
+  el.scrollTop = el.scrollHeight
+}
+watch(() => log.state.value.text, jumpIfDue)
+watch(tab, jumpIfDue)
+watch(nameRef, () => { jumped = false })
+// 窗口尺寸变化后行高变了，跟随底部的重新贴到底
+function onResize() { if (stick.value) requestAnimationFrame(() => toBottom()) }
+onMounted(() => window.addEventListener('resize', onResize))
+onUnmounted(() => window.removeEventListener('resize', onResize))
 // ---- 产物：文件列表 + 文本预览 ----
 const preview = ref<{ path: string; text: string } | null>(null)
 async function openFile(path: string) {
@@ -161,7 +176,10 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
           {{ log.offline.value ? '日志拉取失败，自动重试中……' : `共 ${log.state.value.text.length} 字符` }}
           <span v-if="!stick && running">（已暂停自动滚动）</span>
         </div>
-        <pre ref="logBox" class="log mono" @scroll="onScroll">{{ log.state.value.text || '（暂无输出）' }}</pre>
+        <div class="log-wrap">
+          <pre ref="logBox" class="log mono" @scroll="onScroll">{{ log.state.value.text || '（暂无输出）' }}</pre>
+          <el-button v-if="!stick" size="small" class="to-bottom" @click="toBottom">回到底部</el-button>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="产物" name="files">
@@ -178,14 +196,16 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
       </el-tab-pane>
 
       <el-tab-pane label="派工单" name="brief">
-        <pre class="log mono">{{ job.brief || '（没有派工单）' }}</pre>
+        <div class="fill"><pre class="log mono">{{ job.brief || '（没有派工单）' }}</pre></div>
       </el-tab-pane>
 
       <el-tab-pane label="裁决记录" name="decisions">
-        <div v-if="!job.decisions?.length" class="sub">还没有裁决记录</div>
-        <div v-for="(d, i) in job.decisions" :key="i" class="decision">
+        <div class="fill scroll">
+          <div v-if="!job.decisions?.length" class="sub">还没有裁决记录</div>
+          <div v-for="(d, i) in job.decisions" :key="i" class="decision">
           <b>{{ d.action }}</b> <span class="sub">{{ d.at }} · 第 {{ d.turn }} 轮</span>
-          <div v-if="d.note" class="sub">{{ d.note }}</div>
+            <div v-if="d.note" class="sub">{{ d.note }}</div>
+          </div>
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -206,8 +226,11 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
 .gate-row { display: flex; gap: 8px; font-size: 13px; align-items: baseline; }
 .g-ok { color: var(--el-color-success); }
 .g-bad { color: var(--el-color-danger); }
-.tabs { flex: 1; min-height: 0; }
-.events { display: flex; flex-direction: column; gap: 6px; }
+/* 页签区域占满剩余高度，但至少 360px；窗口矮时由 .pane 整体滚动，内容不裁掉 */
+.tabs { flex: 1; min-height: 360px; display: flex; flex-direction: column; }
+.tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; }
+.tabs :deep(.el-tab-pane) { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.events { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; overflow: auto; }
 .ev { border: 1px solid var(--el-border-color-lighter); border-radius: 6px; padding: 6px 8px; }
 .ev-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .kind { color: var(--el-color-primary); font-size: 12px; }
@@ -215,8 +238,12 @@ const sp = computed(() => statusTag(job.value?.status ?? null))
 .payload { margin: 6px 0 0; background: var(--el-fill-color-light); border-radius: 6px; padding: 8px; max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 .reply { font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 .log-hint { margin-bottom: 4px; }
-.log { background: var(--el-fill-color-light); border-radius: 6px; padding: 8px 10px; max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; }
-.files { max-height: 220px; overflow: auto; margin-bottom: 8px; }
+.log-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.log { flex: 1; min-height: 0; background: var(--el-fill-color-light); border-radius: 6px; padding: 8px 10px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; }
+.to-bottom { position: absolute; right: 14px; bottom: 14px; }
+.fill { flex: 1; min-height: 0; display: flex; }
+.fill.scroll { overflow: auto; display: block; }
+.files { flex: 0 1 auto; max-height: 40%; overflow: auto; margin-bottom: 8px; }
 .file { display: flex; justify-content: space-between; gap: 10px; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
 .file:hover { background: var(--el-fill-color-light); }
 .decision { border-bottom: 1px dashed var(--el-border-color-lighter); padding: 6px 2px; }

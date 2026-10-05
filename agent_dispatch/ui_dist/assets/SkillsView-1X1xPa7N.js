@@ -1,1 +1,0 @@
-import{R as e}from"./RegistryManager-Dw8BSMy4.js";import{d as o,g as r,o as s}from"./index-fFo1anTd.js";const p=o({__name:"SkillsView",setup(a){return(t,n)=>(s(),r(e,{kind:"skills"}))}});export{p as default};
