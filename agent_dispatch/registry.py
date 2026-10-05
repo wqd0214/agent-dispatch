@@ -183,15 +183,18 @@ def check_mcp_entry(entry):
     return etype
 
 
-def save_mcp(reg_id, entry, source=None):
+def save_mcp(reg_id, entry, source=None, project=None):
     """新增或修改一条 MCP 登记（键是登记 ID）。entry 里允许带遮罩占位（保留原值）。
-    name 缺省等于登记 ID；来源保留已有的，没写过记为手动登记。"""
+    name 缺省等于登记 ID；来源保留已有的，没写过记为手动登记。project 是归属项目 ID（空 = 全局）。"""
     existing = load_mcp().get(reg_id, {})
     entry = _merge_masked(existing, dict(entry))
     etype = check_mcp_entry(entry)
     clean = {"name": entry.get("name") or existing.get("name") or reg_id, "type": etype,
              "sources": entry.get("sources") or existing.get("sources")
              or ([source] if source else [existing.get("source") or "手动登记"])}
+    proj = project if project is not None else existing.get("project")
+    if proj:
+        clean["project"] = proj
     for key in ("command", "args", "env", "url", "headers", "description"):
         if entry.get(key) not in (None, "", [], {}):
             clean[key] = entry[key]
@@ -199,17 +202,28 @@ def save_mcp(reg_id, entry, source=None):
     return clean
 
 
+def entry_project(entry):
+    return entry.get("project") or ""  # 没有 project 字段的旧数据视为全局
+
+
+def entries_for(reg, project_id):
+    """登记表里某个范围可用的条目：project_id 为空 = 只要全局；否则该项目的 + 全局的。"""
+    return {reg_id: entry for reg_id, entry in reg.items() if entry_project(entry) in ("", project_id)}
+
+
 def _users(kind, reg_id):
-    """引用了这个登记 ID 的角色：[{project: 项目ID（全局角色为空）, role: 角色ID}]。"""
+    """引用了这个登记 ID 的角色与项目默认：[{project: 项目ID（全局角色为空）, role: 角色ID}]。"""
     from . import definitions
     users = []
     for role in definitions.list_roles(None):
         if reg_id in (role.get(kind) or []):
             users.append({"project": "", "role": role["role"]})
     for project in definitions.list_projects():
-        for role in definitions.list_roles(project):
-            if reg_id in (role.get(kind) or []):
-                users.append({"project": project["id"], "role": role["role"]})
+        if reg_id in ((project.get("defaults") or {}).get(kind) or []):
+            users.append({"project": project["id"], "role": "项目默认"})
+        for role_id, data in definitions.project_role_layer(project["id"]).items():
+            if reg_id in (data.get(kind) or []):
+                users.append({"project": project["id"], "role": role_id})
     return users
 
 
@@ -244,8 +258,8 @@ def skill_description(directory):
     return ""
 
 
-def save_skill(reg_id, path, name=None, source=None):
-    """登记一个技能目录（键是登记 ID），name 缺省取目录名。"""
+def save_skill(reg_id, path, name=None, source=None, project=None):
+    """登记一个技能目录（键是登记 ID），name 缺省取目录名。project 是归属项目 ID（空 = 全局）。"""
     directory = os.path.realpath(os.path.expanduser(path))
     if not os.path.isdir(directory) or not os.path.isfile(os.path.join(directory, "SKILL.md")):
         raise DispatchError(f"目录里没有 SKILL.md，不算技能：{directory}")
@@ -255,6 +269,9 @@ def save_skill(reg_id, path, name=None, source=None):
              "paths": sorted({directory, *(existing.get("paths") or [])}),
              "description": skill_description(directory),
              "sources": existing.get("sources") or ([source] if source else ["手动登记"])}
+    proj = project if project is not None else existing.get("project")
+    if proj:
+        entry["project"] = proj
     _save(SKILLS_REGISTRY, reg_id, entry)
     return entry
 
@@ -305,47 +322,53 @@ def _projects():
         return []
 
 
-def _mcp_sources(home):
-    """[{label, short, path}]：short 用于生成登记 ID（<服务名>@<来源简称>）。"""
-    sources = [{"label": "pi 全局 ~/.pi/agent/mcp.json", "short": "pi-global",
+def _mcp_sources(home, project=None):
+    """[{label, short, path, project}]：short 用于生成登记 ID（<服务名>@<来源简称>），
+    project 是来源归属的项目 ID（空 = 用户全局配置）。project 给了就只看该项目的工程来源 + 全局来源。"""
+    sources = [{"label": "pi 全局 ~/.pi/agent/mcp.json", "short": "pi-global", "project": "",
                 "path": os.path.join(home, ".pi", "agent", "mcp.json")},
-               {"label": "OpenCode 全局 ~/.config/opencode/opencode.json", "short": "oc-global",
+               {"label": "OpenCode 全局 ~/.config/opencode/opencode.json", "short": "oc-global", "project": "",
                 "path": os.path.join(home, ".config", "opencode", "opencode.json")}]
-    for project in _projects():
-        for repo_id, repo in project["repos"].items():
-            short = f"{project['id']}-{repo_id}"
-            sources += [{"label": f"项目 {project['id']}/{repo_id} 的 .pi/mcp.json", "short": short,
+    for proj in _projects():
+        if project is not None and project != proj["id"]:
+            continue
+        for repo_id, repo in proj["repos"].items():
+            short = f"{proj['id']}-{repo_id}"
+            sources += [{"label": f"项目 {proj['id']}/{repo_id} 的 .pi/mcp.json", "short": short, "project": proj["id"],
                          "path": os.path.join(repo["cwd"], ".pi", "mcp.json")},
-                        {"label": f"项目 {project['id']}/{repo_id} 的 opencode.json", "short": short + "-oc",
+                        {"label": f"项目 {proj['id']}/{repo_id} 的 opencode.json", "short": short + "-oc", "project": proj["id"],
                          "path": os.path.join(repo["cwd"], "opencode.json")}]
     return sources
 
 
 def _identity(entry):
-    """判断两条是不是同一个服务：不看来源、备注和下发用的 name。"""
-    return json.dumps({k: v for k, v in entry.items() if k not in ("source", "sources", "description", "name")},
+    """判断两条是不是同一个服务：不看来源、备注、下发用的 name 和归属项目。"""
+    return json.dumps({k: v for k, v in entry.items() if k not in ("source", "sources", "description", "name", "project")},
                       ensure_ascii=False, sort_keys=True)
 
 
-def _free_id(registry, base, identity, name):
-    """登记 ID 被内容不同的条目占了时加 -2、-3 后缀。"""
+def _free_id(registry, base, identity, name, scope=None):
+    """登记 ID 被内容不同的条目占了时加 -2、-3 后缀。scope 限定哪些归属的条目算「已登记且相同」：
+    None = 任意归属；"" = 只要全局；项目 ID = 该项目的 + 全局的。"""
     reg_id = base
     counter = 1
     while reg_id in registry:
-        if _identity(registry[reg_id]) == identity and (registry[reg_id].get("name") or reg_id) == name:
+        existing = registry[reg_id]
+        in_scope = scope is None or entry_project(existing) in ("", scope) if scope != "" else entry_project(existing) == ""
+        if in_scope and _identity(existing) == identity and (existing.get("name") or reg_id) == name:
             return reg_id, True  # 已登记且相同
         counter += 1
         reg_id = f"{base}-{counter}"
     return reg_id, False
 
 
-def mcp_candidates(home=None):
+def mcp_candidates(home=None, project=None):
     """现有配置里的 MCP 候选，按服务名分组：[{name, conflict, variants: [...]}]。
-    内容相同的来源合并成一个变体（记下全部来源）；内容不同的各自成变体，登记 ID 为 <名>@<来源简称>。
-    每个变体带 diff（这组里取值不一样的参数），冲突时用它区分变体。"""
+    project 为 None 看全部来源（兼容旧用法），"" 只看全局来源，项目 ID 看该项目工程来源 + 全局来源；
+    每个变体带 project（归属项目 ID，取第一个来源的）与 diff（这组里取值不一样的参数）。"""
     home = _import_home(home)
     groups = {}
-    for src in _mcp_sources(home):
+    for src in _mcp_sources(home, project):
         data = _read(src["path"])
         if data is None:
             continue
@@ -370,9 +393,11 @@ def mcp_candidates(home=None):
         for identity, cluster in clusters.items():
             primary = cluster["sources"][0]
             base = name if len(clusters) == 1 else f"{name}@{primary['short']}"
-            reg_id, registered = _free_id(registry, base, identity, name)
+            reg_id, registered = _free_id(registry, base, identity, name, project)
             variants.append({"id": reg_id, "name": name, "entry": cluster["entry"],
                              "source": primary["label"], "sources": [s["label"] for s in cluster["sources"]],
+                             "project": primary["project"],
+                             "projects": sorted({s["project"] for s in cluster["sources"]}),
                              "registered": registered,
                              "diff": {k: cluster["entry"].get(k) for k in diff_keys}})
         variants.sort(key=lambda v: v["source"])
@@ -403,21 +428,25 @@ def _pick_mcp_variant(selection, candidates):
     return distinct[0]
 
 
-def import_mcp(selections, home=None):
+def import_mcp(selections, home=None, project=None):
     """导入选中的候选。选择可以是登记 ID、服务名（不冲突时直接用）或 {name, source}。
+    project 限定候选范围；归属按变体自己的来源定（工程里扫出来的归该项目，全局来源归全局）。
     返回真正新登记的登记 ID；已登记且内容相同的跳过。"""
     home = _import_home(home)
-    candidates = mcp_candidates(home)
+    candidates = mcp_candidates(home, project)
     added = []
     for selection in selections:
         group, variant = _pick_mcp_variant(selection, candidates)
         registry = load_mcp()
-        reg_id, already = _free_id(registry, variant["id"], _identity(variant["entry"]), group["name"])
+        reg_id, already = _free_id(registry, variant["id"], _identity(variant["entry"]), group["name"], project)
         if already:
             continue
         entry = dict(variant["entry"])
         entry.pop("source", None)
-        _save(MCP_REGISTRY, reg_id, {**entry, "name": group["name"], "sources": variant["sources"]})
+        clean = {**entry, "name": group["name"], "sources": variant["sources"]}
+        if variant.get("project"):
+            clean["project"] = variant["project"]
+        _save(MCP_REGISTRY, reg_id, clean)
         added.append(reg_id)
     return added
 
@@ -430,15 +459,18 @@ def _describe(entry):
 
 # ---------- 技能候选与导入 ----------
 
-def _skill_sources(home):
-    sources = [{"label": f"~/{rel}", "short": short, "path": os.path.join(home, *rel.split("/"))}
+def _skill_sources(home, project=None):
+    """与 _mcp_sources 同一套规则：project 给了就只看该项目工程 + 用户全局目录。"""
+    sources = [{"label": f"~/{rel}", "short": short, "project": "", "path": os.path.join(home, *rel.split("/"))}
                for rel, short in USER_SKILL_DIRS]
-    for project in _projects():
-        for repo_id, repo in project["repos"].items():
-            short = f"{project['id']}-{repo_id}"
+    for proj in _projects():
+        if project is not None and project != proj["id"]:
+            continue
+        for repo_id, repo in proj["repos"].items():
+            short = f"{proj['id']}-{repo_id}"
             for rel, suffix in PROJECT_SKILL_DIRS:
-                sources.append({"label": f"项目 {project['id']}/{repo_id} 的 {rel}", "short": short + suffix,
-                                "path": os.path.join(repo["cwd"], *rel.split("/"))})
+                sources.append({"label": f"项目 {proj['id']}/{repo_id} 的 {rel}", "short": short + suffix,
+                                "project": proj["id"], "path": os.path.join(repo["cwd"], *rel.split("/"))})
     return sources
 
 
@@ -447,13 +479,14 @@ def _skill_digest(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def skill_candidates(home=None):
+def skill_candidates(home=None, project=None):
     """各处技能目录里的候选，按技能名分组：[{name, conflict, variants: [...]}]。
     先按真实路径去重（软链接不算重复），再按 SKILL.md 内容合并：内容相同的目录合成一个变体
-    （记下全部来源，取第一个目录作默认路径）；内容不同的各自成变体。"""
+    （记下全部来源，取第一个目录作默认路径）；内容不同的各自成变体。project 限定来源范围，
+    语义与 mcp_candidates 相同。"""
     home = _import_home(home)
     groups = {}
-    for src in _skill_sources(home):
+    for src in _skill_sources(home, project):
         if not os.path.isdir(src["path"]):
             continue
         for sub in sorted(os.listdir(src["path"])):
@@ -476,7 +509,9 @@ def skill_candidates(home=None):
             registered = False
             while reg_id in registry:
                 entry = registry[reg_id]
-                if (entry.get("name") or reg_id) == name and entry.get("path") in cluster["paths"]:
+                in_scope = (entry_project(entry) == project if project == ""
+                            else project is None or entry_project(entry) in ("", project))
+                if in_scope and (entry.get("name") or reg_id) == name and entry.get("path") in cluster["paths"]:
                     registered = True
                     break
                 counter += 1
@@ -484,15 +519,17 @@ def skill_candidates(home=None):
             variants.append({"id": reg_id, "name": name, "path": cluster["paths"][0], "paths": cluster["paths"],
                              "description": skill_description(cluster["paths"][0]),
                              "source": primary["label"], "sources": [s["label"] for s in cluster["sources"]],
+                             "project": primary["project"],
+                             "projects": sorted({s["project"] for s in cluster["sources"]}),
                              "registered": registered})
         variants.sort(key=lambda v: v["source"])
         out.append({"name": name, "conflict": len(groups[name]) > 1, "variants": variants})
     return out
 
 
-def import_skills(selections, home=None):
+def import_skills(selections, home=None, project=None):
     home = _import_home(home)
-    candidates = skill_candidates(home)
+    candidates = skill_candidates(home, project)
     added = []
     for selection in selections:
         ref, source = (selection, None) if isinstance(selection, str) else (selection.get("name"), selection.get("source"))
@@ -513,6 +550,8 @@ def import_skills(selections, home=None):
             continue
         entry = {"name": group["name"], "path": variant["path"], "paths": variant["paths"],
                  "description": variant["description"], "sources": variant["sources"]}
+        if variant.get("project"):
+            entry["project"] = variant["project"]
         reg_id = variant["id"]
         registry = load_skills()
         counter = 1

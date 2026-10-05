@@ -1381,8 +1381,9 @@ class RunCliStdoutTest(unittest.TestCase):
         self.assertIn("无关输出", text)  # 提示文字仍然能看到
 
 
-class McpSkillRegistryTest(DispatchBase):
-    """MCP 与技能的登记（登记 ID 唯一、name 下发）、导入合并、遮罩和按角色配置。
+class RegistryFixtureBase(DispatchBase):
+    """MCP 与技能登记测试的公共环境：假的用户主目录 + 项目工程来源。
+    只含搭建与辅助方法，不含测试用例，供多个测试类继承。
     导入来源全在临时目录，不读真实的 ~/.pi 等配置。"""
 
     def setUp(self):
@@ -1490,6 +1491,9 @@ class McpSkillRegistryTest(DispatchBase):
 
     def group(self, candidates, name):
         return next(g for g in candidates if g["name"] == name)
+
+class McpSkillRegistryTest(RegistryFixtureBase):
+    """MCP 与技能的登记（登记 ID 唯一、name 下发）、导入合并、遮罩和按角色配置。"""
 
     def test_mcp_candidates_grouped_with_diff(self):
         out = self.py("result = registry.mcp_candidates()")
@@ -1753,6 +1757,199 @@ def registry_load(test, kind):
     path = os.path.join(test.home, f"{kind}.json")
     with open(path) as f:
         return json.load(f)
+
+
+class ProjectScopedRegistryTest(RegistryFixtureBase):
+    """登记条目按项目归属：项目里只能看到本项目的 + 全局的，defaults 是项目级启用清单。"""
+
+    def setUp(self):
+        super().setUp()
+        # 第二个项目 p2，自己的工程里有一个 p2 专属的 MCP 服务与技能
+        self.p2work = os.path.join(self.tmp, "p2-work")
+        os.makedirs(os.path.join(self.p2work, ".pi"))
+        with open(os.path.join(self.p2work, ".pi", "mcp.json"), "w") as f:
+            json.dump({"mcpServers": {"p2-only": {"command": "p2-cmd"}}}, f)
+        p2skill = os.path.join(self.p2work, ".agents", "skills", "p2-skill")
+        os.makedirs(p2skill)
+        with open(os.path.join(p2skill, "SKILL.md"), "w") as f:
+            f.write("---\ndescription: p2 的技能\n---\n")
+        self.ok("projects", "add", "p2", "--repo", f"only={self.p2work}", env_extra=self.import_env)
+
+    def test_import_attribution_and_old_data_is_global(self):
+        # 按项目导入：工程里扫出来的归属该项目，全局来源的归全局
+        added = self.py("result = registry.import_mcp(['proj-mcp', 'pi-server'], project='p1')")
+        self.assertEqual(sorted(added), ["pi-server", "proj-mcp"])
+        data = registry_load(self, "mcp")
+        self.assertEqual(data["proj-mcp"]["project"], "p1")
+        self.assertEqual(data["pi-server"].get("project", ""), "")
+        # 旧数据没有 project 字段：视为全局，两个项目里都可用
+        self.assertEqual(set(self.py("result = registry.entries_for(registry.load_mcp(), 'p1')")),
+                         {"pi-server", "proj-mcp"})
+        self.assertEqual(set(self.py("result = registry.entries_for(registry.load_mcp(), 'p2')")), {"pi-server"})
+        # 项目候选只含该项目的工程来源 + 全局来源
+        out = self.py("result = registry.mcp_candidates(project='p1')")
+        names = {g["name"] for g in out}
+        self.assertIn("proj-mcp", names)
+        self.assertIn("pi-server", names)
+        self.assertNotIn("p2-only", names)
+        proj = self.group(out, "proj-mcp")["variants"][0]
+        self.assertEqual(proj["project"], "p1")
+        out2 = self.py("result = registry.mcp_candidates(project='p2')")
+        self.assertIn("p2-only", {g["name"] for g in out2})
+        self.assertNotIn("proj-mcp", {g["name"] for g in out2})
+        # 全局视图（project=''）只有全局来源
+        outg = self.py("result = registry.mcp_candidates(project='')")
+        self.assertNotIn("proj-mcp", {g["name"] for g in outg})
+        # 技能同样一套
+        added = self.py("result = registry.import_skills(['proj-skill'], project='p1')")
+        self.assertEqual(added, ["proj-skill"])
+        self.assertEqual(registry_load(self, "skills")["proj-skill"]["project"], "p1")
+        outs = self.py("result = registry.skill_candidates(project='p2')")
+        self.assertIn("p2-skill", {g["name"] for g in outs})
+        self.assertNotIn("proj-skill", {g["name"] for g in outs})
+
+    def test_role_cannot_use_other_projects_entry(self):
+        self.py("registry.import_mcp(['p2-only'], project='p2')\nregistry.import_skills(['p2-skill'], project='p2')")
+        # p1 的角色选 p2 的条目：拒
+        err = self.raises("""
+            definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'mcp': ['p2-only']})
+        """)
+        self.assertIn("p2", err)
+        self.assertIn("p2-only", err)
+        # 全局角色也不能选项目的条目
+        err = self.raises("definitions.set_role_fields(None, 'qa', {'skills': ['p2-skill']})")
+        self.assertIn("p2-skill", err)
+        # p2 自己的角色可以
+        self.py("definitions.set_role_fields(definitions.load_project('p2'), 'qa', {'mcp': ['p2-only']})")
+
+    def test_project_defaults_enable_and_role_override(self):
+        self.py("""
+            registry.import_mcp(['pi-server', 'proj-mcp'], project='p1')
+            definitions.update_project('p1', defaults={'mcp': ['pi-server']})
+        """)
+        profile = self.py("result = definitions.resolve(definitions.load_project('p1'), 'dev')")
+        self.assertEqual(profile["mcp"], ["pi-server"])  # 项目 defaults 对所有角色生效
+        self.assertEqual(self.py("result = definitions.resolve(definitions.load_project('p1'), 'qa', 'app')")["mcp"],
+                         ["pi-server"])
+        # 角色层单独覆盖优先
+        self.py("definitions.set_role_fields(definitions.load_project('p1'), 'qa', {'mcp': ['proj-mcp']})")
+        self.assertEqual(self.py("result = definitions.resolve(definitions.load_project('p1'), 'qa', 'app')")["mcp"], ["proj-mcp"])
+        # 派工预览的「本次下发」按解析后的字段工作
+        out = json.loads(self.ok("start", "j-d", "--project", "p1", "--role", "qa", "--repo", "app",
+                                 "--dry-run", "--json", "-", stdin="做事", env_extra=self.import_env).stdout)
+        self.assertTrue(out["inject"]["managed"])
+        self.assertEqual([s["id"] for s in out["inject"]["mcp"]["services"]], ["proj-mcp"])
+        # 同名冲突在 defaults 层也要拦
+        self.py("registry.import_mcp(['shared@pi-global', 'shared@oc-global'])")
+        err = self.raises("""
+            definitions.update_project('p1', defaults={'mcp': ['shared@pi-global', 'shared@oc-global']})
+        """)
+        self.assertIn("shared", err)
+        # defaults 里选别的项目的条目也要拦
+        err = self.raises("registry.import_mcp(['p2-only'], project='p2');\n"
+                          "definitions.update_project('p1', defaults={'mcp': ['p2-only']})")
+        self.assertIn("p2", err)
+
+    def test_defaults_none_removes_field(self):
+        self.py("registry.import_mcp(['pi-server'])\n"
+                "definitions.update_project('p1', defaults={'mcp': ['pi-server']})")
+        self.assertIn("mcp", self.py("result = definitions.load_project('p1').get('defaults')"))
+        self.py("definitions.update_project('p1', defaults={'mcp': None})")
+        self.assertNotIn("mcp", self.py("result = definitions.load_project('p1').get('defaults') or {}") or {})
+
+    def test_remove_referenced_by_defaults(self):
+        self.py("registry.import_mcp(['pi-server'], project='p1')\n"
+                "definitions.update_project('p1', defaults={'mcp': ['pi-server']})")
+        err = self.raises("registry.remove_mcp('pi-server')")
+        self.assertIn("p1", err)
+        self.assertIn("项目默认", err)
+        self.py("definitions.update_project('p1', defaults={'mcp': None})")
+        self.py("registry.remove_mcp('pi-server')")
+
+    def test_cli_project_flags(self):
+        self.py("registry.import_mcp(['proj-mcp'], project='p1')\nregistry.import_skills(['proj-skill'], project='p1')")
+        out = self.ok("mcp", "--project", "p1", "list", env_extra=self.import_env).stdout
+        self.assertIn("proj-mcp", out)
+        self.assertIn("本项目", out)
+        self.assertNotIn("p2-only", out)
+        # enable / disable 调整本项目启用清单
+        self.ok("mcp", "enable", "proj-mcp", "--project", "p1", env_extra=self.import_env)
+        self.assertEqual(self.py("result = definitions.load_project('p1').get('defaults')")["mcp"], ["proj-mcp"])
+        self.ok("mcp", "disable", "proj-mcp", "--project", "p1", env_extra=self.import_env)
+        self.assertEqual(self.py("result = definitions.load_project('p1').get('defaults')")["mcp"], [])
+        # 别的项目的条目不能 enable
+        result = self.cli("mcp", "enable", "p2-only", "--project", "p1", env_extra=self.import_env)
+        self.assertEqual(result.returncode, 2)
+        # 技能同理；import --project 归属项目
+        self.ok("skills", "enable", "proj-skill", "--project", "p1", env_extra=self.import_env)
+        self.assertEqual(self.py("result = definitions.load_project('p1').get('defaults')")["skills"], ["proj-skill"])
+        self.ok("skills", "import", "--all", "--project", "p2", env_extra=self.import_env)
+        self.assertEqual(registry_load(self, "skills")["p2-skill"]["project"], "p2")
+        # roles show 标明 mcp / skills 的来源层
+        show = self.ok("roles", "show", "qa", "-P", "p1", env_extra=self.import_env).stdout
+        self.assertIn("项目默认", show)
+
+    def test_web_project_scoped_api(self):
+        import socket, urllib.error, urllib.request
+        self.py("registry.import_mcp(['proj-mcp', 'pi-server'], project='p1')\n"
+                "registry.import_skills(['proj-skill'], project='p1')")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = str(sock.getsockname()[1])
+        base = f"http://127.0.0.1:{port}"
+
+        def call(method, path, body=None):
+            request = urllib.request.Request(base + path, method=method, data=json.dumps(body or {}).encode())
+            request.add_header("Content-Type", "application/json")
+            request.add_header("X-Agent-Dispatch", "1")
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code, json.load(exc)
+                finally:
+                    exc.close()
+
+        try:
+            self.ok("web", "start", "--port", port, env_extra=self.import_env)
+            # 项目视图：本项目的 + 全局的，各自标归属；未管理、启用清单、角色覆盖
+            status, data = call("GET", "/api/mcp?project=p1")
+            self.assertEqual(status, 200)
+            by_id = {m["id"]: m for m in data["mcp"]}
+            self.assertEqual(set(by_id), {"pi-server", "proj-mcp"})
+            self.assertEqual(by_id["proj-mcp"]["project"], "p1")
+            self.assertEqual(by_id["pi-server"]["project"], "")
+            self.assertFalse(data["managed"])
+            self.assertEqual(data["enabled"], [])
+            self.assertTrue(any(r["id"] == "qa" for r in data["roles"]))
+            # 启用清单走项目 defaults
+            self.assertEqual(call("POST", "/api/config/projects/p1", {"defaults": {"mcp": ["pi-server"]}})[0], 200)
+            status, data = call("GET", "/api/mcp?project=p1")
+            self.assertTrue(data["managed"])
+            self.assertEqual(data["enabled"], ["pi-server"])
+            # 删掉字段恢复未管理
+            self.assertEqual(call("POST", "/api/config/projects/p1", {"defaults": {"mcp": None}})[0], 200)
+            self.assertFalse(call("GET", "/api/mcp?project=p1")[1]["managed"])
+            # 候选带项目过滤
+            groups = call("GET", "/api/mcp/candidates?project=p1")[1]["candidates"]
+            self.assertIn("proj-oc", {g["name"] for g in groups})
+            self.assertNotIn("p2-only", {g["name"] for g in groups})
+            # 导入带 project：归属该项目
+            self.assertEqual(call("POST", "/api/mcp/import", {"names": ["proj-oc"], "project": "p1"})[0], 200)
+            self.assertEqual(registry_load(self, "mcp")["proj-oc"]["project"], "p1")
+            # 未定义的项目：明确报错
+            status, error = call("GET", "/api/mcp?project=nope")
+            self.assertEqual(status, 404)
+            self.assertIn("nope", error["error"])
+            # 全局视图（不带 project）：只看全局登记，不含 p1 的条目
+            data = call("GET", "/api/mcp")[1]
+            self.assertEqual({m["id"] for m in data["mcp"]}, {"pi-server"})
+            # 技能同样一套
+            status, data = call("GET", "/api/skills?project=p1")
+            self.assertEqual({s["id"] for s in data["skills"]}, {"proj-skill"})
+        finally:
+            self.ok("web", "stop")
 
 
 

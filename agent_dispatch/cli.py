@@ -1071,13 +1071,15 @@ def cmd_mcp(a):
     from . import registry
     action = a.action or "list"
     if action == "list":
+        if a.project:
+            return mcp_project_listing(a, registry)
         if not registry.load_mcp():
             print("（MCP 登记表是空的。导入现有配置：agent-dispatch mcp import）")
             return 0
         table(mcp_table())
         return 0
     if action == "import":
-        groups = registry.mcp_candidates()
+        groups = registry.mcp_candidates(project=a.project)
         if not a.all and not a.names:  # 不带参数：按服务名列出候选
             if not groups:
                 print("（没有在 pi / OpenCode 配置里找到 MCP 服务）")
@@ -1098,16 +1100,49 @@ def cmd_mcp(a):
             selections = [v["id"] for group in groups for v in group["variants"] if not v["registered"]]
         else:
             selections = [{"name": n, "source": a.source} for n in a.names]
-        added = registry.import_mcp(selections)
+        added = registry.import_mcp(selections, project=a.project)
         store.info(f"新登记 {len(added)} 个 MCP 服务" + (f"：{'、'.join(added)}" if added else "（没有新的）"))
+        return 0
+    if action in ("enable", "disable"):
+        if not a.names or not a.project:
+            raise DispatchError(f"mcp {action} 要给登记 ID 和 --project <项目ID>")
+        definitions.set_project_enabled(a.project, "mcp", a.names[0], action == "enable")
+        store.info(f"已{'启用' if action == 'enable' else '停用'} {a.names[0]}（项目 {a.project} 的派工清单）")
         return 0
     if not a.names:
         raise DispatchError(f"mcp {action} 需要登记 ID")
     if action == "add":
-        registry.save_mcp(a.names[0], _mcp_entry_from_flags(a))
+        registry.save_mcp(a.names[0], _mcp_entry_from_flags(a), project=a.project or None)
     elif action == "remove":
         registry.remove_mcp(a.names[0])
     store.info(f"已处理：mcp {action} {a.names[0]}")
+    return 0
+
+
+def mcp_project_listing(a, registry):
+    """mcp --project：项目可用的（本项目的 + 全局的）与启用状态。技能同构（skill_project_listing）。"""
+    project = definitions.load_project(a.project)
+    defaults = project.get("defaults") or {}
+    enabled = defaults.get("mcp") or []
+    if "mcp" not in defaults:
+        print(f"项目 {project['name']}（{project['id']}）未管理 MCP：执行者照旧用工程里自己的配置")
+    else:
+        overridden = [r["role"] for r in definitions.list_roles(project)
+                      if definitions.role_detail(project, r["role"])["fields"].get("mcp", {}).get("source") == "项目"]
+        extra = f"（角色 {'、'.join(overridden)} 另有单独配置）" if overridden else ""
+        print(f"项目 {project['name']}（{project['id']}）派工时带 {len(enabled)} 个 MCP 服务{extra}")
+    rows = [("登记 ID", "服务名", "类型", "命令 / URL", "归属", "状态", "被哪些角色用")]
+    for reg_id, entry in sorted(registry.entries_for(registry.load_mcp(), project["id"]).items()):
+        masked = registry.mask_entry(entry)
+        endpoint = masked.get("url") or " ".join([masked.get("command") or "-"] + (masked.get("args") or []))
+        owner = "本项目" if registry.entry_project(entry) == project["id"] else "全局"
+        state = "已启用" if reg_id in enabled else ("已纳入未启用" if "mcp" in defaults else "未管理")
+        users = "、".join(f"{u['project'] or '全局'}:{u['role']}" for u in registry.used_by("mcp", reg_id)) or "-"
+        rows.append((reg_id, entry.get("name") or reg_id, entry.get("type"), endpoint, owner, state, users))
+    if len(rows) > 1:
+        table(rows)
+    else:
+        print("（本项目和全局都还没有登记 MCP 服务）")
     return 0
 
 
@@ -1132,10 +1167,37 @@ def _mcp_entry_from_flags(a):
     return entry
 
 
+def skill_project_listing(a, registry):
+    """skills --project：与 mcp_project_listing 同构。"""
+    project = definitions.load_project(a.project)
+    defaults = project.get("defaults") or {}
+    enabled = defaults.get("skills") or []
+    if "skills" not in defaults:
+        print(f"项目 {project['name']}（{project['id']}）未管理技能：执行者照旧用工程里自己的配置")
+    else:
+        overridden = [r["role"] for r in definitions.list_roles(project)
+                      if definitions.role_detail(project, r["role"])["fields"].get("skills", {}).get("source") == "项目"]
+        extra = f"（角色 {'、'.join(overridden)} 另有单独配置）" if overridden else ""
+        print(f"项目 {project['name']}（{project['id']}）派工时带 {len(enabled)} 个技能{extra}")
+    rows = [("登记 ID", "技能名", "目录", "归属", "状态", "被哪些角色用")]
+    for reg_id, entry in sorted(registry.entries_for(registry.load_skills(), project["id"]).items()):
+        owner = "本项目" if registry.entry_project(entry) == project["id"] else "全局"
+        state = "已启用" if reg_id in enabled else ("已纳入未启用" if "skills" in defaults else "未管理")
+        users = "、".join(f"{u['project'] or '全局'}:{u['role']}" for u in registry.used_by("skills", reg_id)) or "-"
+        rows.append((reg_id, entry.get("name") or reg_id, entry["path"], owner, state, users))
+    if len(rows) > 1:
+        table(rows)
+    else:
+        print("（本项目和全局都还没有登记技能）")
+    return 0
+
+
 def cmd_skills(a):
     from . import registry
     action = a.action or "list"
     if action == "list":
+        if a.project:
+            return skill_project_listing(a, registry)
         if not registry.load_skills():
             print("（技能登记表是空的。导入现有配置：agent-dispatch skills import）")
             return 0
@@ -1147,7 +1209,7 @@ def cmd_skills(a):
         table(rows)
         return 0
     if action == "import":
-        groups = registry.skill_candidates()
+        groups = registry.skill_candidates(project=a.project)
         if not a.all and not a.names:
             if not groups:
                 print("（没有在各级技能目录里找到候选）")
@@ -1168,15 +1230,21 @@ def cmd_skills(a):
             selections = [v["id"] for group in groups for v in group["variants"] if not v["registered"]]
         else:
             selections = [{"name": n, "source": a.source} for n in a.names]
-        added = registry.import_skills(selections)
+        added = registry.import_skills(selections, project=a.project)
         store.info(f"新登记 {len(added)} 个技能" + (f"：{'、'.join(added)}" if added else "（没有新的）"))
+        return 0
+    if action in ("enable", "disable"):
+        if not a.names or not a.project:
+            raise DispatchError(f"skills {action} 要给登记 ID 和 --project <项目ID>")
+        definitions.set_project_enabled(a.project, "skills", a.names[0], action == "enable")
+        store.info(f"已{'启用' if action == 'enable' else '停用'} {a.names[0]}（项目 {a.project} 的派工清单）")
         return 0
     if not a.names:
         raise DispatchError(f"skills {action} 需要登记 ID")
     if action == "add":
         if len(a.names) < 2:
             raise DispatchError("用法：agent-dispatch skills add <登记ID> <技能目录> [--name 技能名]")
-        registry.save_skill(a.names[0], a.names[1], a.name)
+        registry.save_skill(a.names[0], a.names[1], a.name, project=a.project or None)
     elif action == "remove":
         registry.remove_skill(a.names[0])
     store.info(f"已处理：skills {action} {a.names[0]}")
@@ -1193,9 +1261,19 @@ def cmd_roles(a):
     if not a.name:
         raise DispatchError(f"roles {action} 需要角色 ID")
     if action == "show":
-        role = definitions._merged_role(project, definitions.find_role_id(project, a.name))
+        role_id = definitions.find_role_id(project, a.name)
+        role = definitions._merged_role(project, role_id)
         public = {k: v for k, v in role.items() if not k.startswith("_")}
         print(json.dumps(public, ensure_ascii=False, indent=2))
+        # 标明 mcp / skills 的值来自哪一层：项目默认（跟随项目）还是角色自己单独配置
+        detail = definitions.role_detail(project, role_id)
+        for key in ("mcp", "skills"):
+            field = detail["fields"].get(key)
+            if field:
+                if field["source"] == "项目默认":
+                    print(f"\n{key}：跟随项目默认（项目 defaults 层）")
+                else:
+                    print(f"\n{key}：角色单独配置（{field['source']}层）")
         if "mcp" in role or "skills" in role:
             print()
             for line in inject.role_notes():
@@ -1420,8 +1498,8 @@ def build_parser():
     p.add_argument("--repo", action="append", metavar="工程名=目录", help="add：登记一个工程，可重复")
     p.add_argument("--channels", help="add-repo：这个工程的浏览器通道，逗号分隔")
 
-    p = add("mcp", cmd_mcp, "MCP 服务登记：list / import [--all | 登记ID…] / add <登记ID> / remove <登记ID>；角色的 mcp 字段引用登记 ID")
-    p.add_argument("action", nargs="?", choices=["list", "import", "add", "remove"])
+    p = add("mcp", cmd_mcp, "MCP 服务登记：list / import [--all | 登记ID…] / add <登记ID> / remove <登记ID> / enable|disable <登记ID> --project <项目ID>；--project 按项目看和导入")
+    p.add_argument("action", nargs="?", choices=["list", "import", "add", "remove", "enable", "disable"])
     p.add_argument("names", nargs="*")
     p.add_argument("--all", action="store_true", help="import：导入全部候选（同名不同内容的各成一条）")
     p.add_argument("--source", help="import：同名候选出现多处时指明来源")
@@ -1433,13 +1511,15 @@ def build_parser():
     p.add_argument("--url", help="add：remote 的地址")
     p.add_argument("--description", help="add：一句话说明")
     p.add_argument("--name", help="add：下发给执行者的服务名（缺省等于登记 ID）")
+    p.add_argument("--project", help="按项目看 / 导入 / 登记 / 启用：只看该项目的工程来源 + 全局来源，登记归属该项目")
 
-    p = add("skills", cmd_skills, "技能登记：list / import [--all | 登记ID…] / add <登记ID> <目录> / remove <登记ID>；角色的 skills 字段引用登记 ID")
-    p.add_argument("action", nargs="?", choices=["list", "import", "add", "remove"])
+    p = add("skills", cmd_skills, "技能登记：list / import [--all | 登记ID…] / add <登记ID> <目录> / remove <登记ID> / enable|disable <登记ID> --project <项目ID>；--project 按项目看和导入")
+    p.add_argument("action", nargs="?", choices=["list", "import", "add", "remove", "enable", "disable"])
     p.add_argument("names", nargs="*")
     p.add_argument("--all", action="store_true", help="import：导入全部候选（同名不同内容的各成一条）")
     p.add_argument("--source", help="import：同名候选出现多处时指明来源")
     p.add_argument("--name", help="add：技能名（缺省取目录名）")
+    p.add_argument("--project", help="按项目看 / 导入 / 登记 / 启用：只看该项目的工程来源 + 全局来源，登记归属该项目")
 
     p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID> / pool <角色> <模型短名>=<比例> …")
     p.add_argument("action", nargs="?", choices=["list", "show", "add", "pool"])

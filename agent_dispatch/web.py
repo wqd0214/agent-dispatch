@@ -368,6 +368,44 @@ def read_log(name, offset):
     return {"offset": offset + len(chunk), "text": chunk.decode("utf-8", errors="replace")}
 
 
+def registry_page(kind, project_query):
+    """MCP / 技能页的数据：project_query 为空是全局视图（只看全局登记），
+    否则该项目的 + 全局的，并带本项目是否管理、启用清单、各角色有没有单独覆盖。"""
+    project = definitions.load_project(project_query) if project_query else None
+    reg = registry.load_mcp() if kind == "mcp" else registry.load_skills()
+    scope = project["id"] if project else ""
+    entries = []
+    for reg_id, entry in sorted(registry.entries_for(reg, scope).items()):
+        item = {"id": reg_id, "name": entry.get("name") or reg_id, "project": registry.entry_project(entry),
+                "sources": entry.get("sources") or [], "used_by": registry.used_by(kind, reg_id)}
+        if kind == "mcp":
+            item.update(registry.mask_entry(entry))
+        else:
+            item.update(entry)
+        entries.append(item)
+    defaults = (project.get("defaults") or {}) if project else {}
+    roles = []
+    for role in definitions.list_roles(project):
+        field = definitions.role_detail(project, role["role"])["fields"].get(kind)
+        # 角色层自己写了这个字段 = 单独配置；否则跟随项目默认（或全局层）
+        own_layer = "项目" if project else "本机全局"
+        roles.append({"id": role["role"], "title": role["title"], "managed": field is not None,
+                      "value": field["value"] if field else None, "override": bool(field) and field["source"] == own_layer,
+                      "source": field["source"] if field else None})
+    return {"entries": entries, "managed": kind in defaults, "enabled": defaults.get(kind) or [], "roles": roles}
+
+
+def registry_candidates(kind, project_query):
+    """候选拉取：project_query 为 None 时看全部来源（兼容旧调用），空串只看全局，否则该项目 + 全局。"""
+    groups = (registry.mcp_candidates if kind == "mcp" else registry.skill_candidates)(project=project_query)
+    if kind == "mcp":
+        return [dict(group, variants=[dict(v, entry=registry.mask_entry(v["entry"]),
+                                            diff={k: registry.mask_any(x) for k, x in v["diff"].items()})
+                                      for v in group["variants"]])
+                for group in groups]
+    return groups
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         if os.environ.get("AGENT_DISPATCH_ACCESS_LOG"):  # 排障用：记下每个请求和发起方
@@ -408,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
-        query = urllib.parse.parse_qs(url.query)
+        query = urllib.parse.parse_qs(url.query, keep_blank_values=True)  # project= 空串表示「只要全局来源」
         parts = [urllib.parse.unquote(p) for p in url.path.split("/") if p]
         ui = ui_dist_dir()
         try:
@@ -436,20 +474,15 @@ class Handler(BaseHTTPRequestHandler):
                 project = definitions.load_project(query["project"][0]) if query.get("project") else None
                 return self.send_json(definitions.role_detail(project, parts[3]))
             if parts == ["api", "mcp"]:
-                return self.send_json({"mcp": [{"id": reg_id, "name": entry.get("name") or reg_id,
-                                                **registry.mask_entry(entry), "used_by": registry.used_by("mcp", reg_id)}
-                                               for reg_id, entry in sorted(registry.load_mcp().items())]})
+                page = registry_page("mcp", query.get("project", [""])[0])
+                return self.send_json({"mcp": page.pop("entries"), **page})
             if parts == ["api", "mcp", "candidates"]:
-                return self.send_json({"candidates": [dict(group, variants=[dict(v, entry=registry.mask_entry(v["entry"]),
-                                                                                diff={k: registry.mask_any(x) for k, x in v["diff"].items()})
-                                                                       for v in group["variants"]])
-                                                       for group in registry.mcp_candidates()]})
+                return self.send_json({"candidates": registry_candidates("mcp", query.get("project", [None])[0])})
             if parts == ["api", "skills"]:
-                return self.send_json({"skills": [{"id": reg_id, "name": entry.get("name") or reg_id, **entry,
-                                                   "used_by": registry.used_by("skills", reg_id)}
-                                                   for reg_id, entry in sorted(registry.load_skills().items())]})
+                page = registry_page("skills", query.get("project", [""])[0])
+                return self.send_json({"skills": page.pop("entries"), **page})
             if parts == ["api", "skills", "candidates"]:
-                return self.send_json({"candidates": registry.skill_candidates()})
+                return self.send_json({"candidates": registry_candidates("skills", query.get("project", [None])[0])})
             if parts == ["api", "dispatch-options"]:
                 return self.send_json(dispatch_options())
             if parts == ["api", "models"]:
@@ -562,23 +595,28 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "mcp"]:
                 if not data.get("name") or not isinstance(data.get("entry"), dict):
                     raise store.DispatchError("要有 name（登记 ID）和 entry（条目定义）")
-                registry.save_mcp(data["name"].strip(), data["entry"])
+                registry.save_mcp(data["name"].strip(), data["entry"], project=data.get("project") or None)
                 return self.send_json({"ok": True})
             if parts == ["api", "mcp", "import"]:
                 selections = data.get("selections") or data.get("names") or []
                 if not isinstance(selections, list) or not selections:
                     raise store.DispatchError("要有 names（登记 ID / 服务名数组）或 selections（[{name, source}]）")
-                return self.send_json({"added": registry.import_mcp(selections)})
+                if data.get("project"):
+                    definitions.load_project(data["project"])  # 项目不存在时给出明确错误
+                return self.send_json({"added": registry.import_mcp(selections, project=data.get("project") or None)})
             if parts == ["api", "skills"]:
                 if not data.get("name") or not data.get("path"):
                     raise store.DispatchError("要有 name（登记 ID）和 path（技能目录）")
-                registry.save_skill(data["name"].strip(), data["path"], data.get("skill_name"))
+                registry.save_skill(data["name"].strip(), data["path"], data.get("skill_name"),
+                                    project=data.get("project") or None)
                 return self.send_json({"ok": True})
             if parts == ["api", "skills", "import"]:
                 selections = data.get("selections") or data.get("names") or []
                 if not isinstance(selections, list) or not selections:
                     raise store.DispatchError("要有 names（登记 ID / 技能名数组）或 selections（[{name, source}]）")
-                return self.send_json({"added": registry.import_skills(selections)})
+                if data.get("project"):
+                    definitions.load_project(data["project"])
+                return self.send_json({"added": registry.import_skills(selections, project=data.get("project") or None)})
             if parts == ["api", "pools"]:
                 project = definitions.load_project(data["project"]) if data.get("project") else None
                 pool = data.get("pool") or []

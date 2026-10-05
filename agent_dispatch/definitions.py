@@ -146,10 +146,34 @@ def update_project(project_id, name=None, default_role=None, defaults=None):
         find_role_id(load_project(project_id), default_role)  # 角色不存在就拒
         data["default_role"] = default_role
     if defaults is not None:
-        _check_field_values(load_project(project_id), defaults)
-        data["defaults"] = {**(data.get("defaults") or {}), **defaults}
+        # 值为 None 表示删掉这个字段（恢复未管理）；其余按正常校验后合并
+        removals = [k for k, v in defaults.items() if v is None]
+        checked = {k: v for k, v in defaults.items() if v is not None}
+        _check_field_values(load_project(project_id), checked)
+        merged = {**(data.get("defaults") or {}), **checked}
+        for key in removals:
+            merged.pop(key, None)
+        if merged:
+            data["defaults"] = merged
+        else:
+            data.pop("defaults", None)
     _write_json(_project_file(project_id), data)
     return _project_file(project_id)
+
+
+def set_project_enabled(project_id, key, reg_id, enabled):
+    """调整项目 defaults 里 mcp / skills 启用清单的一项（写入时字段不存在就新建，即开始管理）。"""
+    if key not in ("mcp", "skills"):
+        raise DispatchError(f"只能调整 mcp / skills，不是 {key!r}")
+    from . import registry
+    project = load_project(project_id)
+    reg = registry.load_mcp() if key == "mcp" else registry.load_skills()
+    if reg_id not in registry.entries_for(reg, project_id):
+        raise DispatchError(f"{reg_id} 不在项目 {project_id} 可用的登记条目里"
+                            f"（本项目的 + 全局的）；它归属项目 {registry.entry_project(reg.get(reg_id) or {}) or '未知'}")
+    current = list((project.get("defaults") or {}).get(key) or [])
+    updated = [i for i in current if i != reg_id] + ([reg_id] if enabled else [])
+    update_project(project_id, defaults={key: updated})
 
 
 def remove_repo(project_id, repo_id):
@@ -163,6 +187,19 @@ def remove_repo(project_id, repo_id):
     data = _read_json(_project_file(project_id))
     data.get("repos", {}).pop(repo_id, None)
     _write_json(_project_file(project_id), data)
+
+
+def project_role_layer(project_id):
+    """项目角色层的原始 json（未与全局 / defaults 合并），给引用检查这类逐层判断用。"""
+    directory = os.path.join(project_dir(project_id), "roles")
+    out = {}
+    if os.path.isdir(directory):
+        for filename in sorted(os.listdir(directory)):
+            if filename.endswith(".json"):
+                data = _read_json(os.path.join(directory, filename))
+                if data is not None:
+                    out[filename[:-5]] = data
+    return out
 
 
 def get_supervisor_notes(project_id):
@@ -432,10 +469,17 @@ def _check_field_values(project, fields):
             raise DispatchError(f"{key} 必须是{' MCP 服务' if key == 'mcp' else '技能'}登记 ID 的列表；"
                                 "空列表表示「由 agent-dispatch 管理，一个都不带」")
         known = registry.load_mcp() if key == "mcp" else registry.load_skills()
+        visible = registry.entries_for(known, project["id"] if project else "")
         missing = [n for n in value if n not in known]
         if missing:
             raise DispatchError(f"{key} 里的 {'、'.join(missing)} 还没登记。先导入或登记：agent-dispatch {key} import / add")
-        names = [known[n].get("name") or n for n in value]  # 下发给执行者的服务名，同一个角色里不能重复
+        foreign = [n for n in value if n in known and n not in visible]
+        if foreign:
+            owners = "、".join(sorted({registry.entry_project(known[n]) for n in foreign}))
+            where = f"项目 {project['id']}" if project else "全局角色"
+            raise DispatchError(f"{key} 里的 {'、'.join(foreign)} 归属别的项目（{owners}），{where}不能使用；"
+                                f"重新导入让它们归属本项目，或换本项目的 / 全局的条目")
+        names = [visible[n].get("name") or n for n in value]  # 下发给执行者的服务名，同一个生效集合里不能重复
         for name in sorted(set(names)):
             ids = [n for n in value if (known[n].get("name") or n) == name]
             if len(ids) > 1:
