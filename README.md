@@ -130,12 +130,55 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 - **pi**：技能用 `--no-skills` 加每个选中目录一个 `--skill`，只加载选中的；MCP 用 `PI_CODING_AGENT_DIR`
   指向作业私有的临时 agent 目录——`mcp.json` 从登记表生成，`auth.json` / `models.json` / `sessions` 符号链接
   回 `~/.pi/agent`（绝不复制或改写），并加 `--no-approve` 不读工程 `.pi/mcp.json`。实测这样用户全局与工程级
-  的服务都不会加载；局限：`~/.pi/agent/settings.json` 里配置的扩展包（及其技能）也不加载。
+  的服务都不会加载。角色同时管了技能时，`~/.pi/agent/settings.json` 里配置的扩展包（及其技能）也不加载；
+  只管 MCP、不管技能时，设置、扩展包与技能照常链接进来，只有 MCP 服务换成选中的那几个。
 - **OpenCode**：`OPENCODE_CONFIG_CONTENT` 注入——`mcp` 段写选中服务的完整定义，工程 `opencode.json` 与
   全局配置里有但本次没选中的服务写「同名完整定义 + enabled:false」关掉（只读这些文件）；技能写 `skills.paths`；
   无头命令加 `--standalone`（env 配置只在独立进程里生效）。局限：无法排除执行者自己的全局技能，只能追加。
 - 派工单预览（`/api/jobs/preview`、`start --dry-run`）和 `status <作业名>` 会列出「本次下发」：管理了哪些
   MCP（name 与登记 ID）、哪些技能、各自的局限说明，凭据一律遮罩；未管理时显示「未管理：执行者使用自己的配置」。
+
+## 环境、角色继承与角色并发
+
+这一节的字段都可以不写，不写就和原先完全一样。项目的两项直接写在 `project.json` 里，角色的写在角色定义里。
+
+**环境**：项目登记有哪些环境，派工时用 `--env` 选一个。
+
+```json
+// ~/.agent-dispatch/projects/c2/project.json
+{ "envs": {"382": {"name": "C2-382"}, "225": {"name": "C2-225"}},
+  "limit_groups": {"test": 4} }
+```
+
+- 角色写 `"needs_env": true`：派工不带 `--env` 就拒绝。
+- 角色写 `"repo_by_env": {"382": "t382-pallet", "225": "t225-pallet"}`：不同环境在不同工程（工作树）里干活，
+  不用再靠 `--repo` 记哪个目录对应哪个环境。
+- 角色 `mcp` 里的登记 ID 可以写 `{{env}}`，派工时换成所选环境：`"mcp": ["wms-db@{{env}}", "pw-pc", "pw-pda"]`。
+  登记时每个环境各登记一条、`--name` 取同一个服务名，执行者看到的名字就不随环境变。
+- 登记条目的 `command` / `args` / `env` / `url` / `headers` 里可以写占位符
+  `{{env}}` `{{job}}` `{{role}}` `{{project}}` `{{repo}}` `{{cwd}}`，下发时按这张单填。例如浏览器目录写成
+  `/tmp/pw-{{project}}-{{env}}-{{role}}-pc`，一条登记就能让每个角色在每个环境各用一个独立目录。
+- 所选环境以环境变量 `AGENT_DISPATCH_ENV` 传给执行者，派工单模板里可用 `{{env}}`。
+  工程里的工具读这个变量决定连哪套环境，工作树本身不用为换环境改文件。
+
+**角色继承**：角色写 `"extends": "<另一个角色ID>"`，只写要改的项；派工单模板、闸门、模型池等没写的都沿用
+那个角色的。一条业务线一个角色时用它，免得几份几乎一样的定义各改各的。
+
+**角色并发上限**：
+
+- 角色写 `"max_parallel": 1`：同一角色在同一环境里最多同时 1 张单，不同环境互不占用。不写就不限制。
+- 角色写 `"limit_group": "test"`，项目 `limit_groups` 里给这个分组一个上限：分组内的角色合计不超过它
+  （例如所有测试角色合计最多 4 张，用来封住同时开着的浏览器数量）。
+- 满了不报错，新单进入排队，有空位后按排队先后自动开始；`status` 里写明在等谁。
+- 「占着位置」的作业：运行中、人工持有，或 tmux 界面还开着的。
+
+**回合结束即释放**：角色写 `"release_on_done": true`，tmux 方式下回合一结束就关界面，它拉起的 MCP 服务和
+浏览器跟着退出，通道与并发位置随即空出来；续派（reply）时用同一个会话 ID 重开界面，对话上下文还在，
+浏览器里的页面状态不保留。不写则维持原先的行为：界面留到验收、驳回或叫停。
+
+```bash
+agent-dispatch start smoke-1 -P c2 -r tester-pallet --env 382 -f 任务.md
+```
 
 ## 快速开始
 

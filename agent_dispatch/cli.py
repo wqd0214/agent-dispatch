@@ -14,7 +14,7 @@ import time
 import unicodedata
 import webbrowser
 
-from . import backends, definitions, gates, inject, models, runner, store, tmux
+from . import backends, definitions, gates, inject, limits, models, runner, store, tmux
 from .store import DispatchError, identify_dispatcher, touch_session, who_dispatches
 
 STATE_LABEL = {"running": "运行中", "queued": "排队中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
@@ -60,9 +60,10 @@ def select_config(a):
         if a.repo:
             raise DispatchError("--repo 要和项目一起用：加 --project，或在项目的某个工程目录里执行")
         return definitions.resolve(None, a.role) if a.role else {"name": "default"}
+    definitions.check_env(project, getattr(a, "env", None))
     role = a.role or project.get("default_role")
     if role:
-        return definitions.resolve(project, role, a.repo, detected_repo)
+        return definitions.resolve(project, role, a.repo, detected_repo, getattr(a, "env", None))
     repo = a.repo or detected_repo or (next(iter(project["repos"])) if len(project["repos"]) == 1 else None)
     if not repo:
         raise DispatchError(f"项目 {project['id']} 有多个工程，请用 --role 指定角色或用 --repo 指明工程：{'、'.join(project['repos'])}")
@@ -71,7 +72,7 @@ def select_config(a):
     return definitions.bare(project, repo)
 
 
-def render_brief(profile, task, job_name, channels, cwd):
+def render_brief(profile, task, job_name, channels, cwd, env=None):
     path = profile.get("_brief_path") or (os.path.join(profile["_dir"], profile["brief_template"]) if profile.get("brief_template") else None)
     if not path:
         return task
@@ -80,7 +81,7 @@ def render_brief(profile, task, job_name, channels, cwd):
         raise DispatchError(f"派工单模板不存在：{path}")
     values = {"task": task, "job": job_name, "channels": "、".join(channels) if channels else "（未分配浏览器通道）",
               "role": profile.get("title") or "", "project": profile.get("group") or "", "repo": profile.get("project") or "",
-              "cwd": cwd}
+              "cwd": cwd, "env": env or "（未指定环境）"}
     for key, value in values.items():
         text = text.replace("{{" + key + "}}", value)
     return text
@@ -132,6 +133,7 @@ def reconcile(job):
         store.save(job)
     if not tmux.alive(job.get("tmux")):
         store.release_channels(store.channel_ns(job), job.get("channels"), job["name"])
+    runner.promote_queued()  # 它占的模型与并发位置空出来了，让排队的补上
     return job
 
 
@@ -226,6 +228,11 @@ def cmd_start(a):
     if store.exists(a.job):
         raise DispatchError(f"作业 {a.job} 已存在：续派用 reply，重新开始请换个作业名")
     profile = select_config(a)
+    env = a.env or None
+    if profile.get("needs_env") and not env:
+        envs = (definitions.load_project(profile["project_id"])["envs"] if profile.get("project_id") else {})
+        raise DispatchError(f"角色 {profile.get('title') or profile.get('role')} 派工时必须用 --env 指明环境"
+                            + (f"，可选：{'、'.join(envs)}" if envs else ""))
     cwd = a.cwd or profile.get("cwd")
     if not cwd:
         raise DispatchError("没有工作目录：用 --project/--role 指定项目和角色，或显式给 --cwd")
@@ -256,7 +263,7 @@ def cmd_start(a):
     task = read_task(a)
     if not task:
         raise DispatchError("任务为空（用位置参数、-f 文件或标准输入传入）")
-    inject_sel = inject.selection(profile)  # 角色管了 MCP / 技能时，派工命令要附带下发参数
+    inject_sel = inject.selection(profile, env)  # 角色管了 MCP / 技能时，派工命令要附带下发参数
     inject_desc = inject.describe(inject_sel, backend["format"])
     for followed in a.follows or []:  # 关联：这张单是因为那张单才派的
         if not store.exists(followed):
@@ -269,7 +276,9 @@ def cmd_start(a):
             raise DispatchError("本机没有 tmux，不能用 tmux 方式（改用 --mode headless）")
         backends.build_interactive_argv(backend, {"name": a.job, "backend": backend_name, "model": model,
                                                   "session_id": session_id}, task)
-    brief = render_brief(profile, task, a.job, channels, cwd)
+    brief = render_brief(profile, task, a.job, channels, cwd, env)
+    limit_fields = {"env": env, "max_parallel": profile.get("max_parallel"), "limit_group": profile.get("limit_group"),
+                    "release_on_done": bool(profile.get("release_on_done"))}
     if a.dry_run:
         if a.json:
             namespace = profile.get("channel_ns") or profile["name"]
@@ -279,7 +288,10 @@ def cmd_start(a):
                 "brief": brief, "job": a.job, "project": profile.get("group") or "",
                 "repo": profile.get("project") or "", "role": profile.get("role"),
                 "role_title": profile.get("title"), "backend": backend_name, "model": model,
-                "model_alias": model_alias, "mode": mode, "cwd": cwd,
+                "model_alias": model_alias, "mode": mode, "cwd": cwd, "env": env,
+                "limit_waiting": limits.blocked({"name": a.job, "project_id": profile.get("project_id"),
+                                                 "role": profile.get("role"), "role_title": profile.get("title"),
+                                                 **limit_fields}),
                 "channels": channels, "channels_busy": busy,
                 "inject": inject_desc,
             }, ensure_ascii=False))
@@ -310,6 +322,7 @@ def cmd_start(a):
         "timeout_min": a.timeout if a.timeout is not None else profile.get("timeout_min"),
         "backend_args": backend_args(profile, backend_name),
         "inject": inject.summarize(inject_sel),
+        **limit_fields,
         "created": store.now(), "created_ts": now_ts, "turn_started": store.now(), "turn_started_ts": now_ts,
         "runner_pid": os.getpid(),  # 运行器接管前先用本进程占位，避免被判成意外中断
         "turns": [], "decisions": [],
@@ -335,16 +348,20 @@ def cmd_start(a):
             queued_waiting = [(backend_name, model)]
         job.update(backend=backend_name, model=model, model_alias=model_alias,
                    backend_args=backend_args(profile, backend_name))
-        if queued_waiting:
-            job.update(state="queued", runner_pid=None,
-                       waiting_models=[{"backend": b, "id": mid, "alias": models.alias_of(b, mid)} for b, mid in queued_waiting])
+        limit_waiting = limits.blocked(job)  # 角色 / 分组的并发上限：满了也排队，不报错
+        if queued_waiting or limit_waiting:
+            job.update(state="queued", runner_pid=None, waiting_limit=limit_waiting,
+                       waiting_models=[{"backend": b, "id": mid, "alias": models.alias_of(b, mid)}
+                                       for b, mid in queued_waiting or []] or None)
         store.save(job)
     store.write_text(store.job_path(a.job, "brief.md"), brief)
-    if queued_waiting:
+    env_note = f" 环境={env}" if env else ""
+    if queued_waiting or limit_waiting:
         store.write_text(store.job_path(a.job, "turns", f"{job['turn']}.task.md"), brief)
         who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
-        store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model} 通道={','.join(channels) or '无'}")
-        store.info(f"模型并发已满，作业进入排队：等 {waiting_text(job)}。有模型空出来会自动开始，不需要重派")
+        store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model}{env_note} 通道={','.join(channels) or '无'}")
+        store.info(f"{'角色并发' if limit_waiting else '模型并发'}已满，作业进入排队：等 {waiting_text(job)}。"
+                   "有空位会自动开始，不需要重派")
     else:
         try:
             launch(job, brief)
@@ -353,7 +370,7 @@ def cmd_start(a):
             raise
         who = f"角色={job['role_title']} 工程={job['project']}  " if job.get("role") else ""
         picked_note = f"（按模型池选中 {model_alias}）" if model_alias else ""
-        store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model}{picked_note} 通道={','.join(channels) or '无'}")
+        store.info(f"已派出 {a.job}  {who}方式={mode} 后端={backend_name} 模型={model}{picked_note}{env_note} 通道={','.join(channels) or '无'}")
     if a.batch:
         meta = store.register_batch(a.batch, a.batch_title, a.batch_reason, job["dispatcher"])
         if not (meta or {}).get("title"):
@@ -385,13 +402,18 @@ def cmd_reply(a):
             profile = load_profile(job["profile"])
             now_ts = time.time()
             full_text = task + (profile.get("reply_suffix") or "")
-            if models.busy(job["backend"], job["model"]):
+            model_busy = models.busy(job["backend"], job["model"])
+            # 界面已关（回合结束就释放的角色）时，位置可能已被别的单占了；界面还开着就仍算它自己的位置
+            limit_waiting = None if tmux.alive(job.get("tmux")) else limits.blocked(job)
+            if model_busy or limit_waiting:
                 # 会话在那个模型上，满了就排队等，不换模型
                 queued = True
                 key = (job["backend"], job["model"])
                 job.update(state="queued", status=None, reason=None, turn=job["turn"] + 1, gate=None, needs_user=None,
                            follow=False, turn_started=store.now(), turn_started_ts=now_ts, runner_pid=None,
-                           waiting_models=[{"backend": key[0], "id": key[1], "alias": models.alias_of(*key)}])
+                           waiting_limit=limit_waiting,
+                           waiting_models=[{"backend": key[0], "id": key[1], "alias": models.alias_of(*key)}]
+                           if model_busy else None)
                 decide(job, "reply", task[:300])
                 store.save(job)
                 store.write_text(store.job_path(a.job, "turns", f"{job['turn']}.task.md"), full_text)
@@ -401,7 +423,7 @@ def cmd_reply(a):
                 decide(job, "reply", task[:300])
                 store.save(job)
     if queued:
-        store.info(f"已续派 {a.job} 第 {job['turn']} 轮，但模型并发已满，排队中：等 {waiting_text(job)}。空出来会自动开始")
+        store.info(f"已续派 {a.job} 第 {job['turn']} 轮，但并发已满，排队中：等 {waiting_text(job)}。空出来会自动开始")
         return 0
     if not backends.enabled(job["backend"]):
         store.info(f"注意：派工工具 {job['backend']} 已停用。续派仍在原会话里进行；新派工不会再用它")
@@ -465,8 +487,10 @@ def summary_line(job):
 
 
 def waiting_text(job):
-    """排队中的作业在等哪些模型空出来，如「pi:glm-flash、opencode:glm-5」。"""
-    return "、".join(f"{w.get('backend')}:{w.get('alias') or w.get('id')}" for w in job.get("waiting_models") or []) or "模型空位"
+    """排队中的作业在等什么：角色 / 分组的并发空位，或哪些模型空出来（如「pi:glm-flash、opencode:glm-5」）。"""
+    parts = [job["waiting_limit"]] if job.get("waiting_limit") else []
+    parts += [f"{w.get('backend')}:{w.get('alias') or w.get('id')}" for w in job.get("waiting_models") or []]
+    return "、".join(parts) or "模型空位"
 
 
 def cmd_wait(a):
@@ -580,7 +604,7 @@ def print_job_detail(job):
           + (f"   角色 {job['role_title']}（{job['role']}）" if job.get("role") else ""))
     print(f"状态      {STATE_LABEL.get(job['state'], job['state'])}   STATUS={job.get('status') or '-'}   第 {job['turn']} 轮   耗时 {elapsed(job)}")
     if job.get("state") == "queued":
-        print(f"排队      在等 {waiting_text(job)} 空出来；空出后自动开始，不需要重派")
+        print(f"排队      在等 {waiting_text(job)}；空出后自动开始，不需要重派")
     if job.get("reason"):
         print(f"原因      {job['reason']}")
     print(f"后端      {job['backend']}  {job['model']}" + (f"（{job['model_alias']}，按模型池选中）" if job.get("model_alias") else "")
@@ -588,6 +612,8 @@ def print_job_detail(job):
     for attempt in job.get("model_attempts") or []:
         print(f"  换过模型 [{attempt['at']}] {attempt['model']} → 原因：{attempt['reason']}")
     print(f"目录      {job['cwd']}")
+    if job.get("env"):
+        print(f"环境      {job['env']}")
     print(f"通道      {','.join(job.get('channels') or []) or '-'}")
     print(f"会话      {job.get('session_id') or '（尚未取得）'}")
     dispatcher = job.get("dispatcher")
@@ -694,7 +720,7 @@ def stop_job(name):
             job = store.load(name)
             if job.get("state") == "queued":
                 job.update(state="stopped", reason="被叫停（排队中，尚未开始）", ended=store.now(),
-                           ended_ts=time.time(), waiting_models=None, runner_pid=None)
+                           ended_ts=time.time(), waiting_models=None, waiting_limit=None, runner_pid=None)
                 store.save(job)
         return job, True
     if job["state"] != "running":
@@ -727,6 +753,7 @@ def cmd_stop(a):
         if tmux.alive(job.get("tmux")) and job["state"] != "held":
             close_session(job)
             inject.cleanup(a.job)
+            runner.promote_queued()
             store.info(f"作业 {a.job} 本轮已结束（{STATE_LABEL.get(job['state'], job['state'])}），已关闭它的界面并释放通道")
             return 0
         inject.cleanup(a.job)  # 下发文件里含凭据，叫停就删；续派时会重新生成
@@ -775,6 +802,7 @@ def cmd_release(a):
         store.save(job)
     if not tmux.alive(job.get("tmux")):
         store.release_channels(store.channel_ns(job), job.get("channels"), a.job)
+    runner.promote_queued()
     store.info(f"{a.job} 已交还，当前状态：{STATE_LABEL.get(job['state'], job['state'])}")
     return 0
 
@@ -819,6 +847,7 @@ def cmd_accept(a):
         store.save(job)
     close_session(job)
     inject.cleanup(a.job)  # 下发文件里含凭据，作业结束就删
+    runner.promote_queued()  # 界面关了，角色并发的位置空出来
     store.info(f"{a.job} 已验收")
     return 0
 
@@ -833,6 +862,7 @@ def cmd_reject(a):
         store.save(job)
     close_session(job)
     inject.cleanup(a.job)  # 下发文件里含凭据，作业结束就删
+    runner.promote_queued()
     store.info(f"{a.job} 已驳回")
     return 0
 
@@ -1408,6 +1438,8 @@ def build_parser():
     p.add_argument("--project", "-P", help="项目 ID 或名称（在项目的工程目录里执行时可省略，自动识别）")
     p.add_argument("--role", "-r", help="角色 ID 或称呼，如 tester / 测试工程师（见 agent-dispatch roles）")
     p.add_argument("--repo", help="工程 ID：角色负责多个工程时用它指明")
+    p.add_argument("--env", "-e", help="环境 ID（项目 envs 里登记的）：决定下发哪套环境的 MCP 服务、在哪个工程里干活，"
+                                       "并以 AGENT_DISPATCH_ENV 传给执行者")
     p.add_argument("--profile", "-p", help="早先的 profile 名（已被 --project/--role 取代）")
     p.add_argument("--backend", "-b", help="后端：pi / opencode …（默认取角色定义）")
     p.add_argument("--model", "-m", help="模型（默认取角色定义或后端默认）")

@@ -2423,6 +2423,180 @@ class ModelLimitTest(DispatchBase):
             self.ok("web", "stop")
 
 
+class RoleEnvLimitTest(DispatchBase):
+    """环境维度、角色继承、角色并发上限、回合结束即释放、按环境下发 MCP。字段都不写时行为与原先一样（其余用例覆盖）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.make_project()
+        self.env2_dir = os.path.join(self.tmp, "app-e2")
+        os.makedirs(os.path.join(self.env2_dir, "runs"))
+        self.ok("projects", "add-repo", "p1", f"app2={self.env2_dir}")
+        self.project_file = os.path.join(self.home, "projects", "p1", "project.json")
+        with open(self.project_file) as f:
+            data = json.load(f)
+        data["envs"] = {"e1": {"name": "环境一"}, "e2": {}}
+        data["limit_groups"] = {"test": 1}
+        with open(self.project_file, "w") as f:
+            json.dump(data, f)
+
+    def role(self, role_id, **fields):
+        with open(os.path.join(self.home, "projects", "p1", "roles", f"{role_id}.json"), "w") as f:
+            json.dump(fields, f, ensure_ascii=False)
+
+    def test_extends_inherits_fields_and_brief(self):
+        self.role("qa-line", extends="qa", title="托盘主测试", repos=["app"])
+        self.ok("start", "x1", "-P", "p1", "-r", "托盘主测试", "STATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        job = self.job("x1")
+        self.assertEqual((job["role"], job["role_title"], job["backend"]), ("qa-line", "托盘主测试", "fakepi"))
+        with open(os.path.join(self.home, "jobs", "x1", "brief.md")) as f:
+            self.assertIn("你是托盘主测试", f.read())  # 模板沿用 qa 的，称呼是自己的
+        self.assertNotIn("没有配置闸门", self.cli("gate", "x1").stderr)  # 闸门也继承
+        shown = self.ok("roles", "show", "qa-line", "-P", "p1").stdout
+        self.assertIn("托盘主测试", shown)
+
+    def test_extends_cycle_and_missing_base_rejected(self):
+        self.role("a", extends="b", repos=["app"])
+        self.role("b", extends="a", repos=["app"])
+        result = self.cli("start", "x1", "-P", "p1", "-r", "a", "STATUS: PASS")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("成环", result.stderr)
+        self.role("c", extends="nope", repos=["app"])
+        result = self.cli("start", "x2", "-P", "p1", "-r", "c", "STATUS: PASS")
+        self.assertIn("不存在的角色", result.stderr)
+
+    def test_env_required_validated_and_passed_to_executor(self):
+        self.role("t-line", extends="qa", title="线测试", needs_env=True, repo_by_env={"e1": "app", "e2": "app2"})
+        missing = self.cli("start", "x1", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("--env", missing.stderr)
+        unknown = self.cli("start", "x1", "-P", "p1", "-r", "t-line", "--env", "e9", "STATUS: PASS")
+        self.assertIn("没有环境", unknown.stderr)
+        self.ok("start", "x1", "-P", "p1", "-r", "t-line", "--env", "e2", "INJECTDUMP\nSTATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        job = self.job("x1")
+        self.assertEqual((job["env"], job["cwd"], job["repo"]), ("e2", self.env2_dir, "app2"))  # 环境决定工程
+        self.assertEqual(job["report"]["AD_ENV"], "e2")
+        self.assertIn("环境      e2", self.ok("status", "x1").stdout)
+        self.ok("start", "x0", "-P", "p1", "-r", "dev", "INJECTDUMP\nSTATUS: PASS")  # 不带环境的角色照旧
+        self.ok("wait", "x0", "--timeout", "20")
+        self.assertEqual(self.job("x0")["report"]["AD_ENV"], "-")
+
+    def test_max_parallel_counts_per_role_and_env(self):
+        self.role("t-line", extends="qa", title="线测试", needs_env=True, max_parallel=1,
+                  repo_by_env={"e1": "app", "e2": "app2"}, channels="none")
+        self.ok("start", "j1", "-P", "p1", "-r", "t-line", "--env", "e1", "SLEEP 4\nSTATUS: PASS")
+        queued = self.ok("start", "j2", "-P", "p1", "-r", "t-line", "--env", "e1", "STATUS: PASS")
+        self.assertIn("角色并发已满", queued.stderr)
+        job = self.job("j2")
+        self.assertEqual(job["state"], "queued")
+        self.assertIn("线测试", job["waiting_limit"])
+        self.assertIn("j1", job["waiting_limit"])
+        self.assertIn("线测试", self.ok("status").stdout)
+        self.ok("start", "j3", "-P", "p1", "-r", "t-line", "--env", "e2", "STATUS: PASS")  # 另一个环境不受影响
+        self.assertNotEqual(self.job("j3")["state"], "queued")
+        self.ok("wait", "j1", "--timeout", "30")
+        self.ok("wait", "j2", "--timeout", "30")  # j1 结束后自动开始
+        self.assertEqual((self.job("j2")["state"], self.job("j2")["status"]), ("done", "PASS"))
+        self.assertLessEqual(self.job("j1")["turns"][-1]["ended"], self.job("j2")["turns"][0]["started"])
+        self.ok("wait", "j3", "--timeout", "30")
+        # 没写上限的角色不受限
+        self.ok("start", "d1", "-P", "p1", "-r", "dev", "SLEEP 2\nSTATUS: PASS")
+        self.ok("start", "d2", "-P", "p1", "-r", "dev", "SLEEP 2\nSTATUS: PASS")
+        self.assertNotEqual(self.job("d2")["state"], "queued")
+        self.ok("wait", "d1", "--timeout", "30")
+        self.ok("wait", "d2", "--timeout", "30")
+
+    def test_limit_group_caps_roles_together(self):
+        for role_id in ("t-a", "t-b"):
+            self.role(role_id, extends="qa", title=f"测试{role_id}", repos=["app"], channels="none",
+                      max_parallel=1, limit_group="test")
+        self.ok("start", "g1", "-P", "p1", "-r", "t-a", "SLEEP 4\nSTATUS: PASS")
+        self.ok("start", "g2", "-P", "p1", "-r", "t-b", "STATUS: PASS")  # 角色自己有空位，但分组合计上限 1
+        job = self.job("g2")
+        self.assertEqual(job["state"], "queued")
+        self.assertIn("分组 test", job["waiting_limit"])
+        self.ok("stop", "g2")  # 排队中的可以直接叫停
+        self.assertEqual(self.job("g2")["state"], "stopped")
+        self.ok("start", "g3", "-P", "p1", "-r", "t-b", "STATUS: PASS")
+        self.ok("wait", "g1", "--timeout", "30")
+        self.ok("wait", "g3", "--timeout", "30")
+        self.assertEqual(self.job("g3")["status"], "PASS")
+
+    @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
+    def test_release_on_done_closes_session_and_frees_slot(self):
+        self.role("t-line", extends="qa", title="线测试", repos=["app"], channels="all", mode="tmux",
+                  max_parallel=1, release_on_done=True)
+        self.ok("start", "r1", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.ok("start", "r2", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.assertEqual(self.job("r2")["state"], "queued")
+        self.ok("wait", "r1", "--timeout", "40")
+        job = self.job("r1")
+        self.assertEqual((job["state"], job["status"]), ("done", "PASS"))
+        # 回合一结束界面就关了（没等验收），通道与位置都还回来，排队的 r2 自动开始
+        self.assertNotEqual(subprocess.run(["tmux", "has-session", "-t", "=ad-r1"], capture_output=True).returncode, 0)
+        self.ok("wait", "r2", "--timeout", "40")
+        self.assertEqual(self.job("r2")["status"], "PASS")
+        # 返工：同一个会话 ID 重开界面，再跑一轮后又关掉
+        self.ok("reply", "r1", "STATUS: FAIL")
+        self.ok("wait", "r1", "--timeout", "40")
+        job = self.job("r1")
+        self.assertEqual((job["turn"], job["state"], job["status"]), (2, "done", "FAIL"))
+        self.assertNotEqual(subprocess.run(["tmux", "has-session", "-t", "=ad-r1"], capture_output=True).returncode, 0)
+
+    @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
+    def test_tmux_without_release_keeps_slot_until_accept(self):
+        self.role("t-line", extends="qa", title="线测试", repos=["app"], channels="none", mode="tmux",
+                  max_parallel=1, gates=[])
+        self.ok("start", "k1", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.ok("wait", "k1", "--timeout", "40")
+        self.ok("start", "k2", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.assertEqual(self.job("k2")["state"], "queued")  # 界面还开着，位置仍被 k1 占着
+        self.ok("accept", "k1")
+        self.ok("wait", "k2", "--timeout", "40")  # 验收关界面后自动补位
+        self.assertEqual(self.job("k2")["status"], "PASS")
+
+    def test_mcp_selected_by_env_with_placeholders(self):
+        pi_agent = os.path.join(self.tmp, "piagent-src")
+        os.makedirs(os.path.join(pi_agent, "sessions"))
+        for name in ("auth.json", "models.json", "settings.json"):
+            with open(os.path.join(pi_agent, name), "w") as f:
+                f.write("{}")
+        env = {"AGENT_DISPATCH_PI_AGENT_DIR": pi_agent}
+        self.ok("mcp", "add", "db@e1", "--name", "db", "--command", "db-run", "--env", "DSN=mysql://u:p1@h/e1", env_extra=env)
+        self.ok("mcp", "add", "db@e2", "--name", "db", "--command", "db-run", "--env", "DSN=mysql://u:p2@h/e2", env_extra=env)
+        self.ok("mcp", "add", "pw-pc", "--command", "pw-run",
+                "--args=--user-data-dir,/tmp/pw-{{project}}-{{env}}-{{role}}-pc", env_extra=env)
+        with open(self.backends) as f:
+            backends = json.load(f)
+        backends["fakepi2"] = {"format": "pi", "session": "named", "default_model": "m",
+                               "argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}", "{extra}"],
+                               "resume_argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}", "{extra}"]}
+        with open(self.backends, "w") as f:
+            json.dump(backends, f)
+        self.role("t-line", extends="qa", title="线测试", repos=["app"], channels="none", backend="fakepi2",
+                  needs_env=True, mcp=["db@{{env}}", "pw-pc"])
+        self.ok("start", "m1", "-P", "p1", "-r", "t-line", "--env", "e2", "INJECTDUMP\nSTATUS: PASS", env_extra=env)
+        self.ok("wait", "m1", "--timeout", "20")
+        job = self.job("m1")
+        self.assertEqual([s["id"] for s in job["inject"]["mcp"]], ["db@e2", "pw-pc"])
+        agent = job["report"]["PI_DIR"]
+        with open(os.path.join(agent, "mcp.json")) as f:
+            servers = json.load(f)["mcpServers"]
+        self.assertEqual(sorted(servers), ["db", "pw-pc"])
+        self.assertEqual(servers["db"]["env"]["DSN"], "mysql://u:p2@h/e2")
+        self.assertEqual(servers["pw-pc"]["args"], ["--user-data-dir", "/tmp/pw-p1-e2-t-line-pc"])
+        # 只管 MCP 不管技能：用户的设置照常链接进来（重试策略、扩展包不丢）
+        self.assertTrue(os.path.islink(os.path.join(agent, "settings.json")))
+        # 空列表 = 一个服务都不挂
+        self.role("t-none", extends="qa", title="无服务", repos=["app"], channels="none", backend="fakepi2", mcp=[])
+        self.ok("start", "m2", "-P", "p1", "-r", "t-none", "INJECTDUMP\nSTATUS: PASS", env_extra=env)
+        self.ok("wait", "m2", "--timeout", "20")
+        with open(os.path.join(self.job("m2")["report"]["PI_DIR"], "mcp.json")) as f:
+            self.assertEqual(json.load(f)["mcpServers"], {})
+
+
 class WebVersionTest(DispatchBase):
     """代码版本标识：磁盘上的 agent_dispatch/*.py 比进程启动时新，页面和 web status 都要能发现。"""
 

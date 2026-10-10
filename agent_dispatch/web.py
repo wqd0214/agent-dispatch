@@ -112,7 +112,7 @@ def summarize(job, batch_titles=None, session_titles=None, batch_reasons=None):
         "dispatcher": dispatcher, "follows": job.get("follows") or [],
         "task": job.get("task", ""), "needs_user": escalated.get("question") if isinstance(escalated, dict) else escalated, "reason": job.get("reason"),
         "gate_ok": (job.get("gate") or {}).get("ok"), "created": job.get("created"), "mode": job.get("mode", "headless"),
-        "updated": job.get("updated"), "ended": job.get("ended"), "waiting_models": job.get("waiting_models") or [],
+        "updated": job.get("updated"), "ended": job.get("ended"), "waiting_models": job.get("waiting_models") or [], "waiting_limit": job.get("waiting_limit"), "env": job.get("env"),
         "activity": last_log_line(job["name"]) if state == "running" else "",
     }
 

@@ -14,6 +14,19 @@
 
 角色的派工单模板是同目录下的 <角色ID>.brief.md（或在 json 里用 brief_template 指定）。
 解析顺序：全局角色 → 项目的 defaults → 项目角色，后者逐项覆盖前者。
+
+环境与并发（都可不写，不写就和原先完全一样）：
+  项目 project.json
+    envs          {环境ID: {name}}（或只写 ID 列表）：这个项目有哪些环境，派工时用 --env 选一个
+    limit_groups  {分组名: 上限}：同一分组的角色在本项目里合计最多同时几张单
+  角色
+    extends          基于另一个角色，只写要改的项（模板也沿用那个角色的，除非自己另有）
+    needs_env        true = 派工必须带 --env
+    repo_by_env      {环境ID: 工程ID}：不同环境在不同工程（工作树）里干活
+    max_parallel     同一角色在同一环境里最多同时几张单；满了新单排队
+    limit_group      属于项目的哪个并发分组（见 limit_groups）
+    release_on_done  true = tmux 方式下回合一结束就关界面（连同它的 MCP 服务与浏览器），续派时重开
+    mcp              登记 ID 里可以写 {{env}}，派工时换成所选环境（如 wms-db@{{env}}）
 """
 import json
 import os
@@ -74,7 +87,21 @@ def load_project(ref):
         repos[repo_id] = {**repo, "id": repo_id, "cwd": cwd, "name": repo.get("name") or os.path.basename(cwd),
                           "channels": repo.get("channels") or [],
                           "channel_ns": repo.get("channel_namespace") or f"{project_id}.{repo_id}"}
-    return {**data, "id": project_id, "name": data.get("name") or project_id, "repos": repos}
+    envs = data.get("envs") or {}
+    if isinstance(envs, list):
+        envs = {env_id: {} for env_id in envs}
+    envs = {str(env_id): {**(meta or {}), "id": str(env_id), "name": (meta or {}).get("name") or str(env_id)}
+            for env_id, meta in envs.items()}
+    return {**data, "id": project_id, "name": data.get("name") or project_id, "repos": repos, "envs": envs,
+            "limit_groups": dict(data.get("limit_groups") or {})}
+
+
+ENV_TOKEN = "{{env}}"
+
+
+def expand_env(text, env):
+    """登记 ID 里的 {{env}} 换成所选环境；没有占位符的原样返回。"""
+    return text.replace(ENV_TOKEN, env or "") if isinstance(text, str) else text
 
 
 def _project_ids():
@@ -181,7 +208,8 @@ def remove_repo(project_id, repo_id):
     project = load_project(project_id)
     if repo_id not in project["repos"]:
         raise DispatchError(f"项目 {project_id} 没有工程 {repo_id!r}，可选：{'、'.join(project['repos'])}")
-    referencing = [r["role"] for r in list_roles(project) if repo_id in (r.get("repos") or [])]
+    referencing = [r["role"] for r in list_roles(project)
+                   if repo_id in (r.get("repos") or []) or repo_id in (r.get("repo_by_env") or {}).values()]
     if referencing:
         raise DispatchError(f"工程 {repo_id} 还被角色 {'、'.join(referencing)} 引用，先改这些角色的 repos 再删除")
     data = _read_json(_project_file(project_id))
@@ -248,19 +276,47 @@ def _global_role(role_id):
     return {**(shipped or {}), **(local or {})}, local_brief or shipped_brief
 
 
-def _merged_role(project, role_id):
+def _own_layers(project, role_id):
+    """这个角色自己的三层（不含继承来的）：(全局, 全局模板, 项目, 项目模板)。"""
     global_role, global_brief = _global_role(role_id)
     project_role, project_brief = _find_role(_project_role_dirs(project), role_id)
+    return global_role, global_brief, project_role, project_brief
+
+
+def _base_id(project, role_id):
+    global_role, _, project_role, _ = _own_layers(project, role_id)
+    return (project_role or {}).get("extends") or (global_role or {}).get("extends")
+
+
+def _merged_role(project, role_id, _seen=()):
+    global_role, global_brief, project_role, project_brief = _own_layers(project, role_id)
     if global_role is None and project_role is None:
         return None
     merged = {**(global_role or {}), **((project or {}).get("defaults") or {}), **(project_role or {})}
+    own_title = (project_role or {}).get("title") or (global_role or {}).get("title")
+    brief = project_brief or global_brief
+    pool_source = "项目" if (project_role or {}).get("model_pool") else ("全局" if (global_role or {}).get("model_pool") else None)
+    base_id = merged.pop("extends", None)
+    if base_id:
+        if base_id == role_id or base_id in _seen:
+            raise DispatchError(f"角色的 extends 成环了：{' → '.join([*_seen, role_id, base_id])}")
+        base = _merged_role(project, base_id, (*_seen, role_id))
+        if base is None:
+            raise DispatchError(f"角色 {role_id} 的 extends 指向不存在的角色 {base_id!r}")
+        brief = brief or base.get("_brief_path")
+        pool_source = pool_source or base.get("pool_source")
+        inherited = {k: v for k, v in base.items() if k not in ("role", "title", "scope", "pool_source", "_brief_path", "extends")}
+        # 项目 defaults 已经在基角色里生效过；这里只让角色自己写的项盖过基角色
+        merged = {**inherited, **(global_role or {}), **(project_role or {})}
+        merged.pop("extends", None)
     merged.pop("brief_template", None)
     repos = merged.pop("repos", None) or ([merged["repo"]] if merged.get("repo") else [])
     merged.pop("repo", None)
-    pool_source = "项目" if (project_role or {}).get("model_pool") else ("全局" if (global_role or {}).get("model_pool") else None)
-    merged.update(role=role_id, title=merged.get("title") or role_id, repos=repos, pool_source=pool_source,
-                  _brief_path=project_brief or global_brief,
+    merged.update(role=role_id, title=own_title or role_id, repos=repos, pool_source=pool_source,
+                  _brief_path=brief,
                   scope="全局" if project_role is None else ("项目覆盖全局" if global_role else "项目专属"))
+    if base_id:
+        merged["extends"] = base_id
     return merged
 
 
@@ -282,17 +338,28 @@ def list_roles(project=None):
     return [_merged_role(project, role_id) for role_id in _role_ids(_project_role_dirs(project) + GLOBAL_ROLE_DIRS)]
 
 
-def resolve(project, role_ref, repo_id=None, detected_repo=None):
-    """把（项目，角色，工程）解析成一份完整的派工配置。project 可为 None（只用全局角色、自己给目录）。"""
+def check_env(project, env):
+    """--env 的值必须是项目登记过的环境；项目没登记任何环境时不限制。"""
+    envs = (project or {}).get("envs") or {}
+    if env and envs and env not in envs:
+        raise DispatchError(f"项目 {project['id']} 没有环境 {env!r}，可选：{'、'.join(envs)}")
+
+
+def resolve(project, role_ref, repo_id=None, detected_repo=None, env=None):
+    """把（项目，角色，工程，环境）解析成一份完整的派工配置。project 可为 None（只用全局角色、自己给目录）。"""
     role = dict(_merged_role(project, find_role_id(project, role_ref)))
     role["default_channels"] = role.pop("channels", "none")  # 角色里的 channels 是「默认占哪些通道」
     if not project:
         role.update(name=f":{role['role']}", channels=[])
         return role
-    allowed = role["repos"] or list(project["repos"])
-    unknown = [r for r in role["repos"] if r not in project["repos"]]
+    check_env(project, env)
+    by_env = role.get("repo_by_env") or {}
+    allowed = (role["repos"] or ([] if by_env else list(project["repos"]))) + [r for r in by_env.values() if r not in role["repos"]]
+    unknown = [r for r in allowed if r not in project["repos"]]
     if unknown:
         raise DispatchError(f"角色 {role['role']} 指向的工程 {'、'.join(unknown)} 不在项目 {project['id']} 的工程清单里")
+    if not repo_id and env and env in by_env:
+        repo_id = by_env[env]  # 环境决定在哪个工程（工作树）里干活
     if repo_id:
         if repo_id not in project["repos"]:
             raise DispatchError(f"项目 {project['id']} 没有工程 {repo_id!r}，可选：{'、'.join(project['repos'])}")
@@ -302,6 +369,8 @@ def resolve(project, role_ref, repo_id=None, detected_repo=None):
         repo_id = allowed[0]
     elif detected_repo in allowed:
         repo_id = detected_repo
+    elif by_env and not env:
+        raise DispatchError(f"角色 {role['title']} 按环境决定工程，请用 --env 指明环境：{'、'.join(by_env)}")
     else:
         raise DispatchError(f"角色 {role['title']} 负责多个工程，请用 --repo 指明：{'、'.join(allowed)}")
     return with_repo(role, project, repo_id, f"{project['id']}:{role['role']}@{repo_id}")
@@ -417,7 +486,8 @@ def set_pool(project, role_ref, pool):
 # 字段存在（哪怕是空列表）= 由 agent-dispatch 管理，派工时只带这些（注入在后续版本实现）。
 EDITABLE_ROLE_FIELDS = {"title", "description", "repos", "backend", "model", "models", "mode", "channels",
                         "timeout_min", "statuses", "gates", "reply_suffix", "runs_root", "backend_args",
-                        "model_pool", "mcp", "skills"}
+                        "model_pool", "mcp", "skills",
+                        "extends", "needs_env", "repo_by_env", "max_parallel", "limit_group", "release_on_done"}
 
 
 def _layers(project, role_id):
@@ -460,6 +530,7 @@ def _check_field_values(project, fields):
     if fields.get("model_pool"):
         from . import models
         models.check_pool(fields["model_pool"])
+    _check_env_limit_fields(project, fields)
     from . import registry  # 延迟导入避免环
     for key in ("mcp", "skills"):
         if key not in fields:
@@ -470,6 +541,14 @@ def _check_field_values(project, fields):
                                 "空列表表示「由 agent-dispatch 管理，一个都不带」")
         known = registry.load_mcp() if key == "mcp" else registry.load_skills()
         visible = registry.entries_for(known, project["id"] if project else "")
+        if key == "mcp" and any(ENV_TOKEN in n for n in value):
+            # 带 {{env}} 的登记 ID：对项目的每个环境各展开一遍，逐个环境按同样的规则检查
+            envs = list((project or {}).get("envs") or {})
+            if not envs:
+                raise DispatchError("mcp 里用了 {{env}}，但项目还没有登记环境（project.json 的 envs）")
+            for env in envs:
+                _check_field_values(project, {"mcp": [expand_env(n, env) for n in value]})
+            continue
         missing = [n for n in value if n not in known]
         if missing:
             raise DispatchError(f"{key} 里的 {'、'.join(missing)} 还没登记。先导入或登记：agent-dispatch {key} import / add")
@@ -485,6 +564,36 @@ def _check_field_values(project, fields):
             if len(ids) > 1:
                 raise DispatchError(f"{key} 里选了两个同名的{' MCP 服务' if key == 'mcp' else '技能'}：{name}"
                                     f"（{' 与 '.join(ids)}）。执行者按名字调用，一个角色只能留一个")
+
+
+def _check_env_limit_fields(project, fields):
+    """环境、并发、继承相关字段的取值检查。"""
+    if "extends" in fields:
+        base = fields["extends"]
+        if not isinstance(base, str) or not base or _merged_role(project, base) is None:
+            raise DispatchError(f"extends 指向的角色不存在：{base!r}")
+    for key in ("needs_env", "release_on_done"):
+        if key in fields and not isinstance(fields[key], bool):
+            raise DispatchError(f"{key} 只能是 true / false")
+    if "max_parallel" in fields:
+        value = fields["max_parallel"]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise DispatchError("max_parallel 必须是不小于 1 的整数（同一角色在同一环境里最多同时几张单）")
+    if "limit_group" in fields:
+        group = fields["limit_group"]
+        groups = (project or {}).get("limit_groups") or {}
+        if not isinstance(group, str) or group not in groups:
+            raise DispatchError(f"limit_group {group!r} 不在项目的 limit_groups 里（已有：{'、'.join(groups) or '无'}）")
+    if "repo_by_env" in fields:
+        mapping = fields["repo_by_env"]
+        if not project or not isinstance(mapping, dict) or not mapping:
+            raise DispatchError("repo_by_env 必须是「环境ID: 工程ID」的对象，且只能用在项目角色上")
+        bad_env = [e for e in mapping if e not in project["envs"]]
+        bad_repo = [r for r in mapping.values() if r not in project["repos"]]
+        if bad_env:
+            raise DispatchError(f"repo_by_env 里的环境 {'、'.join(bad_env)} 不在项目的 envs 里")
+        if bad_repo:
+            raise DispatchError(f"repo_by_env 里的工程 {'、'.join(bad_repo)} 不在项目的工程清单里")
 
 
 def _layer_dir(project):
@@ -510,6 +619,14 @@ def role_detail(project, role_id):
             merged[key] = value
             sources[key] = label
     pool_source = "项目" if sources.get("model_pool") == "项目" else ("全局" if sources.get("model_pool") else None)
+    base_id = merged.get("extends")
+    if base_id and base_id != role_id and _merged_role(project, base_id) is not None:
+        base = role_detail(project, base_id)
+        for key, field in base["fields"].items():  # 自己没写的项沿用基角色的
+            if key not in merged and key != "title":
+                merged[key] = field["value"]
+                sources[key] = f"继承 {base_id}"
+        pool_source = pool_source or base["pool_source"]
     return {
         "role": role_id,
         "title": merged.get("title") or role_id,
@@ -569,6 +686,11 @@ def get_brief(project, role_id):
         path = _brief_file(directory, data, role_id)
         if os.path.isfile(path):
             return {"text": store.read_text(path, ""), "source": label, "path": path}
+    base_id = _base_id(project, role_id)
+    if base_id and base_id != role_id and _merged_role(project, base_id) is not None:
+        base = get_brief(project, base_id)
+        if base["path"]:
+            return {**base, "source": f"继承 {base_id}"}
     return {"text": None, "source": None, "path": None}
 
 

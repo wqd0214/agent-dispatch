@@ -28,6 +28,11 @@ INJECT_DIR = "inject"
 # 换 agent 目录时符号链接回 ~/.pi/agent 的文件：凭据、模型与会话。
 # 不链接 settings.json / git / npm / extensions：settings 里的扩展包会把用户全局技能带进来
 PI_AGENT_LINKS = ("auth.json", "models.json", "models-store.json", "sessions")
+# 角色只管 MCP、不管技能时再多链接这些：用户的设置（重试策略等）、扩展包与技能照常生效，
+# 只有 MCP 服务换成选中的那几个
+PI_AGENT_LINKS_UNMANAGED_SKILLS = ("settings.json", "extensions", "git", "npm", "skills", "bin", "install")
+# 登记条目里可以写的占位符：派工时按这张单的实际情况填（如每个角色每个环境一个独立的浏览器目录）
+PLACEHOLDERS = ("env", "job", "role", "project", "repo", "cwd")
 
 
 def pi_agent_source():
@@ -49,12 +54,17 @@ def _read_json(path):
 
 # ---------- 角色字段 → 选中的登记条目 ----------
 
-def selection(profile):
-    """角色解析结果 → {mcp: [{id,name,entry}], skills: [{id,name,path}]}；字段不存在 = 不管理。"""
-    from . import registry
+def selection(profile, env=None):
+    """角色解析结果 → {mcp: [{id,name,entry}], skills: [{id,name,path}]}；字段不存在 = 不管理。
+    mcp 的登记 ID 里的 {{env}} 换成这次派工选的环境。"""
+    from . import definitions, registry
     sel = {}
     if "mcp" in (profile or {}):
         reg = registry.load_mcp()
+        ids = list(profile["mcp"] or [])
+        if not env and any(definitions.ENV_TOKEN in i for i in ids):
+            raise DispatchError("这个角色的 MCP 服务按环境选（登记 ID 里有 {{env}}），派工时要用 --env 指明环境")
+        profile = {**profile, "mcp": [definitions.expand_env(i, env) for i in ids]}
         missing = [i for i in profile["mcp"] or [] if i not in reg]
         if missing:
             raise DispatchError(f"角色选的 MCP 服务还没登记：{'、'.join(missing)}。先导入或登记：agent-dispatch mcp import / add")
@@ -99,6 +109,25 @@ def _selection_of_job(job):
 
 # ---------- 生成下发文件 ----------
 
+def _fill(value, values):
+    """把 {{env}} / {{job}} 等占位符填进登记条目的字符串里（列表、对象逐层处理）。"""
+    if isinstance(value, str):
+        for key, text in values.items():
+            value = value.replace("{{" + key + "}}", text)
+        return value
+    if isinstance(value, list):
+        return [_fill(item, values) for item in value]
+    if isinstance(value, dict):
+        return {key: _fill(item, values) for key, item in value.items()}
+    return value
+
+
+def _fill_entry(entry, name, job):
+    values = {"env": job.get("env") or "", "job": name, "role": job.get("role") or "",
+              "project": job.get("project_id") or "", "repo": job.get("repo") or "", "cwd": job.get("cwd") or ""}
+    return {**entry, **{key: _fill(entry[key], values) for key in ("command", "args", "env", "url", "headers") if key in entry}}
+
+
 def _pi_server(entry):
     """登记条目 → pi 的 mcp.json 写法。"""
     if entry.get("type") == "remote" or entry.get("url"):
@@ -138,6 +167,8 @@ def prepare(name, backend, job):
     sel = _selection_of_job(job)
     if not sel:
         return [], {}
+    if "mcp" in sel:  # 占位符按这张单的环境、角色、目录填好
+        sel["mcp"] = [{**s, "entry": _fill_entry(s["entry"], name, job)} for s in sel["mcp"]]
     directory = store.job_path(name, INJECT_DIR)
     shutil.rmtree(directory, ignore_errors=True)
     os.makedirs(directory)
@@ -152,7 +183,8 @@ def prepare(name, backend, job):
             agent = os.path.join(directory, "pi-agent")
             os.makedirs(agent)
             source = pi_agent_source()
-            for item in PI_AGENT_LINKS:
+            links = PI_AGENT_LINKS + (() if "skills" in sel else PI_AGENT_LINKS_UNMANAGED_SKILLS)
+            for item in links:
                 target = os.path.join(source, item)
                 if os.path.exists(target):
                     os.symlink(target, os.path.join(agent, item))

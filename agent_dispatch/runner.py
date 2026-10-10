@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 
-from . import backends, inject, models, store, tmux
+from . import backends, inject, limits, models, store, tmux
 from .store import DispatchError
 
 STATUS_RE = re.compile(r"^[\s>*#-]*STATUS\**\s*[:：]\s*\**\s*([A-Za-z_]+)\**[ \t]*$", re.M)
@@ -156,6 +156,12 @@ def promote_queued():
                 job = store.load(name)
                 if job.get("state") != "queued":
                     continue
+                waiting = limits.blocked(job)  # 角色 / 分组的并发上限还没空位就继续排
+                if waiting:
+                    if waiting != job.get("waiting_limit"):
+                        job["waiting_limit"] = waiting
+                        store.save(job)
+                    continue
                 if job.get("model_pool"):
                     try:  # 排队期间比例可能已变，重新按比例选一个现在有空位的模型
                         alias, picked = models.pick(job["model_pool"], job.get("project_id"), job.get("role"))
@@ -165,7 +171,7 @@ def promote_queued():
                                session_id=backends.initial_session(backends.get(picked["backend"]), name))
                 elif models.busy(job["backend"], job["model"]):
                     continue
-                job.update(state="running", status=None, waiting_models=None, reason=None, gate=None,
+                job.update(state="running", status=None, waiting_models=None, waiting_limit=None, reason=None, gate=None,
                            turn_started=store.now(), turn_started_ts=time.time())
                 store.save(job)
         try:
@@ -220,6 +226,14 @@ def try_failover(name, recorder, reason):
     return True
 
 
+def job_env(name, job, extra=None):
+    """执行者进程的环境变量：是谁的执行者、这次派工选的环境（工程里的工具据此决定连哪套环境）。"""
+    env = {"AGENT_DISPATCH_WORKER": name, **(extra or {})}
+    if job.get("env"):
+        env["AGENT_DISPATCH_ENV"] = job["env"]
+    return env
+
+
 def install_stop(flags, on_stop):
     def handler(*_):
         flags["stopped"] = True
@@ -236,7 +250,7 @@ def run_headless(name, job, backend, task):
     flags = {"stopped": False, "timed_out": False}
     # PWD 必须跟着改：OpenCode 以环境变量 PWD 而不是进程的实际目录来认工作目录
     proc = subprocess.Popen(argv, cwd=job["cwd"],
-                            env=dict(os.environ, PWD=job["cwd"], AGENT_DISPATCH_WORKER=name, **inject_env),
+                            env=dict(os.environ, PWD=job["cwd"], **job_env(name, job, inject_env)),
                             stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
     store.update(name, child_pid=proc.pid)
@@ -335,7 +349,7 @@ def run_tmux(name, job, backend, task):
         argv = backends.build_interactive_argv(backend, job, task, list(job.get("backend_args") or []) + inject_args)
         # tmux 的 opencode 模板自带 env OPENCODE_CONFIG_CONTENT，把下发配置并进那个值，不能各设各的
         inject_env = inject.merge_tmux_opencode(argv, inject_env)
-        tmux.new_session(session, job["cwd"], argv, {"AGENT_DISPATCH_WORKER": name, **inject_env})
+        tmux.new_session(session, job["cwd"], argv, job_env(name, job, inject_env))
         tmux.link_to_hub(session, name)  # 挂进汇总会话：接着汇总会话的终端里会多出这个作业的窗口
     sent_at = time.time()
     deadline = sent_at + job["timeout_min"] * 60 if job.get("timeout_min") else None
@@ -382,8 +396,16 @@ def run_tmux(name, job, backend, task):
         final = next((item["text"] for item in reversed(items) if item["kind"] == "text"), "")
     recorder.final = final
     job = settle(name, turn, recorder, result[0], result[1], None)
+    released = False
+    if job.get("release_on_done") and job.get("state") != "held" and tmux.alive(session):
+        # 回合一结束就关界面：它的 MCP 服务和浏览器跟着退出，内存还回来；续派时用同一个会话 ID 重开
+        tmux.kill(session)
+        inject.cleanup(name)
+        released = True
     if not tmux.alive(session):
         store.release_channels(store.channel_ns(job), job.get("channels"), name)
+    if released:
+        promote_queued()  # 位置是关界面之后才空出来的，落定时那次排队检查还看不到
 
 
 def run(name):
