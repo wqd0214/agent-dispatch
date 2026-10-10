@@ -296,7 +296,8 @@ def describe(sel, fmt):
     if "mcp" in sel:
         note = ("严格模式：换用作业私有的临时 agent 目录（符号链接回 ~/.pi/agent 的凭据与会话），"
                 "只加载选中的服务，用户全局与工程 .pi/mcp.json 里的服务不会加载；"
-                "~/.pi/agent/settings.json 里的扩展包（及其技能）也不加载"
+                + ("~/.pi/agent/settings.json 里的扩展包（及其技能）也不加载" if "skills" in sel else
+                   "技能未管理，用户的设置、扩展包与技能照常加载")
                 if fmt == "pi" else
                 "选中的服务经 OPENCODE_CONFIG_CONTENT 注入；工程 opencode.json 与全局配置里其余服务"
                 "以同名完整定义 + enabled:false 关闭；headless 命令加 --standalone")
