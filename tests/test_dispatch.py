@@ -2435,7 +2435,7 @@ class RoleEnvLimitTest(DispatchBase):
         self.project_file = os.path.join(self.home, "projects", "p1", "project.json")
         with open(self.project_file) as f:
             data = json.load(f)
-        data["envs"] = {"e1": {"name": "环境一"}, "e2": {}}
+        data["envs"] = {"e1": {"name": "环境一"}, "e2": {"vars": {"AT_ENV": "test-e2"}}}
         data["limit_groups"] = {"test": 1}
         with open(self.project_file, "w") as f:
             json.dump(data, f)
@@ -2478,6 +2478,7 @@ class RoleEnvLimitTest(DispatchBase):
         job = self.job("x1")
         self.assertEqual((job["env"], job["cwd"], job["repo"]), ("e2", self.env2_dir, "app2"))  # 环境决定工程
         self.assertEqual(job["report"]["AD_ENV"], "e2")
+        self.assertEqual(job["report"]["AT_ENV"], "test-e2")  # 项目给这个环境配的额外变量
         self.assertIn("环境      e2", self.ok("status", "x1").stdout)
         self.ok("start", "x0", "-P", "p1", "-r", "dev", "INJECTDUMP\nSTATUS: PASS")  # 不带环境的角色照旧
         self.ok("wait", "x0", "--timeout", "20")
@@ -2593,6 +2594,14 @@ class RoleEnvLimitTest(DispatchBase):
         # 只管 MCP 不管技能：用户的设置照常链接进来（重试策略、扩展包不丢），也不强行忽略工程自己的 .pi 资源
         self.assertTrue(os.path.islink(os.path.join(agent, "settings.json")))
         self.assertNotIn("--no-approve", json.loads(job["report"]["ARGV"]))
+        # 环境可选的角色没带 --env：按环境选的服务不下发，其余照常
+        self.role("t-opt", extends="qa", title="环境可选", repos=["app"], channels="none", backend="fakepi2",
+                  mcp=["db@{{env}}", "pw-pc"])
+        started = self.ok("start", "m3", "-P", "p1", "-r", "t-opt", "INJECTDUMP\nSTATUS: PASS", env_extra=env)
+        self.assertIn("本次不下发", started.stderr)
+        self.ok("wait", "m3", "--timeout", "20")
+        with open(os.path.join(self.job("m3")["report"]["PI_DIR"], "mcp.json")) as f:
+            self.assertEqual(list(json.load(f)["mcpServers"]), ["pw-pc"])
         # 空列表 = 一个服务都不挂
         self.role("t-none", extends="qa", title="无服务", repos=["app"], channels="none", backend="fakepi2", mcp=[])
         self.ok("start", "m2", "-P", "p1", "-r", "t-none", "INJECTDUMP\nSTATUS: PASS", env_extra=env)

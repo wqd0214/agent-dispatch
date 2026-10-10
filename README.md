@@ -157,6 +157,9 @@ agent-dispatch skills add my-skill ~/skills/my-skill
   不用再靠 `--repo` 记哪个目录对应哪个环境。
 - 角色 `mcp` 里的登记 ID 可以写 `{{env}}`，派工时换成所选环境：`"mcp": ["wms-db@{{env}}", "pw-pc", "pw-pda"]`。
   登记时每个环境各登记一条、`--name` 取同一个服务名，执行者看到的名字就不随环境变。
+  派工没带 `--env` 时这类条目不下发（不针对某个环境的任务就不挂环境的服务）；要强制带环境用 `needs_env`。
+- 环境可以带 `vars`：`"envs": {"281": {"name": "A04-281", "vars": {"AT_ENV": "test281"}}}`，
+  选中这个环境时这些变量一并传给执行者，用来对接工程自己认的环境名。
 - 登记条目的 `command` / `args` / `env` / `url` / `headers` 里可以写占位符
   `{{env}}` `{{job}}` `{{role}}` `{{project}}` `{{repo}}` `{{cwd}}`，下发时按这张单填。例如浏览器目录写成
   `/tmp/pw-{{project}}-{{env}}-{{role}}-pc`，一条登记就能让每个角色在每个环境各用一个独立目录。

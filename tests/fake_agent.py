@@ -73,6 +73,7 @@ if "INJECTDUMP" in task:  # 按作业下发 MCP / 技能的测试：报告拿到
     reply += f"\nOC_CFG: {os.environ.get('OPENCODE_CONFIG_CONTENT', '-')}"
     reply += f"\nARGV: {json.dumps(sys.argv[1:])}"
     reply += f"\nAD_ENV: {os.environ.get('AGENT_DISPATCH_ENV', '-')}"
+    reply += f"\nAT_ENV: {os.environ.get('AT_ENV', '-')}"
 if "NESTED" in task:  # 执行者试图再派工
     import subprocess
     nested = subprocess.run([sys.executable, "-m", "agent_dispatch", "start", "nested", "--cwd", os.getcwd(), "-b", "fakepi", "x"],

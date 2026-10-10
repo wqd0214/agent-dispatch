@@ -17,7 +17,8 @@
 
 环境与并发（都可不写，不写就和原先完全一样）：
   项目 project.json
-    envs          {环境ID: {name}}（或只写 ID 列表）：这个项目有哪些环境，派工时用 --env 选一个
+    envs          {环境ID: {name, vars}}（或只写 ID 列表）：这个项目有哪些环境，派工时用 --env 选一个；
+                  vars 是选中这个环境时额外传给执行者的环境变量（如工程自己认的环境名）
     limit_groups  {分组名: 上限}：同一分组的角色在本项目里合计最多同时几张单
   角色
     extends          基于另一个角色，只写要改的项（模板也沿用那个角色的，除非自己另有）
@@ -26,7 +27,8 @@
     max_parallel     同一角色在同一环境里最多同时几张单；满了新单排队
     limit_group      属于项目的哪个并发分组（见 limit_groups）
     release_on_done  true = tmux 方式下回合一结束就关界面（连同它的 MCP 服务与浏览器），续派时重开
-    mcp              登记 ID 里可以写 {{env}}，派工时换成所选环境（如 wms-db@{{env}}）
+    mcp              登记 ID 里可以写 {{env}}，派工时换成所选环境（如 wms-db@{{env}}）；
+                     派工没带 --env 时这类条目不下发（要强制带环境就写 needs_env）
 """
 import json
 import os
@@ -90,7 +92,8 @@ def load_project(ref):
     envs = data.get("envs") or {}
     if isinstance(envs, list):
         envs = {env_id: {} for env_id in envs}
-    envs = {str(env_id): {**(meta or {}), "id": str(env_id), "name": (meta or {}).get("name") or str(env_id)}
+    envs = {str(env_id): {**(meta or {}), "id": str(env_id), "name": (meta or {}).get("name") or str(env_id),
+                          "vars": {str(k): str(v) for k, v in ((meta or {}).get("vars") or {}).items()}}
             for env_id, meta in envs.items()}
     return {**data, "id": project_id, "name": data.get("name") or project_id, "repos": repos, "envs": envs,
             "limit_groups": dict(data.get("limit_groups") or {})}

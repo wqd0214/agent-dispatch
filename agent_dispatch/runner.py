@@ -231,6 +231,7 @@ def job_env(name, job, extra=None):
     env = {"AGENT_DISPATCH_WORKER": name, **(extra or {})}
     if job.get("env"):
         env["AGENT_DISPATCH_ENV"] = job["env"]
+        env.update(job.get("env_vars") or {})  # 项目给这个环境配的额外变量（工程自己认的环境名等）
     return env
 
 

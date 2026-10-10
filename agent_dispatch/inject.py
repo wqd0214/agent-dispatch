@@ -62,8 +62,8 @@ def selection(profile, env=None):
     if "mcp" in (profile or {}):
         reg = registry.load_mcp()
         ids = list(profile["mcp"] or [])
-        if not env and any(definitions.ENV_TOKEN in i for i in ids):
-            raise DispatchError("这个角色的 MCP 服务按环境选（登记 ID 里有 {{env}}），派工时要用 --env 指明环境")
+        if not env:  # 没带环境：按环境选的服务这次不下发（角色要求必须带环境的，派工时已先拦下）
+            ids = [i for i in ids if definitions.ENV_TOKEN not in i]
         profile = {**profile, "mcp": [definitions.expand_env(i, env) for i in ids]}
         missing = [i for i in profile["mcp"] or [] if i not in reg]
         if missing:

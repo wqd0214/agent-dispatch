@@ -277,8 +277,14 @@ def cmd_start(a):
         backends.build_interactive_argv(backend, {"name": a.job, "backend": backend_name, "model": model,
                                                   "session_id": session_id}, task)
     brief = render_brief(profile, task, a.job, channels, cwd, env)
-    limit_fields = {"env": env, "max_parallel": profile.get("max_parallel"), "limit_group": profile.get("limit_group"),
-                    "release_on_done": bool(profile.get("release_on_done"))}
+    env_vars = {}
+    if env and profile.get("project_id"):
+        env_vars = (definitions.load_project(profile["project_id"])["envs"].get(env) or {}).get("vars") or {}
+    limit_fields = {"env": env, "env_vars": env_vars, "max_parallel": profile.get("max_parallel"),
+                    "limit_group": profile.get("limit_group"), "release_on_done": bool(profile.get("release_on_done"))}
+    env_scoped = [i for i in profile.get("mcp") or [] if definitions.ENV_TOKEN in i]
+    if env_scoped and not env and not a.dry_run:
+        store.info(f"没带 --env：按环境选的 MCP 服务（{'、'.join(env_scoped)}）本次不下发")
     if a.dry_run:
         if a.json:
             namespace = profile.get("channel_ns") or profile["name"]
