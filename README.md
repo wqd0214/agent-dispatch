@@ -130,9 +130,10 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 
 - **pi**：技能用 `--no-skills` 加每个选中目录一个 `--skill`，只加载选中的；MCP 用 `PI_CODING_AGENT_DIR`
   指向作业私有的临时 agent 目录——`mcp.json` 从登记表生成，`auth.json` / `models.json` / `sessions` 符号链接
-  回 `~/.pi/agent`（绝不复制或改写），并加 `--no-approve` 不读工程 `.pi/mcp.json`。实测这样用户全局与工程级
-  的服务都不会加载。角色同时管了技能时，`~/.pi/agent/settings.json` 里配置的扩展包（及其技能）也不加载；
-  只管 MCP、不管技能时，设置、扩展包与技能照常链接进来，只有 MCP 服务换成选中的那几个。
+  回 `~/.pi/agent`（绝不复制或改写），用户全局的服务不再加载。角色同时管了技能时是严格模式：加 `--no-approve`
+  不读工程 `.pi` 下的任何资源，`~/.pi/agent/settings.json` 里配置的扩展包（及其技能）也不加载。
+  只管 MCP、不管技能时，设置、扩展包、技能和项目信任记录照常链接进来，工程自己的 `.pi` 资源
+  （扩展、技能、`.pi/mcp.json`）照常加载——换掉的只是用户全局那一层的服务。
 - **OpenCode**：`OPENCODE_CONFIG_CONTENT` 注入——`mcp` 段写选中服务的完整定义，工程 `opencode.json` 与
   全局配置里有但本次没选中的服务写「同名完整定义 + enabled:false」关掉（只读这些文件）；技能写 `skills.paths`；
   无头命令加 `--standalone`（env 配置只在独立进程里生效）。局限：无法排除执行者自己的全局技能，只能追加。

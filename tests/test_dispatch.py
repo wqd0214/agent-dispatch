@@ -2590,8 +2590,9 @@ class RoleEnvLimitTest(DispatchBase):
         self.assertEqual(servers["db"]["exposure"], "direct")  # 暴露方式原样带给 pi
         self.assertNotIn("exposure", servers["pw-pc"])
         self.assertEqual(servers["pw-pc"]["args"], ["--user-data-dir", "/tmp/pw-p1-e2-t-line-pc"])
-        # 只管 MCP 不管技能：用户的设置照常链接进来（重试策略、扩展包不丢）
+        # 只管 MCP 不管技能：用户的设置照常链接进来（重试策略、扩展包不丢），也不强行忽略工程自己的 .pi 资源
         self.assertTrue(os.path.islink(os.path.join(agent, "settings.json")))
+        self.assertNotIn("--no-approve", json.loads(job["report"]["ARGV"]))
         # 空列表 = 一个服务都不挂
         self.role("t-none", extends="qa", title="无服务", repos=["app"], channels="none", backend="fakepi2", mcp=[])
         self.ok("start", "m2", "-P", "p1", "-r", "t-none", "INJECTDUMP\nSTATUS: PASS", env_extra=env)

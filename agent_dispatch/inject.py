@@ -29,8 +29,8 @@ INJECT_DIR = "inject"
 # 不链接 settings.json / git / npm / extensions：settings 里的扩展包会把用户全局技能带进来
 PI_AGENT_LINKS = ("auth.json", "models.json", "models-store.json", "sessions")
 # 角色只管 MCP、不管技能时再多链接这些：用户的设置（重试策略等）、扩展包与技能照常生效，
-# 只有 MCP 服务换成选中的那几个
-PI_AGENT_LINKS_UNMANAGED_SKILLS = ("settings.json", "extensions", "git", "npm", "skills", "bin", "install")
+# 项目信任的记录也带上（工程自己的 .pi 扩展、技能照常加载），只有用户全局的 MCP 服务换成选中的那几个
+PI_AGENT_LINKS_UNMANAGED_SKILLS = ("settings.json", "trust.json", "extensions", "git", "npm", "skills", "bin", "install")
 # 登记条目里可以写的占位符：派工时按这张单的实际情况填（如每个角色每个环境一个独立的浏览器目录）
 PLACEHOLDERS = ("env", "job", "role", "project", "repo", "cwd")
 
@@ -194,8 +194,11 @@ def prepare(name, backend, job):
             store.write_text(path, json.dumps({"mcpServers": servers}, ensure_ascii=False, indent=2) + "\n")
             os.chmod(path, 0o600)
             env["PI_CODING_AGENT_DIR"] = agent
-            # 不读工程 .pi/mcp.json（project trust），保证只带选中的服务
-            args.append("--no-approve")
+            if "skills" in sel:
+                # 严格模式：不读工程 .pi 下的任何资源（project trust），保证只带选中的服务与技能
+                args.append("--no-approve")
+            # 只管 MCP 时不加：工程自己的扩展、技能和 .pi/mcp.json 仍按用户已有的信任记录加载，
+            # 换掉的只是用户全局那一层
     elif fmt == "opencode":
         config = {}
         if "mcp" in sel:
@@ -277,7 +280,8 @@ def takeover_prefix(name, backend, job):
             suffix = ["--no-skills"] + [part for s in sel["skills"] for part in ("--skill", s["path"])]
         if "mcp" in sel:
             prefix = [f"PI_CODING_AGENT_DIR={os.path.join(directory, 'pi-agent')}"]
-            suffix = suffix + ["--no-approve"]
+            if "skills" in sel:
+                suffix = suffix + ["--no-approve"]
     else:
         config = os.path.join(directory, "opencode-config.json")
         if os.path.isfile(config):
@@ -295,9 +299,9 @@ def describe(sel, fmt):
     out = {"managed": True}
     if "mcp" in sel:
         note = ("严格模式：换用作业私有的临时 agent 目录（符号链接回 ~/.pi/agent 的凭据与会话），"
-                "只加载选中的服务，用户全局与工程 .pi/mcp.json 里的服务不会加载；"
+                "用户全局的服务不会加载，只带选中的；"
                 + ("~/.pi/agent/settings.json 里的扩展包（及其技能）也不加载" if "skills" in sel else
-                   "技能未管理，用户的设置、扩展包与技能照常加载")
+                   "技能未管理：用户的设置、扩展包与技能照常加载，工程自己的 .pi 资源（含 .pi/mcp.json）按已有的信任记录照常加载")
                 if fmt == "pi" else
                 "选中的服务经 OPENCODE_CONFIG_CONTENT 注入；工程 opencode.json 与全局配置里其余服务"
                 "以同名完整定义 + enabled:false 关闭；headless 命令加 --standalone")
