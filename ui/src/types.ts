@@ -175,7 +175,8 @@ export interface ConfigOverview {
   roles: { id: string; title: string; description: string }[]
 }
 
-export interface PoolEntry { model: string; weight: number }
+/** 模型池一条：priority 数字越小越优先，缺省为 1（最高档） */
+export interface PoolEntry { model: string; weight: number; priority?: number }
 
 export interface RegisteredModel {
   alias: string
@@ -184,7 +185,7 @@ export interface RegisteredModel {
   enabled: boolean
   note: string
   paused: { reason: string; until: number } | null
-  used_by: { project: string; project_name: string; role: string; role_title: string; weight: number }[]
+  used_by: { project: string; project_name: string; role: string; role_title: string; weight: number; priority?: number }[]
   jobs: number
   settled: number
   pass: number

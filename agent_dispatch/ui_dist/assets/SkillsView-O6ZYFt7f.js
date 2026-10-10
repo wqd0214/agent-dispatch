@@ -1,0 +1,1 @@
+import{R as e}from"./RegistryManager-BtqXScUk.js";import{d as o,g as r,o as s}from"./index-C6G3Sf6N.js";const p=o({__name:"SkillsView",setup(a){return(t,n)=>(s(),r(e,{kind:"skills"}))}});export{p as default};

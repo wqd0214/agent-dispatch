@@ -234,7 +234,7 @@ def cmd_start(a):
         raise DispatchError(f"工作目录不存在：{cwd}")
     model_alias = None
     pooled = bool(profile.get("model_pool"))
-    if pooled:  # 模型由角色的模型池按比例决定，主管不能指定
+    if pooled:  # 模型由角色的模型池按优先级和比例决定，主管不能指定
         if a.model or a.backend:
             raise DispatchError(f"角色 {profile.get('title') or profile.get('role')} 的模型由它的模型池按比例决定，"
                                 "不能用 --model / --backend 指定。要调整请改模型池（网页「模型与角色」或 agent-dispatch roles pool）")
@@ -891,7 +891,7 @@ def role_table(project):
     rows = [("角色ID", "称呼", "工程", "模型·方式", "来源", "说明")]
     for role in definitions.list_roles(project):
         repos = "、".join(role["repos"]) or ("（派工时指定）" if project else "-")
-        pool = " ".join(f"{e['model']}={e['weight']}" for e in role.get("model_pool") or [])
+        pool = " ".join(pool_pair(e) for e in role.get("model_pool") or [])
         rows.append((role["role"], role["title"], repos, f"{pool or role.get('backend') or '-'}·{role.get('mode') or 'headless'}",
                      role["scope"], runner.clip(role.get("description") or "", 44)))
     return rows
@@ -916,16 +916,29 @@ def cmd_role(a):
     return 0
 
 
+def pool_pair(entry):
+    """模型池一条的写法：<短名>=<比例>，不是最高档的再带上 @<优先级>。"""
+    priority = models.priority_of(entry)
+    return f"{entry['model']}={entry['weight']}" + (f"@{priority}" if priority != models.DEFAULT_PRIORITY else "")
+
+
 def parse_pool(pairs):
     pool = []
     for pair in pairs:
-        alias, sep, weight = pair.rpartition("=")
+        alias, sep, value = pair.rpartition("=")
         if not sep:
-            raise DispatchError(f"写成 <模型短名>=<比例>，如 pi:glm-5.3-flash=70：{pair!r}")
+            raise DispatchError(f"写成 <模型短名>=<比例>[@<优先级>]，如 pi:glm-5.3-flash=70 或 oc:glm-5=1@2：{pair!r}")
+        weight, at, priority = value.partition("@")
         try:
-            pool.append({"model": alias, "weight": float(weight) if "." in weight else int(weight)})
+            entry = {"model": alias, "weight": float(weight) if "." in weight else int(weight)}
         except ValueError:
             raise DispatchError(f"比例必须是数字：{pair!r}")
+        if at:
+            try:
+                entry["priority"] = int(priority)
+            except ValueError:
+                raise DispatchError(f"优先级必须是整数（1 最优先）：{pair!r}")
+        pool.append(entry)
     return pool
 
 
@@ -936,7 +949,7 @@ def model_table():
     users = {}
     for project_id, role_id, pool in models.all_pools():
         for entry in pool:
-            users.setdefault(entry["model"], []).append(f"{project_id}:{role_id}={entry['weight']}")
+            users.setdefault(entry["model"], []).append(f"{project_id}:{role_id}={pool_pair(entry).rpartition('=')[2]}")
     for alias, model in sorted(registry["models"].items()):
         state = ("停用" if not model.get("enabled", True) else f"{model['backend']} 已停用" if not backends.enabled(model["backend"])
                  else f"暂停至 {time.strftime('%H:%M', time.localtime(paused[alias]['until']))}" if alias in paused else "可用")
@@ -1540,10 +1553,11 @@ def build_parser():
     p.add_argument("--name", help="add：技能名（缺省取目录名）")
     p.add_argument("--project", help="按项目看 / 导入 / 登记 / 启用：只看该项目的工程来源 + 全局来源，登记归属该项目")
 
-    p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID> / pool <角色> <模型短名>=<比例> …")
+    p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID> / pool <角色> <模型短名>=<比例>[@<优先级>] …")
     p.add_argument("action", nargs="?", choices=["list", "show", "add", "pool"])
     p.add_argument("name", nargs="?")
-    p.add_argument("pool", nargs="*", help="pool：模型池，如 pi:glm-5.3-flash=70 oc:glm-5=30")
+    p.add_argument("pool", nargs="*", help="pool：模型池，如 pi:glm-5.3-flash=70 oc:glm-5=30；后面加 @<优先级> 分档（1 最优先，缺省为 1），"
+                        "如 oc:glm-4=1@2 表示前一档都不可用时才用它")
     p.add_argument("--clear", action="store_true", help="pool：去掉模型池")
     p.add_argument("--project", "-P", help="项目 ID 或名称（默认按当前目录识别）")
     p.add_argument("--global", dest="is_global", action="store_true", help="只看 / 新建全局角色，或配置全局角色的模型池")

@@ -19,9 +19,10 @@ const defaultLimit = ref<number>(5)
 const importDlg = reactive({ open: false, backend: '', loading: false, query: '', checked: [] as string[], candidates: [] as ModelCandidate[], error: '' })
 
 function msg(e: unknown): string { return e instanceof Error ? e.message : String(e) }
-// 「用在哪些角色」的标签文字：项目 · 角色 ×比例
+// 「用在哪些角色」的标签文字：项目 · 角色 ×比例，不是最高档的再标优先级
 function usedByLabel(u: ModelPage['models'][number]['used_by'][number]): string {
-  return u.project ? `${u.project_name || u.project} · ${u.role_title} ×${u.weight}` : `${u.role_title} ×${u.weight}`
+  const share = `×${u.weight}${(u.priority || 1) > 1 ? ` 优先级${u.priority}` : ''}`
+  return u.project ? `${u.project_name || u.project} · ${u.role_title} ${share}` : `${u.role_title} ${share}`
 }
 async function reload() {
   loading.value = true

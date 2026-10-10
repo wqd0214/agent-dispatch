@@ -400,7 +400,7 @@ def set_pool(project, role_ref, pool):
     path = os.path.join(directory, f"{role_id}.json")
     data = _read_json(path) or {}
     if pool:
-        data["model_pool"] = [{"model": e["model"], "weight": e["weight"]} for e in pool]
+        data["model_pool"] = models.normalize_pool(pool)
         data.pop("model", None)  # 有模型池就不再用固定模型，免得两处说法不一
         data.pop("models", None)
     else:

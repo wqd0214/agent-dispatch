@@ -57,7 +57,7 @@ agent-dispatch roles -P c2         # 这个项目可派的角色；roles show te
 
 ## 模型、模型池与派工工具
 
-派工只认角色，模型由角色的**模型池**按比例自动选择，主管不用也不能指定。
+派工只认角色，模型由角色的**模型池**按优先级和比例自动选择，主管不用也不能指定。
 
 ```bash
 agent-dispatch models import --list        # 先看工具里有哪些模型、哪些已登记；按名导入：models import <模型ID …>，全量：models import [--backend pi]
@@ -65,6 +65,7 @@ agent-dispatch models                           # 登记表：状态、并发（
 agent-dispatch models limit pi:glm-5.3 3       # 单个模型的并发上限；default 恢复默认；--default N 改全局默认值
 agent-dispatch roles pool tester -P c2 pi:glm-5.3=70 oc:glm-5=30   # 项目角色的模型池：按 7:3
 agent-dispatch roles pool tester --global pi:glm-5.3=1             # 全局角色的模型池：项目里没单独配置的都沿用它
+agent-dispatch roles pool tester -P c2 pi:glm-5.3=1 oc:glm-5=1 oc:glm-4=1@2   # @2 是优先级：前两个均衡着用，都不可用才用第三个
 agent-dispatch models disable oc:glm-5          # 停用某个模型：所有模型池自动跳过它
 agent-dispatch backends disable opencode        # 停用某个派工工具：新派工不再用它
 ```
@@ -72,7 +73,11 @@ agent-dispatch backends disable opencode        # 停用某个派工工具：新
 同一个模型（按 工具+模型ID 计）同时最多承接的派工单数有并发上限（全局默认 5，可按模型覆盖）；满了不报错，
 新单进入「排队中」，有空位后按排队先后自动开始。
 
-- **配比**按「项目 + 角色」的派工历史严格执行：每次选「目标占比 × (已派数 + 1) − 已派数」最大的那个，长期严格贴合比例。
+- **优先级**：模型池里每个模型可以带优先级（`<短名>=<比例>@<优先级>`，1 最优先，不写就是 1）。派工只在「现在能用的模型里
+  优先级最高的那一档」里选；这一档全都停用、暂停或并发已满，才落到下一档；所有档都只剩并发已满的，新单排队。
+- **同档均衡**：同一优先级的模型按当前在跑的作业数均衡，选「在跑数 ÷ 比例」最小的那个，两个模型都能用、都没满时会轮着用，
+  某个模型暂停后恢复也不会被连续补派。在跑数打平时再看「项目 + 角色」的派工历史，选「目标占比 × (已派数 + 1) − 已派数」
+  最大的那个，所以逐张派工时长期仍贴合比例。
 - **配置了模型池的角色**，派工时传 `--model` 或 `--backend` 会被拒绝；没配模型池的角色仍按角色里写的模型或后端默认模型。
 - **服务商报错**（额度用尽、限流、鉴权、计费）时，该模型自动暂停一段时间（默认 30 分钟，`models.json` 的 `cooldown_min`）。
   如果是作业第 1 轮、还没执行过任何操作，自动换池里另一个模型重新派出；已经动过手的不自动重派，以免重复操作，交给主管决定。

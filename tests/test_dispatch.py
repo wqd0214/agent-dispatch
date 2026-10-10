@@ -419,6 +419,53 @@ class DispatchTest(DispatchBase):
         self.assertIn("没有可用的模型", none_left.stderr)
         self.assertIn("fa=2", self.ok("roles", "-P", "p1").stdout)
 
+    def test_model_pool_priority_tiers(self):
+        self.make_project()
+        self.make_pool("dev", "fa=1", "fb=1@2")
+        self.assertIn("fb=1@2", self.ok("roles", "-P", "p1").stdout)
+        self.assertIn("p1:dev=1@2", self.ok("models").stdout)
+        for i in range(3):  # 高优先级能用时，一直用它
+            self.ok("start", f"t{i}", "-P", "p1", "-r", "dev", "STATUS: PASS")
+            self.ok("wait", f"t{i}", "--timeout", "20")
+            self.assertEqual(self.job(f"t{i}")["model_alias"], "fa")
+        # 高优先级并发满了：落到下一档，而不是排队
+        self.ok("models", "limit", "fa", "1")
+        self.ok("start", "t3", "-P", "p1", "-r", "dev", "SLEEP 3\nSTATUS: PASS")
+        self.assertEqual(self.job("t3")["model_alias"], "fa")
+        self.ok("start", "t4", "-P", "p1", "-r", "dev", "STATUS: PASS")
+        self.assertEqual((self.job("t4")["model_alias"], self.job("t4")["state"] != "queued"), ("fb", True))
+        self.ok("wait", "t3", "--timeout", "30")
+        self.ok("wait", "t4", "--timeout", "30")
+        # 高优先级空出来后回到它；停用后才用下一档
+        self.ok("start", "t5", "-P", "p1", "-r", "dev", "STATUS: PASS")
+        self.assertEqual(self.job("t5")["model_alias"], "fa")
+        self.ok("wait", "t5", "--timeout", "20")
+        self.ok("models", "disable", "fa")
+        self.ok("start", "t6", "-P", "p1", "-r", "dev", "STATUS: PASS")
+        self.assertEqual(self.job("t6")["model_alias"], "fb")
+        self.ok("wait", "t6", "--timeout", "20")
+        for bad in ("fb=1@0", "fb=1@x", "fb=1@1.5"):
+            self.assertNotEqual(self.cli("roles", "pool", "dev", "-P", "p1", "fa=1", bad).returncode, 0)
+
+    def test_model_pool_same_tier_balances_by_running_jobs(self):
+        self.make_project()
+        self.make_pool("dev", "fa=1", "fb=1")
+        # 先把历史派工数拉偏：fb 停用期间 fa 连派 3 张
+        self.ok("models", "disable", "fb")
+        for i in range(3):
+            self.ok("start", f"h{i}", "-P", "p1", "-r", "dev", "STATUS: PASS")
+            self.ok("wait", f"h{i}", "--timeout", "20")
+        self.ok("models", "enable", "fb")
+        # 都空闲时按历史配比补给 fb；fb 在跑时下一张给空闲的 fa，而不是继续补派 fb
+        self.ok("start", "b1", "-P", "p1", "-r", "dev", "SLEEP 4\nSTATUS: PASS")
+        self.assertEqual(self.job("b1")["model_alias"], "fb")
+        self.ok("start", "b2", "-P", "p1", "-r", "dev", "SLEEP 4\nSTATUS: PASS")
+        self.assertEqual(self.job("b2")["model_alias"], "fa")
+        self.ok("start", "b3", "-P", "p1", "-r", "dev", "STATUS: PASS")  # 各跑 1 张打平：回到历史配比，补 fb
+        self.assertEqual(self.job("b3")["model_alias"], "fb")
+        for name in ("b1", "b2", "b3"):
+            self.ok("wait", name, "--timeout", "30")
+
     def test_provider_error_fails_over_to_another_model(self):
         self.make_project()
         self.make_pool("dev", "fa=1", "fb=1")

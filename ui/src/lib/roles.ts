@@ -1,14 +1,25 @@
-// 角色页的纯逻辑：一句话现状、模型池比例、层级判断（纯函数，可单测）
+// 角色页的纯逻辑：一句话现状、模型池优先级与比例、层级判断（纯函数，可单测）
 
 import type { ConfigOverview, PoolEntry, RoleDetail } from '../types'
 
-export interface PoolRow { model: string; weight: number; pct: number }
+export interface PoolRow { model: string; weight: number; priority: number; pct: number }
 
-/** 模型池各条折算后的百分比；总比例为 0 时全部记 0 */
+/** 模型池各条的优先级（缺省 1）和在同一优先级里折算后的百分比；同档总比例为 0 时记 0 */
 export function poolRows(pool: PoolEntry[] | null | undefined): PoolRow[] {
-  const entries = (pool || []).map(e => ({ model: e.model, weight: Number(e.weight) || 0 }))
-  const total = entries.reduce((n, e) => n + e.weight, 0)
-  return entries.map(e => ({ ...e, pct: total ? Math.round((e.weight * 100) / total) : 0 }))
+  const entries = (pool || []).map(e => ({ model: e.model, weight: Number(e.weight) || 0, priority: Number(e.priority) || 1 }))
+  const totals = new Map<number, number>()
+  for (const e of entries) totals.set(e.priority, (totals.get(e.priority) || 0) + e.weight)
+  return entries.map(e => {
+    const total = totals.get(e.priority) || 0
+    return { ...e, pct: total ? Math.round((e.weight * 100) / total) : 0 }
+  })
+}
+
+/** 模型池按优先级分档，高优先级（数字小）在前 */
+export function poolTiers(pool: PoolEntry[] | null | undefined): PoolRow[][] {
+  const tiers = new Map<number, PoolRow[]>()
+  for (const row of poolRows(pool)) tiers.set(row.priority, [...(tiers.get(row.priority) || []), row])
+  return [...tiers.entries()].sort((a, b) => a[0] - b[0]).map(([, rows]) => rows)
 }
 
 function field<T>(detail: RoleDetail, key: string, fallback: T): T {
@@ -22,8 +33,11 @@ export function summarizeRole(detail: RoleDetail, repoName: (id: string) => stri
   const backend = field<string>(detail, 'backend', '')
   const pool = field<PoolEntry[] | null>(detail, 'model_pool', null)
   if (pool && pool.length) {
-    const rows = poolRows(pool).map(r => `${r.model} ${r.pct}%`).join('、')
-    parts.push(`派工时用 ${backend || '默认工具'}，在 ${rows} 之间按比例选`)
+    const tiers = poolTiers(pool).map(rows => rows.map(r => `${r.model} ${r.pct}%`).join('、'))
+    const tool = `派工时用 ${backend || '默认工具'}`
+    parts.push(tiers.length > 1
+      ? `${tool}，优先在 ${tiers[0]} 之间按比例选，都不可用时依次换 ${tiers.slice(1).join(' → ')}`
+      : `${tool}，在 ${tiers[0]} 之间按比例选`)
   } else {
     const model = field<string>(detail, 'model', '')
     const modelsMap = field<Record<string, string> | null>(detail, 'models', null)

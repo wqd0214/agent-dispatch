@@ -1,4 +1,4 @@
-"""模型登记与按比例选择。
+"""模型登记与模型池选择（分档优先、同档均衡）。
 
 模型登记表：~/.agent-dispatch/models.json
   {"cooldown_min": 30, "default_max_concurrent": 5,
@@ -7,9 +7,11 @@
 暂停记录：  ~/.agent-dispatch/model-health.json   {"<短名>": {"until": 时间戳, "reason": "...", "at": "..."}}
 
 角色里写模型池：
-  "model_pool": [{"model": "<短名>", "weight": 70}, {"model": "<短名>", "weight": 30}]
-派工时按历史严格配比选：选「目标占比 × (已派数 + 1) − 已派数」最大的那个，长期看严格贴合比例。
-停用的、暂停中的模型自动跳过。
+  "model_pool": [{"model": "<短名>", "weight": 70}, {"model": "<短名>", "weight": 30},
+                 {"model": "<短名>", "weight": 1, "priority": 2}]   # priority 可缺省 = 1，数字越小越优先
+派工时先分档：只在「现在能用的模型里优先级最高的那一档」里选，这一档全都不能用（停用、暂停、并发已满）才落到下一档。
+同一档里按当前在跑的作业数均衡：选「在跑数 ÷ 比例」最小的那个；打平时再按历史配比选
+「目标占比 × (已派数 + 1) − 已派数」最大的那个，所以逐张派（没有并发）时长期仍贴合比例。
 """
 import contextlib
 import fcntl
@@ -25,6 +27,7 @@ from .store import DispatchError
 REGISTRY = os.path.join(store.HOME, "models.json")
 HEALTH = os.path.join(store.HOME, "model-health.json")
 DEFAULT_COOLDOWN_MIN = 30
+DEFAULT_PRIORITY = 1         # 模型池里没写优先级的，都算最高档
 DEFAULT_MAX_CONCURRENT = 5   # 同一个模型（按 工具+模型ID 计）同时最多承接几张派工单
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]*$")
 
@@ -300,6 +303,22 @@ def all_pools():
     return out
 
 
+def priority_of(entry):
+    """模型池里一条的优先级：数字越小越优先，没写就是最高档。"""
+    return entry.get("priority") or DEFAULT_PRIORITY
+
+
+def normalize_pool(pool):
+    """落盘用的模型池：只留认识的字段，最高档不写 priority（与没有优先级时的写法一致）。"""
+    out = []
+    for entry in pool:
+        item = {"model": entry["model"], "weight": entry["weight"]}
+        if priority_of(entry) != DEFAULT_PRIORITY:
+            item["priority"] = priority_of(entry)
+        out.append(item)
+    return out
+
+
 def check_pool(pool):
     if not isinstance(pool, list) or not pool:
         raise DispatchError("模型池不能为空")
@@ -311,8 +330,11 @@ def check_pool(pool):
             raise DispatchError(f"模型池里的 {alias!r} 不在模型登记表里")
         if alias in seen:
             raise DispatchError(f"模型池里 {alias} 重复了")
-        if not isinstance(weight, (int, float)) or weight <= 0:
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight <= 0:
             raise DispatchError(f"模型 {alias} 的比例必须是正数")
+        priority = entry.get("priority", DEFAULT_PRIORITY)
+        if isinstance(priority, bool) or not isinstance(priority, int) or priority < 1:
+            raise DispatchError(f"模型 {alias} 的优先级必须是 ≥1 的整数（1 最优先）")
         seen.add(alias)
 
 
@@ -356,7 +378,8 @@ def candidates(pool, exclude=()):
 
 
 def pick(pool, project_id, role_id, exclude=()):
-    """按历史严格配比选一个模型，返回 (短名, 登记信息)。可用的都达到了并发上限时抛 ModelBusy。"""
+    """选一个模型，返回 (短名, 登记信息)：先取能用的里优先级最高的一档，档内按当前在跑的作业数均衡，
+    打平再按历史配比。可用的都达到了并发上限时抛 ModelBusy。"""
     usable, skipped = candidates(pool, exclude)
     if not usable:
         waiting = [(load_registry()["models"][a]["backend"], load_registry()["models"][a]["id"])
@@ -365,8 +388,17 @@ def pick(pool, project_id, role_id, exclude=()):
             raise ModelBusy(waiting)
         detail = "；".join(f"{alias}：{why}" for alias, why in skipped.items())
         raise DispatchError(f"角色 {role_id} 的模型池里现在没有可用的模型（{detail}）。请到网页或用 agent-dispatch models 处理")
-    counts = usage(project_id, role_id)
-    total_weight = sum(e["weight"] for e in usable)
-    total = sum(counts.get(e["model"], 0) for e in usable)
-    best = max(usable, key=lambda e: e["weight"] / total_weight * (total + 1) - counts.get(e["model"], 0))
-    return best["model"], load_registry()["models"][best["model"]]
+    registry = load_registry()["models"]
+    top = min(priority_of(e) for e in usable)
+    tier = [e for e in usable if priority_of(e) == top]
+    running, counts = occupancy(), usage(project_id, role_id)
+    total_weight = sum(e["weight"] for e in tier)
+    total = sum(counts.get(e["model"], 0) for e in tier)
+
+    def score(entry):
+        model = registry[entry["model"]]
+        load = running.get((model["backend"], model["id"]), 0) / entry["weight"]
+        return -load, entry["weight"] / total_weight * (total + 1) - counts.get(entry["model"], 0)
+
+    best = max(tier, key=score)
+    return best["model"], registry[best["model"]]

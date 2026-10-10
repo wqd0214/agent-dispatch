@@ -159,6 +159,9 @@ function regSourceLabel(key: 'mcp' | 'skills'): string {
 
 // ---------- 模型池 ----------
 const poolChecked = ref<Record<string, number>>({})
+const poolPriority = ref<Record<string, number>>({})  // 优先级：1 最先用，没填的按 1
+const poolEntries = computed<PoolEntry[]>(() => Object.entries(poolChecked.value).filter(([, w]) => w > 0)
+  .map(([model, weight]) => ({ model, weight, priority: poolPriority.value[model] || 1 })))
 const backendsOf = computed(() => {
   const byBackend = new Map<string, ModelPage['models']>()
   for (const m of modelsPage.value?.models ?? []) {
@@ -167,8 +170,7 @@ const backendsOf = computed(() => {
   }
   return [...byBackend.entries()].map(([backend, models]) => ({ backend, models }))
 })
-const poolSummary = computed(() => poolRows(
-  Object.entries(poolChecked.value).filter(([, w]) => w > 0).map(([model, weight]) => ({ model, weight }))))
+const poolSummary = computed(() => poolRows(poolEntries.value))
 const hasPool = computed(() => !!detail.value?.fields.model_pool)
 const fallbackModel = ref('')
 const fallbackDirty = ref(false)
@@ -176,12 +178,12 @@ const fallbackDirty = ref(false)
 function syncPool() {
   const pool = fieldValue<PoolEntry[] | null>('model_pool', null) || []
   poolChecked.value = Object.fromEntries(pool.map(e => [e.model, Number(e.weight) || 1]))
+  poolPriority.value = Object.fromEntries(pool.map(e => [e.model, Number(e.priority) || 1]))
 }
 watch(detail, syncPool)
 
 async function savePool() {
-  const entries = Object.entries(poolChecked.value).filter(([, w]) => w > 0)
-    .map(([model, weight]) => ({ model, weight }))
+  const entries = poolEntries.value
   saving.value = true
   try {
     await modelApi.savePool(roleId.value, detailProject.value, entries.length ? entries : null)
@@ -326,18 +328,23 @@ async function ElMessageBoxConfirm() {
           <div v-for="m in g.models" :key="m.alias" class="pool-row" :class="{ off: !m.enabled }">
             <el-checkbox :model-value="m.alias in poolChecked && poolChecked[m.alias] > 0"
               :disabled="!m.enabled || inheritedHere"
-              @update:model-value="(on: boolean) => { if (on) poolChecked[m.alias] = 1; else delete poolChecked[m.alias] }">
+              @update:model-value="(on: boolean) => { if (on) { poolChecked[m.alias] = 1; poolPriority[m.alias] = 1 } else { delete poolChecked[m.alias]; delete poolPriority[m.alias] } }">
               {{ m.alias }}
             </el-checkbox>
             <template v-if="m.alias in poolChecked && poolChecked[m.alias] > 0">
+              <span class="sub">优先级</span>
+              <el-input-number v-model="poolPriority[m.alias]" :min="1" :precision="0" size="small" style="width: 90px" />
               <span class="sub">比例</span>
               <el-input-number v-model="poolChecked[m.alias]" :min="1" size="small" style="width: 100px" />
-              <span class="sub">{{ poolSummary.find(r => r.model === m.alias)?.pct ?? 0 }}%</span>
+              <span class="sub">同档 {{ poolSummary.find(r => r.model === m.alias)?.pct ?? 0 }}%</span>
             </template>
             <span class="sub off-note">{{ !m.enabled ? '已停用' : m.paused ? '暂停中' : '' }}</span>
           </div>
         </div>
         <div v-if="!modelsPage?.models.length" class="sub">还没有登记模型。到「全局 → 工具与模型」页导入或登记。</div>
+        <div v-else class="sub pool-note">
+          优先级 1 最先用；同一优先级的模型按比例均衡（看当前各自在跑几张单）；这一档都停用、暂停或并发已满时才用下一档。
+        </div>
         <el-button type="primary" :loading="saving" class="save" :disabled="inheritedHere" @click="savePool">
           {{ hasPool ? '保存模型池' : '保存为模型池' }}
         </el-button>
@@ -451,6 +458,7 @@ h4 { margin: 12px 0 6px; font-size: 13px; }
 .pool-head { margin-bottom: 4px; }
 .pool-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
 .pool-row.off { opacity: .55; }
+.pool-note { margin: 4px 0 8px; }
 .off-note { width: 48px; }
 .brief-src { margin-bottom: 6px; }
 .btns { margin-top: 8px; display: flex; gap: 8px; }

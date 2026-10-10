@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fieldOverridden, hasOwnLayer, inheritLabel, poolRows, projectRoleRows, summarizeRole, uniqueRepoSamples } from '../src/lib/roles'
+import { fieldOverridden, hasOwnLayer, inheritLabel, poolRows, poolTiers, projectRoleRows, summarizeRole, uniqueRepoSamples } from '../src/lib/roles'
 import type { RoleDetail } from '../src/types'
 
 function detail(fields: Record<string, { value: unknown; source: string }>, extra: Partial<RoleDetail> = {}): RoleDetail {
@@ -12,13 +12,18 @@ function detail(fields: Record<string, { value: unknown; source: string }>, extr
 describe('poolRows', () => {
   it('按比例折算百分比', () => {
     expect(poolRows([{ model: 'a', weight: 1 }, { model: 'b', weight: 1 }])).toEqual([
-      { model: 'a', weight: 1, pct: 50 }, { model: 'b', weight: 1, pct: 50 },
+      { model: 'a', weight: 1, priority: 1, pct: 50 }, { model: 'b', weight: 1, priority: 1, pct: 50 },
     ])
     expect(poolRows([{ model: 'a', weight: 3 }, { model: 'b', weight: 1 }])[0].pct).toBe(75)
   })
   it('空池与总比例为 0 时不炸', () => {
     expect(poolRows(null)).toEqual([])
-    expect(poolRows([{ model: 'a', weight: 0 }])).toEqual([{ model: 'a', weight: 0, pct: 0 }])
+    expect(poolRows([{ model: 'a', weight: 0 }])).toEqual([{ model: 'a', weight: 0, priority: 1, pct: 0 }])
+  })
+  it('百分比只在同一优先级里折算，分档时高优先级在前', () => {
+    const pool = [{ model: 'c', weight: 5, priority: 2 }, { model: 'a', weight: 3 }, { model: 'b', weight: 1, priority: 1 }]
+    expect(poolRows(pool).map(r => [r.model, r.priority, r.pct])).toEqual([['c', 2, 100], ['a', 1, 75], ['b', 1, 25]])
+    expect(poolTiers(pool).map(rows => rows.map(r => r.model))).toEqual([['a', 'b'], ['c']])
   })
 })
 
@@ -32,6 +37,13 @@ describe('summarizeRole', () => {
       timeout_min: { value: 180, source: '项目' },
     }), name)
     expect(text).toBe('派工时用 pi，在 glm-a 50%、glm-b 50% 之间按比例选；在 后端工程 干活；tmux 方式；单轮超时 180 分钟')
+  })
+  it('模型池分了优先级：先说最高档怎么均衡，再说后备顺序', () => {
+    const text = summarizeRole(detail({
+      backend: { value: 'pi', source: '随工具发布' },
+      model_pool: { value: [{ model: 'glm-a', weight: 1 }, { model: 'glm-b', weight: 1 }, { model: 'glm-c', weight: 1, priority: 2 }], source: '项目' },
+    }), name)
+    expect(text.split('；')[0]).toBe('派工时用 pi，优先在 glm-a 50%、glm-b 50% 之间按比例选，都不可用时依次换 glm-c 100%')
   })
   it('没有模型池时展示固定模型，缺的字段跳过', () => {
     const text = summarizeRole(detail({

@@ -197,7 +197,7 @@ def model_page():
             used.setdefault(entry["model"], []).append({
                 "project": project_id, "project_name": project_names.get(project_id, project_id or "全局"),
                 "role": role_id, "role_title": role_titles.get((role_id, project_id)) or role_titles.get((role_id, None)) or role_id,
-                "weight": entry["weight"]})
+                "weight": entry["weight"], "priority": models.priority_of(entry)})
     model_rows = []
     counts = models.occupancy()
     discovered = {(b, mid) for b, mid in models.discover()}
