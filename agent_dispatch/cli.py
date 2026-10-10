@@ -1222,6 +1222,8 @@ def _mcp_entry_from_flags(a):
         entry["url"] = a.url
     if a.description:
         entry["description"] = a.description
+    if getattr(a, "exposure", None):
+        entry["exposure"] = a.exposure
     if a.name:
         entry["name"] = a.name  # 下发给执行者的服务名，缺省等于登记 ID
     return entry
@@ -1570,6 +1572,8 @@ def build_parser():
     p.add_argument("--type", choices=["local", "remote"], help="add：类型（给了 url 默认 remote，否则 local）")
     p.add_argument("--command", help="add：local 的可执行命令")
     p.add_argument("--args", action="append", help="add：参数，逗号分隔，可重复")
+    p.add_argument("--exposure", choices=["codemode", "deferred", "direct", "hidden"],
+                   help="add：pi 的工具暴露方式（direct = 直接声明给模型；缺省由 pi 决定，即 codemode）")
     p.add_argument("--env", action="append", metavar="键=值", help="add：环境变量，可重复；只存本机，输出时遮罩")
     p.add_argument("--headers", action="append", metavar="键=值", help="add：remote 的请求头，可重复；只存本机，输出时遮罩")
     p.add_argument("--url", help="add：remote 的地址")

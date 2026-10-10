@@ -103,6 +103,7 @@ agent-dispatch mcp import playwright@a04-test                          # 按登�
 agent-dispatch mcp import playwright --source "项目 a04/test 的 .pi/mcp.json"   # 或按来源消歧
 agent-dispatch mcp                     # 登记表（敏感信息已遮罩）：登记 ID、name、被哪些角色用、全部来源
 agent-dispatch mcp add mydb --command npx --args "-y,@bytebase/dbhub" --env DSN=mysql://...   # 手动登记（--name 可改下发名）
+agent-dispatch mcp add mydb2 --command npx --args "-y,@bytebase/dbhub" --exposure direct   # pi：工具直接声明给模型
 agent-dispatch mcp remove mydb
 agent-dispatch skills import           # 技能同理：同名目录先按真实路径（软链接）去重，再按 SKILL.md 内容合并
 agent-dispatch skills add my-skill ~/skills/my-skill

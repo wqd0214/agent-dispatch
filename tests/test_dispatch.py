@@ -2565,7 +2565,8 @@ class RoleEnvLimitTest(DispatchBase):
                 f.write("{}")
         env = {"AGENT_DISPATCH_PI_AGENT_DIR": pi_agent}
         self.ok("mcp", "add", "db@e1", "--name", "db", "--command", "db-run", "--env", "DSN=mysql://u:p1@h/e1", env_extra=env)
-        self.ok("mcp", "add", "db@e2", "--name", "db", "--command", "db-run", "--env", "DSN=mysql://u:p2@h/e2", env_extra=env)
+        self.ok("mcp", "add", "db@e2", "--name", "db", "--command", "db-run", "--env", "DSN=mysql://u:p2@h/e2",
+                "--exposure", "direct", env_extra=env)
         self.ok("mcp", "add", "pw-pc", "--command", "pw-run",
                 "--args=--user-data-dir,/tmp/pw-{{project}}-{{env}}-{{role}}-pc", env_extra=env)
         with open(self.backends) as f:
@@ -2586,6 +2587,8 @@ class RoleEnvLimitTest(DispatchBase):
             servers = json.load(f)["mcpServers"]
         self.assertEqual(sorted(servers), ["db", "pw-pc"])
         self.assertEqual(servers["db"]["env"]["DSN"], "mysql://u:p2@h/e2")
+        self.assertEqual(servers["db"]["exposure"], "direct")  # 暴露方式原样带给 pi
+        self.assertNotIn("exposure", servers["pw-pc"])
         self.assertEqual(servers["pw-pc"]["args"], ["--user-data-dir", "/tmp/pw-p1-e2-t-line-pc"])
         # 只管 MCP 不管技能：用户的设置照常链接进来（重试策略、扩展包不丢）
         self.assertTrue(os.path.islink(os.path.join(agent, "settings.json")))

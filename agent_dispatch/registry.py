@@ -26,6 +26,8 @@ from .store import DispatchError
 MCP_REGISTRY = os.path.join(store.HOME, "mcp.json")
 SKILLS_REGISTRY = os.path.join(store.HOME, "skills.json")
 MASK = "••••"
+# pi 的工具暴露方式（OpenCode 没有这个概念，下发时忽略）：direct = 像内置工具一样直接声明给模型
+EXPOSURES = ("codemode", "deferred", "direct", "hidden")
 # 登记 ID 允许 @（<服务名>@<来源简称>）与路径里常见的字符
 REG_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/+-]*$")
 
@@ -180,6 +182,8 @@ def check_mcp_entry(entry):
     if entry.get("args") and (not isinstance(entry["args"], list)
                               or not all(isinstance(a, str) for a in entry["args"])):
         raise DispatchError("args 必须是字符串数组")
+    if entry.get("exposure") and entry["exposure"] not in EXPOSURES:
+        raise DispatchError(f"exposure 只能是 {' / '.join(EXPOSURES)}，不是 {entry['exposure']!r}")
     return etype
 
 
@@ -195,7 +199,7 @@ def save_mcp(reg_id, entry, source=None, project=None):
     proj = project if project is not None else existing.get("project")
     if proj:
         clean["project"] = proj
-    for key in ("command", "args", "env", "url", "headers", "description"):
+    for key in ("command", "args", "env", "url", "headers", "description", "exposure"):
         if entry.get(key) not in (None, "", [], {}):
             clean[key] = entry[key]
     _save(MCP_REGISTRY, reg_id, clean)
@@ -310,6 +314,8 @@ def _normalize_mcp(raw, label):
         entry["env"] = {str(k): str(v) for k, v in raw["env"].items()}
     if isinstance(raw.get("headers"), dict):
         entry["headers"] = {str(k): str(v) for k, v in raw["headers"].items()}
+    if raw.get("exposure") in EXPOSURES:
+        entry["exposure"] = raw["exposure"]
     entry["source"] = label
     return entry
 

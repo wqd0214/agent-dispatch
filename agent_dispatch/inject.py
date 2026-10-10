@@ -130,12 +130,13 @@ def _fill_entry(entry, name, job):
 
 def _pi_server(entry):
     """登记条目 → pi 的 mcp.json 写法。"""
+    extra = {"exposure": entry["exposure"]} if entry.get("exposure") else {}
     if entry.get("type") == "remote" or entry.get("url"):
-        server = {"url": entry["url"]}
+        server = {"url": entry["url"], **extra}
         if entry.get("headers"):
             server["headers"] = dict(entry["headers"])
         return server
-    server = {"command": entry.get("command") or ""}
+    server = {"command": entry.get("command") or "", **extra}
     if entry.get("args"):
         server["args"] = list(entry["args"])
     if entry.get("env"):
