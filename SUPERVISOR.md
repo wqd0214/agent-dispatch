@@ -54,7 +54,7 @@ agent-dispatch escalate <作业名> "<要用户决定什么>"      # 然后停�
 - **作业名不可重用**。续派用 `reply`；重跑另起一个名字（如 `<场景>-r2`）。
 - **tmux 方式的作业在审完之前一直占着通道**（界面和浏览器还开着）。所以默认一个一个来：
   审完（accept / reject）一个，再派下一个。确定互不冲突时才用 `--channels` 并行。
-- 派出后把这两条告诉用户，方便他随时看：`agent-dispatch attach <作业名>`（接进界面）、`agent-dispatch web`（网页总览）。
+- 派出后把这两条告诉用户，方便他随时看：`agent-dispatch attach <作业名>`（接进界面）、`agent-dispatch hub`（一个终端里看全部 tmux 作业的界面，新派的自动出现）、`agent-dispatch web`（网页总览）。
 - 看到作业是「人工持有」：那是用户接手了。别碰，等他 `release`。
 
 ## 三、裁决表

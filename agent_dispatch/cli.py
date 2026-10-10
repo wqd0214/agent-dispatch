@@ -360,7 +360,8 @@ def cmd_start(a):
             store.info(f"⚠ 这个批次还没有事项标题：请补上 agent-dispatch batch {a.batch} --title \"<事项标题>\" --reason \"<为什么派这批单>\""
                        "（或下次派工时带 --batch-title / --batch-reason）")
     store.info(f"等结果：agent-dispatch wait {a.job}    看输出：agent-dispatch log {a.job} -f"
-               + (f"    接进界面：agent-dispatch attach {a.job}" if mode == "tmux" else ""))
+               + (f"    接进界面：agent-dispatch attach {a.job}" if mode == "tmux" else "")
+               + ("    全部界面：agent-dispatch hub" if mode == "tmux" and tmux.hub_name() else ""))
     return 0
 
 
@@ -861,6 +862,22 @@ def cmd_attach(a):
     if os.environ.get("TMUX"):
         os.execvp("tmux", ["tmux", "switch-client", "-t", job["tmux"]])
     os.execvp("tmux", ["tmux", "attach", "-t", job["tmux"]])
+
+
+def cmd_hub(a):
+    hub = tmux.ensure_hub()
+    if not hub:
+        raise DispatchError("汇总会话没有启用或建不起来（需要 tmux，且 AGENT_DISPATCH_HUB 不能设为空）")
+    open_sessions = tmux.sessions()
+    for job in store.all_jobs():  # 汇总会话建起来之前派出的作业也补挂进来
+        if job.get("tmux") in open_sessions:
+            tmux.link_to_hub(job["tmux"], job["name"])
+    if not sys.stdout.isatty():  # 智能体调用时没有终端可接，只告诉它怎么接
+        print(tmux.hub_attach_command())
+        return 0
+    if os.environ.get("TMUX"):
+        os.execvp("tmux", ["tmux", "switch-client", "-t", hub])
+    os.execvp("tmux", ["tmux", "attach", "-t", hub])
 
 
 def current_project(a):
@@ -1446,6 +1463,8 @@ def build_parser():
 
     p = add("attach", cmd_attach, "接进 tmux 方式作业的界面：可以看，也可以直接打字（Ctrl-b d 退出，不影响作业）")
     p.add_argument("job")
+
+    add("hub", cmd_hub, "接进汇总会话：tmux 方式的作业界面都挂在里面，每个作业一个窗口，新派的会自动出现（Ctrl-b n / p 切换，Ctrl-b d 退出）")
 
     p = add("take", cmd_take, "人工接手：主管不再往里派工，通道归你")
     p.add_argument("job")

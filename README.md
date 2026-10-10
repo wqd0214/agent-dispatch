@@ -191,6 +191,7 @@ agent-dispatch start demo --cwd ~/some/repo -b pi "把 README 里的错别字改
 agent-dispatch log <作业> -f          # 实时输出（工具调用、回复）
 agent-dispatch history <作业> --full  # 逐步的工具入参与返回
 agent-dispatch attach <作业>          # tmux 方式：接进界面，可直接打字；Ctrl-b d 退出，不影响作业
+agent-dispatch hub                    # tmux 方式：接进汇总会话，每个作业一个窗口，新派的自动出现；Ctrl-b n / p 切换
 agent-dispatch web start --open       # 网页总览，后台运行并打开浏览器；web stop 停止，web status 查看
 agent-dispatch web                    # 同上，但在前台运行（Ctrl-C 关闭）
 agent-dispatch status --watch         # 终端里的总览
@@ -200,6 +201,10 @@ agent-dispatch stop <作业>            # 叫停（已结束的 tmux 作业：�
 agent-dispatch reply <作业> "…"       # 在同一会话里续派
 agent-dispatch take <作业>            # 人工接手：主管不再往里派；用完 release
 ```
+
+汇总会话是一个名为 `agent-dispatch` 的 tmux 会话：tmux 方式的作业派出时，界面窗口会自动挂进去并以作业名命名，
+首个窗口是作业总览。在任意终端（如 Zed 的 Terminal Thread）里执行一次 `agent-dispatch hub` 并保持开着，
+之后新派的作业就会自己出现在里面。关掉它不影响作业；环境变量 `AGENT_DISPATCH_HUB` 可改名，设为空串则不启用。
 
 网页的作业部分是只读的旁观者，「模型与角色」页可以修改配置；关掉网页不影响任何作业。工作台按事项（批次）分组列出
 要你处理的单子（可切回按状态），顶部有通道占用提示；「事项」页按派出顺序列出每个事项的全部单子，带 follows 的缩进挂靠；

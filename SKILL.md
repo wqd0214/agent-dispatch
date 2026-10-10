@@ -31,7 +31,7 @@ agent-dispatch wait <作业名> --timeout 540     # 返回码 3 = 还在跑，�
 agent-dispatch status <作业名> && agent-dispatch gate <作业名>
 ```
 
-派出后告诉用户两条命令，方便他随时看：`agent-dispatch attach <作业名>`（接进执行者界面）、`agent-dispatch web`（网页总览）。
+派出后告诉用户两条命令，方便他随时看：`agent-dispatch attach <作业名>`（接进执行者界面）、`agent-dispatch hub`（一个终端里看全部 tmux 作业的界面，新派的自动出现）、`agent-dispatch web`（网页总览）。
 
 ## 提示
 

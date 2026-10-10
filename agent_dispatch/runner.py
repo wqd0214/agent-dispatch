@@ -336,6 +336,7 @@ def run_tmux(name, job, backend, task):
         # tmux 的 opencode 模板自带 env OPENCODE_CONFIG_CONTENT，把下发配置并进那个值，不能各设各的
         inject_env = inject.merge_tmux_opencode(argv, inject_env)
         tmux.new_session(session, job["cwd"], argv, {"AGENT_DISPATCH_WORKER": name, **inject_env})
+        tmux.link_to_hub(session, name)  # 挂进汇总会话：接着汇总会话的终端里会多出这个作业的窗口
     sent_at = time.time()
     deadline = sent_at + job["timeout_min"] * 60 if job.get("timeout_min") else None
     retried = False

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.environ["AGENT_DISPATCH_HUB"] = ""  # 默认不启用汇总会话，免得用例把窗口挂进本机真实的那个；cli() 里再换成用例自己的
 FAKE = os.path.join(ROOT, "tests", "fake_agent.py")
 FAKE_TUI = os.path.join(ROOT, "tests", "fake_tui.py")
 
@@ -21,6 +22,7 @@ class DispatchBase(unittest.TestCase):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="ad-test-"))
         self.home = os.path.join(self.tmp, "home")
         self.work = os.path.join(self.tmp, "work")
+        self.hub = "adhub-" + os.path.basename(self.tmp)
         os.makedirs(os.path.join(self.home, "profiles"))
         os.makedirs(os.path.join(self.work, "runs"))
         backends = {
@@ -55,10 +57,12 @@ class DispatchBase(unittest.TestCase):
         for name in self.jobs():
             self.cli("stop", name)
             subprocess.run(["tmux", "kill-session", "-t", "=ad-" + name], capture_output=True)
+        subprocess.run(["tmux", "kill-session", "-t", "=" + self.hub], capture_output=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def cli(self, *args, stdin=None, cwd=None, env_extra=None):
-        env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT)
+        env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT,
+                   AGENT_DISPATCH_HUB=self.hub)  # 汇总会话用测试自己的名字，不碰本机真实的那个
         # 跑测试的进程可能带着派工者相关的环境变量，识别不能被它们污染
         for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
                     "CLAUDE_CODE_SESSION_ID", "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
@@ -259,6 +263,33 @@ class DispatchTest(DispatchBase):
         self.ok("reject", "t1", "--reason", "测试")
         self.assertNotEqual(subprocess.run(["tmux", "has-session", "-t", "=ad-t1"], capture_output=True).returncode, 0)
         self.ok("start", "t2", "-p", "t", "STATUS: PASS")
+
+    @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
+    def test_tmux_job_window_is_linked_into_hub(self):
+        def hub_windows():
+            out = subprocess.run(["tmux", "list-windows", "-t", "=" + self.hub, "-F", "#{window_name}"],
+                                 capture_output=True, text=True)
+            return out.stdout.split()
+        started = self.ok("start", "h1", "-p", "t", "--mode", "tmux", "STATUS: PASS")
+        self.assertIn("agent-dispatch hub", started.stderr + started.stdout)
+        self.ok("wait", "h1", "--timeout", "30")
+        self.assertEqual(hub_windows(), ["总览", "h1"])  # 派出时自动挂进汇总会话，窗口以作业名命名
+        # 没有终端时只给出接入命令；重复执行不会把同一个窗口挂两次
+        self.assertIn("tmux attach -t " + self.hub, self.ok("hub").stdout)
+        self.assertEqual(hub_windows(), ["总览", "h1"])
+        # 汇总会话被关掉不影响作业；再执行 hub 会重建并把还开着的界面补挂回来
+        subprocess.run(["tmux", "kill-session", "-t", "=" + self.hub], capture_output=True)
+        self.assertEqual(subprocess.run(["tmux", "has-session", "-t", "=ad-h1"], capture_output=True).returncode, 0)
+        self.ok("hub")
+        self.assertEqual(hub_windows(), ["总览", "h1"])
+        # 驳回后界面关闭：窗口要从汇总会话里一起消失，不能留下还在跑的执行者
+        self.ok("reject", "h1", "--reason", "测试")
+        self.assertNotEqual(subprocess.run(["tmux", "has-session", "-t", "=ad-h1"], capture_output=True).returncode, 0)
+        self.assertEqual(hub_windows(), ["总览"])
+        # 关掉汇总会话的开关后照常派工，只是不挂
+        self.ok("start", "h2", "-p", "t", "--mode", "tmux", "STATUS: PASS", env_extra={"AGENT_DISPATCH_HUB": ""})
+        self.ok("wait", "h2", "--timeout", "30")
+        self.assertEqual(hub_windows(), ["总览"])
 
     @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
     def test_tmux_mode_take_while_running_and_stop(self):
