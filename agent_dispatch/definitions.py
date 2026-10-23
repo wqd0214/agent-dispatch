@@ -22,7 +22,11 @@
     limit_groups  {分组名: 上限}：同一分组的角色在本项目里合计最多同时几张单
   角色
     extends          基于另一个角色，只写要改的项（模板也沿用那个角色的，除非自己另有）
+    enabled          false = 停用：这个角色暂时不接新单（已派出的作业照常续派、裁决）；不写就是启用。
+                     不随 extends 继承——停用公共定义不影响基于它的角色，反过来也一样
     needs_env        true = 派工必须带 --env
+    env              环境ID：这个角色固定在这个环境里干活，派工不用再带 --env（带了别的环境会被拒绝）；
+                     常和 extends 一起用，给每个环境建一个角色，选角色就定了环境
     repo_by_env      {环境ID: 工程ID}：不同环境在不同工程（工作树）里干活
     max_parallel     同一角色在同一环境里最多同时几张单；满了新单排队
     limit_group      属于项目的哪个并发分组（见 limit_groups）
@@ -308,7 +312,7 @@ def _merged_role(project, role_id, _seen=()):
             raise DispatchError(f"角色 {role_id} 的 extends 指向不存在的角色 {base_id!r}")
         brief = brief or base.get("_brief_path")
         pool_source = pool_source or base.get("pool_source")
-        inherited = {k: v for k, v in base.items() if k not in ("role", "title", "scope", "pool_source", "_brief_path", "extends")}
+        inherited = {k: v for k, v in base.items() if k not in ("role", "title", "scope", "pool_source", "_brief_path", "extends", "enabled")}
         # 项目 defaults 已经在基角色里生效过；这里只让角色自己写的项盖过基角色
         merged = {**inherited, **(global_role or {}), **(project_role or {})}
         merged.pop("extends", None)
@@ -355,6 +359,12 @@ def resolve(project, role_ref, repo_id=None, detected_repo=None, env=None):
     if not project:
         role.update(name=f":{role['role']}", channels=[])
         return role
+    fixed_env = role.get("env")
+    if fixed_env:  # 角色固定在某个环境：不用带 --env，带了别的就是派错了
+        if env and env != fixed_env:
+            raise DispatchError(f"角色 {role['title']} 固定在环境 {fixed_env}，不能用 --env {env} 派；"
+                                "要去别的环境请换那个环境的角色")
+        env = fixed_env
     check_env(project, env)
     by_env = role.get("repo_by_env") or {}
     allowed = (role["repos"] or ([] if by_env else list(project["repos"]))) + [r for r in by_env.values() if r not in role["repos"]]
@@ -490,7 +500,7 @@ def set_pool(project, role_ref, pool):
 EDITABLE_ROLE_FIELDS = {"title", "description", "repos", "backend", "model", "models", "mode", "channels",
                         "timeout_min", "statuses", "gates", "reply_suffix", "runs_root", "backend_args",
                         "model_pool", "mcp", "skills",
-                        "extends", "needs_env", "repo_by_env", "max_parallel", "limit_group", "release_on_done"}
+                        "extends", "enabled", "needs_env", "env", "repo_by_env", "max_parallel", "limit_group", "release_on_done"}
 
 
 def _layers(project, role_id):
@@ -575,9 +585,14 @@ def _check_env_limit_fields(project, fields):
         base = fields["extends"]
         if not isinstance(base, str) or not base or _merged_role(project, base) is None:
             raise DispatchError(f"extends 指向的角色不存在：{base!r}")
-    for key in ("needs_env", "release_on_done"):
+    for key in ("needs_env", "release_on_done", "enabled"):
         if key in fields and not isinstance(fields[key], bool):
             raise DispatchError(f"{key} 只能是 true / false")
+    if "env" in fields:
+        fixed_env = fields["env"]
+        envs = (project or {}).get("envs") or {}
+        if not project or not isinstance(fixed_env, str) or fixed_env not in envs:
+            raise DispatchError(f"env {fixed_env!r} 不在项目的 envs 里（已有：{'、'.join(envs) or '无'}），且只能用在项目角色上")
     if "max_parallel" in fields:
         value = fields["max_parallel"]
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:

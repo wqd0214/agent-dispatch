@@ -3,7 +3,28 @@
 纯命令行的多智能体派工：一个**主管**智能体负责派工和裁决，若干**执行者**智能体负责干活。
 主管和执行者都可以是任意命令行智能体（pi、OpenCode，后续可加 Claude Code、Codex）。
 
-没有客户端，没有常驻服务。全部状态是 `~/.agent-dispatch/` 下的文件。
+全部状态是 `~/.agent-dispatch/` 下的文件。Codex 主管的作业另外启动一个本地通知等待进程，等待期间不调用模型。
+
+## Codex 原会话自动回传
+
+在交互式 Codex 中照常派工即可：工具从 `CODEX_THREAD_ID`（兼容 `CODEX_SESSION_ID`）识别并绑定原会话。
+`start`、`reply` 和 `follow` 成功后自动启动本地等待器；本轮结束后，以 `codex queue` 向原会话排入结果。
+用户可以继续留在同一会话聊天，无需模型循环调用 `wait`，也不启动另一个 Codex 主管。
+执行者正常工作和主管处理结果仍消耗各自的 Token。
+
+- Claude Code、其它主管和手动 `wait` 的用法不变。执行者仍可选 headless 或 tmux。
+- 需要本机 Codex 支持 `queue`，并能连接承载原会话的服务；本次已验证 Codex 0.163.0 的本地共享服务。
+  不支持跨机器、独立 `--no-daemon` 会话或任意远程端点自动发现，不能把通知发给另一个服务里的同名会话。
+- `status <作业>` / `status <作业> --json` 可查每轮 `codex_notify` 状态、目标、错误和 `notify.log` 路径。
+  “已入队”仅表示 Codex 接受消息，不代表主管已消费，更不代表作业已验收。
+- 明确投递失败后可执行 `agent-dispatch notify-retry <作业> [--turn N]`；每轮最多 3 次投递。
+  超时或投递进程中断可能已入队，状态为“结果不明”，不自动重发；先在原会话核对。
+- 人工持有、叫停、已裁决或过时回合不发送结果。正在投递时的人工操作与外部消息接受之间存在短暂竞态，
+  主管消费通知后仍须读取最新状态，不直接重复派工或裁决。
+- 设置 `AGENT_DISPATCH_CODEX_NOTIFY=0` 可关闭自动回传。自定义安装可设置 `AGENT_DISPATCH_CODEX_BIN`。
+  等待器不是系统常驻服务；机器重启或等待器被杀后，检查作业状态，再使用 `notify-retry` 补投已结束作业。
+
+通知只传作业、回合、状态和本地结果路径，不上传完整日志。现有 Codex 认证与配置保持不变。
 
 ```
 主管（任意智能体会话，或你本人）
@@ -153,6 +174,11 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 ```
 
 - 角色写 `"needs_env": true`：派工不带 `--env` 就拒绝。
+- 角色可以停用：`agent-dispatch roles disable <角色> -P <项目>`（定义里写成 `"enabled": false`），停用后不接新单，
+  已派出的作业照常续派和裁决；`roles enable` 恢复。停用不随 `extends` 继承。某个环境暂时不测时，把它的角色停掉即可。
+- 角色写 `"env": "382"`：这个角色固定在 382 环境，派工不用带 `--env`（带了别的环境会被拒绝），其余和带了
+  `--env 382` 完全一样。配合 `extends` 给每个环境建一个角色，选角色就定了环境：
+  `{"extends": "tester-pallet", "title": "托盘主测试工程师（382）", "env": "382"}`。
 - 角色写 `"repo_by_env": {"382": "t382-pallet", "225": "t225-pallet"}`：不同环境在不同工程（工作树）里干活，
   不用再靠 `--repo` 记哪个目录对应哪个环境。
 - 角色 `mcp` 里的登记 ID 可以写 `{{env}}`，派工时换成所选环境：`"mcp": ["wms-db@{{env}}", "pw-pc", "pw-pda"]`。

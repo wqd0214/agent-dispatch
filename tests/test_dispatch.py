@@ -6,10 +6,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["AGENT_DISPATCH_HUB"] = ""  # 默认不启用汇总会话，免得用例把窗口挂进本机真实的那个；cli() 里再换成用例自己的
+# 测试进程不继承宿主的真实主管，也不默认发回传；通知专项会显式提供假目标和假 codex。
+os.environ.pop("CODEX_THREAD_ID", None)
+os.environ.pop("CODEX_SESSION_ID", None)
+os.environ["AGENT_DISPATCH_CODEX_NOTIFY"] = "0"
 FAKE = os.path.join(ROOT, "tests", "fake_agent.py")
 FAKE_TUI = os.path.join(ROOT, "tests", "fake_tui.py")
 
@@ -25,6 +30,14 @@ class DispatchBase(unittest.TestCase):
         self.hub = "adhub-" + os.path.basename(self.tmp)
         os.makedirs(os.path.join(self.home, "profiles"))
         os.makedirs(os.path.join(self.work, "runs"))
+        self.test_bin = os.path.join(self.tmp, "test-bin")
+        os.makedirs(self.test_bin)
+        # 模型发现也必须隔离：网页用例不调用宿主 pi/opencode，codex 则默认拒绝外发。
+        for tool in ("pi", "opencode", "codex"):
+            path = os.path.join(self.test_bin, tool)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\nexit " + ("91" if tool == "codex" else "0") + "\n")
+            os.chmod(path, 0o755)
         backends = {
             "fakepi": {"format": "pi", "session": "named", "default_model": "m",
                        "argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}"],
@@ -60,15 +73,19 @@ class DispatchBase(unittest.TestCase):
         subprocess.run(["tmux", "kill-session", "-t", "=" + self.hub], capture_output=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def cli(self, *args, stdin=None, cwd=None, env_extra=None):
+    def child_env(self, env_extra=None):
         env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT,
-                   AGENT_DISPATCH_HUB=self.hub)  # 汇总会话用测试自己的名字，不碰本机真实的那个
+                   AGENT_DISPATCH_HUB=self.hub, PATH=self.test_bin + os.pathsep + os.environ["PATH"])
         # 跑测试的进程可能带着派工者相关的环境变量，识别不能被它们污染
         for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
-                    "CLAUDE_CODE_SESSION_ID", "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
+                    "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+                    "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
             env.pop(key, None)
         env.update(env_extra or {})
-        return subprocess.run([sys.executable, "-m", "agent_dispatch", *args], env=env, cwd=cwd,
+        return env
+
+    def cli(self, *args, stdin=None, cwd=None, env_extra=None):
+        return subprocess.run([sys.executable, "-m", "agent_dispatch", *args], env=self.child_env(env_extra), cwd=cwd,
                               capture_output=True, text=True, input=stdin, timeout=60)
 
     def ok(self, *args, **kw):
@@ -2184,12 +2201,21 @@ class ModelLimitTest(DispatchBase):
 
     def start_async(self, *args):
         """并发派工用：不等命令结束，返回子进程。"""
-        env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT)
-        for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
-                    "CLAUDE_CODE_SESSION_ID", "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
-            env.pop(key, None)
-        return subprocess.Popen([sys.executable, "-m", "agent_dispatch", *args], env=env,
+        return subprocess.Popen([sys.executable, "-m", "agent_dispatch", *args], env=self.child_env(),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def test_async_start_does_not_inherit_codex_supervisor(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "00000000-0000-4000-8000-000000000099",
+                                     "CODEX_SESSION_ID": "00000000-0000-4000-8000-000000000099",
+                                     "AGENT_DISPATCH_CODEX_NOTIFY": "0"}):
+            proc = self.start_async("start", "async-isolated", "-p", "t", "STATUS: PASS")
+            stdout, stderr = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, stdout + stderr)
+        self.ok("wait", "async-isolated", "--timeout", "20")
+        job = self.job("async-isolated")
+        self.assertNotEqual(job["dispatcher"]["kind"], "Codex")
+        self.assertFalse(job.get("codex_notify"))
 
     def test_default_limit_queues_and_auto_starts(self):
         self.ok("models", "limit", "--default", "1")
@@ -2255,7 +2281,8 @@ class ModelLimitTest(DispatchBase):
         self.ok("models", "limit", "--default", "2")
         procs = [self.start_async("start", f"c{i}", "-p", "t", "--channels", "none", "SLEEP 4\nSTATUS: PASS") for i in range(6)]
         for proc in procs:
-            proc.wait(timeout=60)
+            stdout, stderr = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, stdout + stderr)
         jobs = {j["name"]: j for j in json.loads(self.ok("status", "--json").stdout)}
         running = [j for j in jobs.values() if j["state"] == "running"]
         queued = [j for j in jobs.values() if j["state"] == "queued"]
@@ -2484,6 +2511,48 @@ class RoleEnvLimitTest(DispatchBase):
         self.ok("wait", "x0", "--timeout", "20")
         self.assertEqual(self.job("x0")["report"]["AD_ENV"], "-")
 
+    def test_role_fixed_env_needs_no_env_flag(self):
+        self.role("t-line", extends="qa", title="线测试", needs_env=True, max_parallel=1,
+                  repo_by_env={"e1": "app", "e2": "app2"}, channels="none")
+        self.role("t-line-e2", extends="t-line", title="线测试（环境二）", env="e2")
+        # 选角色就定了环境：不带 --env，效果和带了 --env e2 一样
+        self.ok("start", "x1", "-P", "p1", "-r", "t-line-e2", "INJECTDUMP\nSTATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        job = self.job("x1")
+        self.assertEqual((job["env"], job["cwd"], job["repo"], job["role"]), ("e2", self.env2_dir, "app2", "t-line-e2"))
+        self.assertEqual(job["report"]["AD_ENV"], "e2")
+        self.assertEqual(job["report"]["AT_ENV"], "test-e2")
+        # 带同一个环境可以，带别的环境拒绝
+        self.ok("start", "x2", "-P", "p1", "-r", "t-line-e2", "--env", "e2", "STATUS: PASS")
+        self.ok("wait", "x2", "--timeout", "20")
+        wrong = self.cli("start", "x3", "-P", "p1", "-r", "t-line-e2", "--env", "e1", "STATUS: PASS")
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("固定在环境 e2", wrong.stderr)
+        # 角色写了项目里没有的环境：派工时报出来
+        self.role("t-line-e9", extends="t-line", title="线测试（不存在的环境）", env="e9")
+        unknown = self.cli("start", "x4", "-P", "p1", "-r", "t-line-e9", "STATUS: PASS")
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("没有环境", unknown.stderr)
+
+    def test_role_disable_blocks_new_jobs_only(self):
+        self.role("t-line", extends="qa", title="线测试", repos=["app"], channels="none")
+        self.role("t-sub", extends="t-line", title="线测试（子）")
+        self.ok("start", "x1", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        self.assertIn("停用", self.ok("roles", "disable", "线测试", "-P", "p1").stderr)
+        blocked = self.cli("start", "x2", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("已停用", blocked.stderr)
+        self.assertIn("roles enable t-line", blocked.stderr)
+        self.assertIn("已停用", self.ok("roles", "-P", "p1").stdout)
+        # 停用不随 extends 继承；已派出的作业照常续派
+        self.ok("start", "x3", "-P", "p1", "-r", "t-sub", "STATUS: PASS")
+        self.ok("wait", "x3", "--timeout", "20")
+        self.ok("reply", "x1", "STATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        self.ok("roles", "enable", "t-line", "-P", "p1")
+        self.ok("start", "x4", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+
     def test_max_parallel_counts_per_role_and_env(self):
         self.role("t-line", extends="qa", title="线测试", needs_env=True, max_parallel=1,
                   repo_by_env={"e1": "app", "e2": "app2"}, channels="none")
@@ -2658,3 +2727,209 @@ class WebVersionTest(DispatchBase):
         finally:
             os.utime(target, ns=(saved.st_atime_ns, saved.st_mtime_ns))
             self.ok("web", "stop")
+
+
+CODEX_THREAD = "00000000-0000-4000-8000-000000000001"
+
+FAKE_CODEX_SOURCE = '''#!/usr/bin/env python3
+"""测试用的假 codex：把收到的 argv 记进 FAKE_CODEX_LOG（JSON 行），按 FAKE_CODEX_RC 退出。"""
+import json
+import os
+import sys
+import time
+
+entry = {"argv": sys.argv[1:], "cwd": os.getcwd()}
+log = os.environ.get("FAKE_CODEX_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\\n")
+sleep = os.environ.get("FAKE_CODEX_SLEEP")
+if sleep:
+    time.sleep(float(sleep))
+sys.exit(int(os.environ.get("FAKE_CODEX_RC", "0") or 0))
+'''
+
+
+class CodexNotifyTest(DispatchBase):
+    """Codex 交互主管的结果自动回传：身份识别、后台等待器、投递、去重与抑制。"""
+
+    def setUp(self):
+        super().setUp()
+        self.codex_log = os.path.join(self.tmp, "codex-queue.log")
+        self.fake_codex = os.path.join(self.tmp, "fake-codex")
+        with open(self.fake_codex, "w", encoding="utf-8") as f:
+            f.write(FAKE_CODEX_SOURCE)
+        os.chmod(self.fake_codex, 0o755)
+        self.notify_env = {"CODEX_THREAD_ID": CODEX_THREAD, "AGENT_DISPATCH_CODEX_NOTIFY": "1",
+                           "AGENT_DISPATCH_CODEX_BIN": self.fake_codex,
+                           "FAKE_CODEX_LOG": self.codex_log, "AGENT_DISPATCH_NOTIFY_POLL": "0.1"}
+
+    def codex_cli(self, *args, **kw):
+        extra = dict(self.notify_env)
+        extra.update(kw.pop("env_extra", {}) or {})
+        return self.cli(*args, env_extra=extra, **kw)
+
+    def codex_ok(self, *args, **kw):
+        result = self.codex_cli(*args, **kw)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return result
+
+    def queued(self):
+        if not os.path.exists(self.codex_log):
+            return []
+        with open(self.codex_log, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def settled_notify(self, name, turn=None, timeout=20):
+        """等通知记录走出 waiting / delivering；返回最后一条记录。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            records = [r for r in self.job(name).get("codex_notify") or [] if turn is None or r["turn"] == turn]
+            if records and records[-1].get("state") not in ("waiting", "delivering"):
+                return records[-1]
+            time.sleep(0.2)
+        self.fail(f"作业 {name} 的通知迟迟没有落定")
+
+    # ---------- 身份 ----------
+
+    def test_codex_identity_and_priority(self):
+        sys.path.insert(0, ROOT)
+        from agent_dispatch import store
+        # 执行者 / 显式自设 / Claude Code 的既有优先级都不退化，即使 CODEX 变量也在场
+        who = store.identify_dispatcher({"AGENT_DISPATCH_WORKER": "j-x", "CODEX_THREAD_ID": CODEX_THREAD}, 1,
+                                        lambda n: {"session_id": "ses-1"})
+        self.assertEqual((who["kind"], who["session_id"]), ("执行者", "ses-1"))
+        who = store.identify_dispatcher({"AGENT_DISPATCH_SESSION": "s-sup", "CODEX_THREAD_ID": CODEX_THREAD}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("主管", "s-sup"))
+        who = store.identify_dispatcher({"CLAUDE_CODE_SESSION_ID": "cc-9", "CODEX_THREAD_ID": CODEX_THREAD}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("Claude Code", "cc-9"))
+        # Codex：优先 CODEX_THREAD_ID，兼容 CODEX_SESSION_ID；是单独的明确记录
+        who = store.identify_dispatcher({"CODEX_THREAD_ID": CODEX_THREAD, "CODEX_SESSION_ID": "ses-old"}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("Codex", CODEX_THREAD))
+        who = store.identify_dispatcher({"CODEX_SESSION_ID": CODEX_THREAD}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("Codex", CODEX_THREAD))
+        # 都没有时不冒认：落到终端/ppid，绝不把执行者或终端当作 Codex thread
+        who = store.identify_dispatcher({"TERM_SESSION_ID": "w0t0p1"}, 1)
+        self.assertEqual(who["kind"], "终端")
+        who = store.identify_dispatcher({}, 4242)
+        self.assertEqual((who["kind"], who["session_id"]), ("终端", "ppid-4242"))
+
+    def test_codex_dispatcher_recorded_on_job(self):
+        self.codex_ok("start", "c0", "-p", "t", "STATUS: PASS")
+        self.codex_ok("wait", "c0", "--timeout", "20")
+        dispatcher = self.job("c0")["dispatcher"]
+        self.assertEqual((dispatcher["kind"], dispatcher["session_id"]), ("Codex", CODEX_THREAD))
+
+    # ---------- 自动回传 ----------
+
+    def test_codex_headless_start_auto_delivers_once(self):
+        self.codex_ok("start", "c1", "-p", "t", "MKRUN r1\nSTATUS: PASS\nRUN_DIR: runs/r1")
+        self.codex_ok("wait", "c1", "--timeout", "20")
+        record = self.settled_notify("c1", 1)
+        # 记录：状态、目标 thread、稳定事件 ID、结果与日志路径
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(record["target"], CODEX_THREAD)
+        self.assertEqual(record["event_id"], "codex-c1-t1")
+        self.assertIn("notify.log", record["log"])
+        # 投递：argv 数组调用假 codex（queue --thread <UUID> --message <摘要>），一条、不多投
+        entries = self.queued()
+        self.assertEqual(len(entries), 1)
+        argv = entries[0]["argv"]
+        self.assertEqual(argv[0], "queue")
+        self.assertEqual(argv[argv.index("--thread") + 1], CODEX_THREAD)
+        message = argv[argv.index("--message") + 1]
+        self.assertIn("作业 c1", message)
+        self.assertIn("第 1 轮", message)
+        self.assertIn("待审查", message)          # 状态是「待审查」，不宣称验收通过
+        self.assertIn("STATUS=PASS", message)
+        self.assertIn("codex-c1-t1", message)     # 稳定事件 ID
+        self.assertIn("result.md", message)       # 结论路径
+        self.assertNotIn("run.log 的全部内容", message)
+        # 执行者结果不受影响
+        job = self.job("c1")
+        self.assertEqual((job["state"], job["status"]), ("done", "PASS"))
+        # status --json 能查到通知状态与目标
+        self.assertEqual(self.job("c1")["codex_notify"][0]["target"], CODEX_THREAD)
+        # 详情里能看到投递结果
+        self.assertIn("已入队", self.codex_ok("status", "c1").stdout)
+
+    def test_fast_job_does_not_miss_delivery(self):
+        # 假智能体立即结束：等待器还没启动作业就已落定，第一条轮询要能补上投递
+        self.codex_ok("start", "c-fast", "-p", "t", "STATUS: PASS")
+        record = self.settled_notify("c-fast", 1)
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(len(self.queued()), 1)
+
+    def test_non_codex_and_disabled_jobs_do_not_notify(self):
+        # 普通会话（无 CODEX 变量）与 Claude 会话：不登记、不投递
+        self.ok("start", "n1", "-p", "t", "STATUS: PASS")
+        self.ok("wait", "n1", "--timeout", "20")
+        # Claude Code 主管：保持原有流程（自带后台 wait），agent-dispatch 不替它投递
+        self.ok("start", "n2", "-p", "t", "STATUS: PASS", env_extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
+        self.ok("wait", "n2", "--timeout", "20")
+        # Codex 主管但关闭自动回传：身份照常识别，只是不回传
+        self.codex_ok("start", "n3", "-p", "t", "STATUS: PASS", env_extra={"AGENT_DISPATCH_CODEX_NOTIFY": "0"})
+        self.codex_ok("wait", "n3", "--timeout", "20")
+        self.assertEqual(self.job("n3")["dispatcher"]["kind"], "Codex")
+        import time as time_mod
+        time_mod.sleep(1.5)  # 给可能存在的错误等待器留出投递时间
+        for name in ("n1", "n2", "n3"):
+            self.assertIsNone(self.job(name).get("codex_notify"))
+        self.assertEqual(self.queued(), [])
+
+    def test_reply_notifies_each_turn_on_original_thread(self):
+        self.codex_ok("start", "reply-c", "-p", "t", "STATUS: NEEDS_DECISION")
+        self.assertEqual(self.settled_notify("reply-c", 1)["state"], "queued")
+        self.codex_ok("reply", "reply-c", "STATUS: PASS")
+        self.assertEqual(self.settled_notify("reply-c", 2)["state"], "queued")
+        messages = [e["argv"][e["argv"].index("--message") + 1] for e in self.queued()]
+        self.assertEqual(len(messages), 2)
+        self.assertIn("codex-reply-c-t1", messages[0])
+        self.assertIn("codex-reply-c-t2", messages[1])
+
+    def test_failed_delivery_is_visible_and_retry_is_idempotent(self):
+        self.codex_ok("start", "fail-c", "-p", "t", "STATUS: PASS",
+                      env_extra={"FAKE_CODEX_RC": "7"})
+        record = self.settled_notify("fail-c", 1)
+        self.assertEqual(record["state"], "failed")
+        self.assertIn("退出码 7", record["error"])
+        self.assertEqual(self.job("fail-c")["status"], "PASS")
+        self.codex_ok("notify-retry", "fail-c")
+        self.codex_ok("notify-retry", "fail-c")
+        self.assertEqual(len(self.queued()), 2)  # 初次失败 + 一次重试
+        self.assertEqual(self.job("fail-c")["codex_notify"][0]["attempts"], 2)
+
+    def test_timeout_is_uncertain_and_not_resent(self):
+        self.codex_ok("start", "timeout-c", "-p", "t", "STATUS: PASS",
+                      env_extra={"FAKE_CODEX_SLEEP": "2", "AGENT_DISPATCH_CODEX_QUEUE_TIMEOUT": "0.2"})
+        self.assertEqual(self.settled_notify("timeout-c", 1)["state"], "uncertain")
+        result = self.codex_cli("notify-retry", "timeout-c")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("不自动重发", result.stderr)
+        self.assertEqual(len(self.queued()), 1)
+
+    def test_concurrent_waiters_do_not_duplicate_queue(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.codex_ok("start", "dup-c", "-p", "t", "SLEEP 1\nSTATUS: PASS")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.codex_cli, "_notify", "dup-c", "1") for _ in range(2)]
+            self.assertTrue(all(f.result().returncode == 0 for f in futures))
+        self.assertEqual(self.settled_notify("dup-c", 1)["state"], "queued")
+        self.assertEqual(len(self.queued()), 1)
+
+    def test_stale_held_and_cancelled_results_are_suppressed(self):
+        from agent_dispatch import notify, store
+        job = {"name": "j", "turn": 2, "state": "done"}
+        self.assertEqual(notify.turn_action(job, 1)[0], "suppress")
+        for state in ["held", "stopped", "accepted", "rejected"]:
+            self.assertEqual(notify.turn_action(dict(job, state=state), 2)[0], "suppress")
+        for value in ["window-title", "thread; command", "", None]:
+            self.assertIsNone(store.valid_thread_id(value))
+
+    @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
+    def test_tmux_finished_turn_notifies(self):
+        self.codex_ok("start", "tmux-c", "-p", "t", "--mode", "tmux", "STATUS: PASS")
+        record = self.settled_notify("tmux-c", 1, timeout=30)
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(self.job("tmux-c")["mode"], "tmux")
+        self.assertEqual(len(self.queued()), 1)
