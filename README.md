@@ -32,13 +32,17 @@
 Claude/Codex 变量，pi 身份在它们之前识别）识别并绑定原会话，`kind` 记为 `pi`。
 `start`、`reply` 和 `follow` 成功后自动启动本地等待器；本轮结束后，把结果事件原子写入
 `~/.agent-dispatch/notify/pi/<会话>/<事件>.json`，由仓库里 `.pi/extensions/agent-dispatch-supervisor.ts`
-扩展送入原会话：空闲时触发新回合，忙时排 followUp。用户可以继续留在同一会话聊天，
-无需模型循环调用 `wait`；监听与等待只用文件系统，不调用模型。
+扩展送入原会话。扩展统一以 followUp 方式请求投递：pi 空闲时立即触发新回合，忙时排队，
+不打断在飞回合。用户可以继续留在同一会话聊天，无需模型循环调用 `wait`；
+监听与等待只用文件系统，不调用模型。
 
 - 加载方式：在仓库目录启动 pi（工程扩展自动加载，改过扩展后 `/reload` 生效），或在任意目录用
   `pi -e <仓库>/.pi/extensions/agent-dispatch-supervisor.ts` 显式加载。执行者进程与非交互单轮模式不监听。
-- 扩展送入前会重查台账：过时回合、人工持有、叫停、已验收/驳回的一律抑制，不自动处理。
+- 扩展送入前会按与 `wait`/`status` 一致的规则重查台账：过时回合、人工持有、叫停、已验收/驳回的一律抑制；
+  台账写着 running 但运行器进程已不在的，按意外中断送入（与 Python 的 effective_state 同一规则）。
   消费结果留在同名 `.sent.json` / `.suppressed.json` 标记里，`status <作业>` 可查。
+  通知到达只代表「该去复核了」：同一事件可能因崩溃恢复被重送一次，消费时先读最新 status，
+  按最新状态处理，不要仅凭通知本身重复派工或裁决。
 - 未加载扩展时事件只写盘、不会被谎报已消费；`status <作业>` 的「待扩展消费」即提示手动
   `agent-dispatch wait <作业>`。重载或切回原会话时会补投遗留的未消费事件；切换到别的会话不会收到旧会话的通知。
 - 设置 `AGENT_DISPATCH_PI_NOTIFY=0` 可关闭 pi 自动回传（与 `AGENT_DISPATCH_CODEX_NOTIFY` 相互独立）。

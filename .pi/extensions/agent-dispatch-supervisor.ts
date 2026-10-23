@@ -4,8 +4,12 @@
  * Python 侧（agent-dispatch）在一轮结束后把事件原子写入
  *   $AGENT_DISPATCH_HOME/notify/pi/<session>/<event_id>.json
  * 本扩展只监听当前会话自己的目录（session_start 建，session_shutdown 清）：
- *   - 空闲时 triggerTurn 触发回合，忙时排 followUp（pi 自己会在回合结束后投递）；
- *   - 送入前重查作业台账：过时、人工持有、叫停、已裁决的一律抑制并留下标记；
+ *   - 发送统一用 pi.sendMessage(msg, { triggerTurn: true, deliverAs: "followUp" })：
+ *     pi 在空闲时立即触发新回合，忙时（含运行启动中、agent_end 后续跑窗口）排 followUp；
+ *     扩展不维护私有 busy，不拿自己的生命周期猜测 pi 的真实状态；
+ *   - 送入前按与 Python store.effective_state 相同的规则重查 raw 台账：
+ *     running + runner_pid 已死/缺失 => interrupted，可送；runner 存活或 EPERM => running，暂不送；
+ *     过时回合、人工持有、叫停、已验收/驳回一律抑制并留下标记；
  *   - 去重靠内存 handled 集合 + 串行处理；未消费事件保留在磁盘，重载/恢复时补投；
  *   - 执行者（AGENT_DISPATCH_WORKER）与非交互单轮模式（print / json）不监听；
  *   - AGENT_DISPATCH_PI_NOTIFY=0 关闭。
@@ -35,7 +39,6 @@ interface DispatchEvent {
 export default function (pi: ExtensionAPI) {
   let watcher: fs.FSWatcher | undefined;
   let dir: string | undefined;
-  let busy = false;
   let draining: Promise<void> = Promise.resolve();
   const handled = new Set<string>();
 
@@ -69,12 +72,36 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** 只读存活检查：与 Python store.alive 等价（信号 0；ESRCH=已死；EPERM=无权但进程在，按存活）。 */
+  function alive(pid?: number | null): boolean {
+    if (!pid) {
+      return false;
+    }
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** 与 Python store.effective_state 等价：raw running + runner 已死/缺失 => interrupted。
+   *  台账（raw state + runner_pid）是唯一权威，事件文件只是视图；两侧由跨语言回归固定等价。 */
+  function effectiveState(job: { state?: string; runner_pid?: number | null }): string {
+    if (job.state === "running" && !alive(job.runner_pid)) {
+      return "interrupted";
+    }
+    return job.state ?? "-";
+  }
+
   /** 送入前重查台账；返回 null 表示可以送入，否则返回抑制原因。 */
   function recheck(event: DispatchEvent): string | null {
     if (!event.job_file) {
       return null;
     }
-    let job: { turn?: number; state?: string };
+    let job: { turn?: number; state?: string; runner_pid?: number | null };
     try {
       job = JSON.parse(fs.readFileSync(event.job_file, "utf-8"));
     } catch {
@@ -83,11 +110,12 @@ export default function (pi: ExtensionAPI) {
     if (job.turn !== event.turn) {
       return `回合已过时（台账在第 ${job.turn} 轮）`;
     }
-    if (typeof job.state === "string" && DECIDED.has(job.state)) {
-      return `作业已${job.state}，不自动送入`;
+    const state = effectiveState(job);
+    if (typeof state === "string" && DECIDED.has(state)) {
+      return `作业已${state}，不自动送入`;
     }
-    if (typeof job.state !== "string" || !DELIVERABLE.has(job.state)) {
-      return `作业状态为 ${job.state ?? "未知"}，暂不送入`;
+    if (typeof state !== "string" || !DELIVERABLE.has(state)) {
+      return `作业状态为 ${state}，暂不送入`;
     }
     return null;
   }
@@ -99,13 +127,10 @@ export default function (pi: ExtensionAPI) {
       display: true,
       details: event,
     };
-    if (busy) {
-      // 忙时排 followUp：当前回合结束后 pi 自动把它作为新一轮送入
-      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-      return "followUp";
-    }
-    pi.sendMessage(message, { triggerTurn: true });
-    return "triggerTurn";
+    // 统一 followUp：pi 空闲时 triggerTurn 立即启动新回合；忙时（含运行启动中、
+    // agent_end 后续跑窗口）进入 followUp 队列，不会 steer 进在飞回合
+    pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+    return "followUp";
   }
 
   function drain(): Promise<void> {
@@ -150,7 +175,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     stopWatching(); // 幂等：切换/重载前 session_shutdown 已清过，这里再兜底
     handled.clear();
-    busy = false;
     dir = undefined;
     draining = Promise.resolve();
     if (!enabled() || process.env.AGENT_DISPATCH_WORKER) return;
@@ -170,18 +194,9 @@ export default function (pi: ExtensionAPI) {
     await drain(); // 补投重载/恢复前遗留的未消费事件
   });
 
-  pi.on("agent_start", () => {
-    busy = true;
-  });
-
-  pi.on("agent_end", () => {
-    busy = false;
-  });
-
   pi.on("session_shutdown", async () => {
     stopWatching();
     dir = undefined;
     handled.clear();
-    busy = false;
   });
 }

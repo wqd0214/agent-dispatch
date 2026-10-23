@@ -14,6 +14,7 @@ function argOf(name) {
 }
 const boundaryHome = argOf("--boundary-home");
 const boundarySession = argOf("--boundary-session");
+const boundaryEvent = argOf("--boundary-event");
 
 const results = [];
 
@@ -131,13 +132,42 @@ async function scenarioIdle() {
     const send = pi.sends[0];
     const marker = path.join(sessionSubdir(homeDir, SESSION), "pi-harness-t1.sent.json");
     const consumed = JSON.parse(fs.readFileSync(marker, "utf-8")).consumed;
-    const ok = send.options.triggerTurn === true && send.options.deliverAs === undefined
+    // 统一 followUp 请求：闲时由 pi 的 triggerTurn 立即启动新回合，标记如实记录 followUp
+    const ok = send.options.triggerTurn === true && send.options.deliverAs === "followUp"
       && send.message.customType === "agent-dispatch-result"
       && send.message.display === true
       && String(send.message.content).includes("harness")
       && send.message.details?.event_id === "pi-harness-t1"
-      && consumed.deliverAs === "triggerTurn";
+      && consumed.deliverAs === "followUp";
     record("idle_trigger_turn", ok, JSON.stringify(send.options) + " consumed=" + JSON.stringify(consumed));
+  } finally {
+    delete process.env.AGENT_DISPATCH_HOME;
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+}
+
+// pi 生命周期窗口回归：运行启动中（agent_start 尚未发出）、agent_end 后（续跑/压缩/重试可能再起 run）。
+// 扩展不维护私有 busy，三个窗口的断言一致：统一 triggerTurn + followUp；
+// 若将来恢复 busy 分叉逻辑，这些场景会抓住窗口错位。
+async function expectFollowUpAt(homeDir, factory, label, warmup) {
+  const pi = makePi();
+  factory(pi.api);
+  await pi.fire("session_start", { type: "session_start", reason: "startup" }, makeCtx(SESSION));
+  if (warmup) await warmup(pi);
+  const eventId = "pi-w-" + label;
+  writeEvent(homeDir, SESSION, baseEvent({ event_id: eventId, session_id: SESSION }));
+  await waitFor(() => pi.sends.length >= 1, label + " 投递");
+  const send = pi.sends[0];
+  const ok = send.options.triggerTurn === true && send.options.deliverAs === "followUp"
+    && readDir(homeDir, SESSION).sent.length === 1;
+  record(label, ok, JSON.stringify(send.options));
+}
+
+async function scenarioRunStartingWindow() {
+  const homeDir = tempHome("win-start");
+  process.env.AGENT_DISPATCH_HOME = homeDir;
+  try {
+    await expectFollowUpAt(homeDir, await load(), "window_run_starting_follow_up", null);
   } finally {
     delete process.env.AGENT_DISPATCH_HOME;
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -148,22 +178,73 @@ async function scenarioBusy() {
   const homeDir = tempHome("busy");
   process.env.AGENT_DISPATCH_HOME = homeDir;
   try {
+    await expectFollowUpAt(homeDir, await load(), "busy_follow_up",
+      async (pi) => pi.fire("agent_start", { type: "agent_start" }, makeCtx(SESSION)));
+  } finally {
+    delete process.env.AGENT_DISPATCH_HOME;
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+}
+
+async function scenarioAfterAgentEnd() {
+  const homeDir = tempHome("win-end");
+  process.env.AGENT_DISPATCH_HOME = homeDir;
+  try {
+    await expectFollowUpAt(homeDir, await load(), "window_after_agent_end_follow_up",
+      async (pi) => {
+        await pi.fire("agent_start", { type: "agent_start" }, makeCtx(SESSION));
+        await pi.fire("agent_end", { type: "agent_end", messages: [] }, makeCtx(SESSION));
+      });
+  } finally {
+    delete process.env.AGENT_DISPATCH_HOME;
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+}
+
+// effective_state 跨语言等价回归（与 tests/test_dispatch.py 的
+// test_pi_effective_state_matches_extension_contract 同一组输入）：
+// raw running + runner 已死/缺失 => interrupted（送入）；runner 存活 => running（抑制）
+async function scenarioEffectiveState() {
+  const homeDir = tempHome("eff");
+  process.env.AGENT_DISPATCH_HOME = homeDir;
+  try {
     const factory = await load();
     const pi = makePi();
     factory(pi.api);
     await pi.fire("session_start", { type: "session_start", reason: "startup" }, makeCtx(SESSION));
-    await pi.fire("agent_start", { type: "agent_start" }, makeCtx(SESSION));
-    writeEvent(homeDir, SESSION, baseEvent({ event_id: "pi-h-t1", session_id: SESSION }));
-    await waitFor(() => pi.sends.length >= 1, "busy followUp");
-    const busy = pi.sends[0];
-    const busyOk = busy.options.triggerTurn === true && busy.options.deliverAs === "followUp";
-    await pi.fire("agent_end", { type: "agent_end", messages: [] }, makeCtx(SESSION));
-    writeEvent(homeDir, SESSION, baseEvent({ event_id: "pi-h-t2", session_id: SESSION }));
-    await waitFor(() => pi.sends.length >= 2, "空闲后 triggerTurn");
-    const idle = pi.sends[1];
-    const idleOk = idle.options.triggerTurn === true && idle.options.deliverAs === undefined;
-    record("busy_follow_up", busyOk && idleOk,
-      "busy=" + JSON.stringify(busy.options) + " idle=" + JSON.stringify(idle.options));
+    const jobFile = path.join(homeDir, "job.json");
+    const child = (await import("node:child_process")).spawn("/bin/sleep", ["30"]);
+    child.kill();
+    await new Promise((resolve) => child.on("exit", resolve));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    let dead;
+    try {
+      process.kill(child.pid, 0);
+      record("effective_state_equivalence", false, "子进程 pid 意外仍存活，无法构造已死 pid");
+      return;
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+      dead = child.pid;
+    }
+    // case A：runner 已死 => interrupted，送入
+    fs.writeFileSync(jobFile, JSON.stringify({ name: "h", turn: 1, state: "running", runner_pid: dead }));
+    writeEvent(homeDir, SESSION, baseEvent({ event_id: "pi-e-dead", session_id: SESSION, job_file: jobFile }));
+    await waitFor(() => readDir(homeDir, SESSION).sent.length >= 1, "已死 runner 送入");
+    const deadSent = pi.sends.length === 1 && pi.sends[0].options.deliverAs === "followUp";
+    // case B：runner 存活（本进程）=> running，抑制
+    fs.writeFileSync(jobFile, JSON.stringify({ name: "h", turn: 1, state: "running", runner_pid: process.pid }));
+    writeEvent(homeDir, SESSION, baseEvent({ event_id: "pi-e-alive", session_id: SESSION, job_file: jobFile }));
+    await waitFor(() => readDir(homeDir, SESSION).suppressed.length >= 1, "存活 runner 抑制");
+    const alive = JSON.parse(fs.readFileSync(
+      path.join(sessionSubdir(homeDir, SESSION), "pi-e-alive.suppressed.json"), "utf-8"));
+    const aliveOk = pi.sends.length === 1 && /running/.test(alive.consumed?.reason || "");
+    // case C：runner_pid 缺失 => interrupted，送入
+    fs.writeFileSync(jobFile, JSON.stringify({ name: "h", turn: 1, state: "running" }));
+    writeEvent(homeDir, SESSION, baseEvent({ event_id: "pi-e-missing", session_id: SESSION, job_file: jobFile }));
+    await waitFor(() => pi.sends.length >= 2, "缺失 runner_pid 送入");
+    const missingOk = pi.sends.length === 2 && pi.sends[1].options.deliverAs === "followUp";
+    record("effective_state_equivalence", deadSent && aliveOk && missingOk,
+      "dead=" + deadSent + " aliveReason=" + alive.consumed?.reason + " missing=" + missingOk);
   } finally {
     delete process.env.AGENT_DISPATCH_HOME;
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -319,10 +400,11 @@ async function scenarioBoundary() {
     const pi = makePi();
     factory(pi.api);
     await pi.fire("session_start", { type: "session_start", reason: "startup" }, makeCtx(boundarySession));
-    const send = await waitFor(() => pi.sends.find((s) => s.message.details?.event_id === "pi-bx-t1"),
+    const send = await waitFor(() => pi.sends.find((s) => s.message.details?.event_id === boundaryEvent),
       "消费 Python 产出的事件");
     const state = readDir(boundaryHome, boundarySession);
-    const ok = String(send.message.content).includes("bx") && state.pending.length === 0 && state.sent.length === 1;
+    const ok = String(send.message.content).includes(boundaryEvent) && state.pending.length === 0
+      && state.sent.length === 1;
     record("boundary_real_event", ok, JSON.stringify(send.message.details));
   } finally {
     if (saved === undefined) delete process.env.AGENT_DISPATCH_HOME;
@@ -333,7 +415,10 @@ async function scenarioBoundary() {
 async function main() {
   const steps = [
     ["idle_trigger_turn", scenarioIdle],
+    ["window_run_starting_follow_up", scenarioRunStartingWindow],
     ["busy_follow_up", scenarioBusy],
+    ["window_after_agent_end_follow_up", scenarioAfterAgentEnd],
+    ["effective_state_equivalence", scenarioEffectiveState],
     ["duplicate_event", scenarioDuplicate],
     ["stale_and_decided_suppressed", scenarioSuppressed],
     ["reload_recovery", scenarioReload],
@@ -351,7 +436,7 @@ async function main() {
         return () => delete process.env.AGENT_DISPATCH_PI_NOTIFY;
       })],
   ];
-  if (boundaryHome && boundarySession) {
+  if (boundaryHome && boundarySession && boundaryEvent) {
     steps.unshift(["boundary_real_event", scenarioBoundary]);
   }
   for (const [name, scenario] of steps) {

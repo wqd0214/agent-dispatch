@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,32 @@ os.environ["AGENT_DISPATCH_CODEX_NOTIFY"] = "0"
 os.environ["AGENT_DISPATCH_PI_NOTIFY"] = "0"
 FAKE = os.path.join(ROOT, "tests", "fake_agent.py")
 FAKE_TUI = os.path.join(ROOT, "tests", "fake_tui.py")
+EXTENSION = os.path.join(ROOT, ".pi", "extensions", "agent-dispatch-supervisor.ts")
+HARNESS = os.path.join(ROOT, "tests", "extension_harness.mjs")
+
+
+def run_extension_harness(boundary_home=None, boundary_session=None, boundary_event=None):
+    """用 Node 直接执行真实 TS 扩展（harness）；宿主身份与通知变量不得泄漏进子进程。
+
+    boundary_home/boundary_session/boundary_event 给出时，额外跑 boundary 场景：
+    扩展消费 Python 真实流程产出的事件文件（Python↔TypeScript 边界）。
+    """
+    cmd = [shutil.which("node"), HARNESS, EXTENSION]
+    if boundary_home:
+        cmd += ["--boundary-home", boundary_home, "--boundary-session", boundary_session,
+                "--boundary-event", boundary_event]
+    env = dict(os.environ)
+    for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
+                "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "PI_SESSION_ID",
+                "AGENT_DISPATCH_CODEX_NOTIFY", "AGENT_DISPATCH_PI_NOTIFY", "AGENT_DISPATCH_HOME",
+                "AGENT_DISPATCH_NOTIFY_POLL", "AGENT_DISPATCH_CODEX_QUEUE_TIMEOUT"):
+        env.pop(key, None)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=ROOT, env=env)
+    results = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT "):
+            results.append(json.loads(line[len("RESULT "):]))
+    return proc, results
 
 
 class DispatchBase(unittest.TestCase):
@@ -3141,6 +3168,79 @@ class PiNotifyTest(DispatchBase):
         detail = self.pi_ok("status", "p-mark").stdout
         self.assertIn("已送入会话", detail)
         self.assertIn("triggerTurn", detail)
+
+    def test_pi_effective_state_matches_extension_contract(self):
+        # 跨语言等价回归的 Python 侧基准：与 extension_harness 的 effective_state_equivalence
+        # 场景用同一组输入；两边结论必须一致（修改任一侧前先同步另一侧）
+        sys.path.insert(0, ROOT)
+        from agent_dispatch import store
+        dead = self._spawn_then_kill_pid()
+        # raw running + runner 已死/缺失 => interrupted；runner 存活（EPERM/信号 0 成功）=> running
+        self.assertEqual(store.effective_state({"state": "running", "runner_pid": dead}), "interrupted")
+        self.assertEqual(store.effective_state({"state": "running"}), "interrupted")
+        self.assertEqual(store.effective_state({"state": "running", "runner_pid": os.getpid()}), "running")
+        self.assertEqual(store.effective_state({"state": "done", "runner_pid": dead}), "done")
+
+    def _spawn_then_kill_pid(self):
+        """产一个确定已退出的 pid（SIGKILL 后收尸），供存活检查断言用。"""
+        proc = subprocess.Popen(["/bin/sleep", "30"])
+        proc.kill()
+        proc.wait()
+        return proc.pid
+
+    def test_pi_interrupted_reaches_extension_without_reconcile(self):
+        # 运行器被 SIGKILL（关机/OOM/误杀）：台账停在 raw running + runner_pid，
+        # 等待器按 effective_state 写出 interrupted 事件；扩展消费时按同一规则读 raw 台账送入。
+        # 全程不调 status/wait/reconcile，避免把问题掩在消费之前。
+        self.pi_ok("start", "p-int", "-p", "t", "SLEEP 60\nSTATUS: PASS")
+        job_path = os.path.join(self.home, "jobs", "p-int", "job.json")
+        with open(job_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        runner_pid, child_pid = raw["runner_pid"], raw.get("child_pid")
+        os.kill(runner_pid, signal.SIGKILL)
+        killed_child = child_pid is None
+        if not killed_child:
+            os.kill(child_pid, signal.SIGKILL)  # 测试卫生：不留孤儿假智能体
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            with open(job_path, encoding="utf-8") as f:  # 直接读文件，不经 status/reconcile
+                raw = json.load(f)
+            if not killed_child and raw.get("child_pid"):
+                try:
+                    os.kill(raw["child_pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                killed_child = True  # child_pid 由运行器稍后写入，读到就补刀
+            records = raw.get("pi_notify") or []
+            if records and records[-1]["state"] not in ("waiting", "delivering"):
+                break
+            time.sleep(0.2)
+        else:
+            self.fail("作业 p-int 的 pi 通知迟迟没有落定")
+        record = records[-1]
+        self.assertEqual(record["state"], "queued")
+        # 事件 state=interrupted，而台账仍是 raw running + 原 runner_pid（通知路径不改台账）
+        self.assertEqual(raw["state"], "running")
+        self.assertEqual(raw["runner_pid"], runner_pid)
+        with open(os.path.join(self.session_dir(), "pi-p-int-t1.json"), encoding="utf-8") as f:
+            event = json.load(f)
+        self.assertEqual(event["state"], "interrupted")
+        self.assertIn("意外中断", event["message"])
+        # 真实扩展消费：interrupted 事件必须送入，而不是被 raw running 抑制
+        proc, results = run_extension_harness(boundary_home=self.home, boundary_session=PI_SESSION_A,
+                                              boundary_event="pi-p-int-t1")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        boundary = next(r for r in results if r["scenario"] == "boundary_real_event")
+        self.assertTrue(boundary["ok"], json.dumps(boundary, ensure_ascii=False))
+        marker = os.path.join(self.session_dir(), "pi-p-int-t1.sent.json")
+        with open(marker, encoding="utf-8") as f:
+            consumed = json.load(f)["consumed"]
+        self.assertEqual(consumed["action"], "sent")
+        self.assertEqual(consumed["deliverAs"], "followUp")
+        # 扩展不改台账：仍是 raw running + 原 runner_pid，资源清理仍归 CLI reconcile
+        with open(job_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        self.assertEqual((raw["state"], raw["runner_pid"]), ("running", runner_pid))
 
     @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
     def test_pi_tmux_finished_turn_notifies(self):
