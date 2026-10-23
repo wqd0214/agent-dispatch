@@ -14,7 +14,7 @@ import time
 import unicodedata
 import webbrowser
 
-from . import backends, definitions, gates, inject, limits, models, notify, runner, store, tmux
+from . import backends, definitions, gates, inject, limits, models, notify, pi_notify, runner, store, tmux
 from .store import DispatchError, identify_dispatcher, touch_session, who_dispatches
 
 STATE_LABEL = store.STATE_LABEL
@@ -391,6 +391,9 @@ def cmd_start(a):
     notify.ensure_waiter(a.job)
     if notify.supervisor_thread(job):
         store.info("Codex 结果自动回传已登记；等待由本地进程执行，无需模型循环 wait（status 可查通知状态）")
+    elif pi_notify.supervisor_session(job):
+        store.info("pi 结果自动回传已登记：主管会话需加载 agent-dispatch-supervisor 扩展；"
+                   "未加载扩展时请手动 agent-dispatch wait（status 可查通知状态）")
     return 0
 
 
@@ -637,6 +640,18 @@ def print_job_detail(job):
     for record in job.get("codex_notify", []):
         print(f"回传      第{record['turn']}轮 {notify.STATE_CN.get(record['state'], record['state'])}"
               f" → {record['target']}（入队不等于已消费）")
+        if record.get("error") or record.get("reason"):
+            print(f"          {record.get('error') or record.get('reason')}")
+    for record in job.get("pi_notify", []):
+        consumed = pi_notify.consumption(record)
+        if consumed and consumed.get("action") == "sent":
+            note = f"（已送入会话：{consumed.get('deliverAs') or 'sendMessage'}）"
+        elif consumed:
+            note = f"（扩展已抑制：{consumed.get('reason') or '状态已变化'}）"
+        else:
+            note = "（待扩展消费，未确认已消费；未加载扩展时手动 wait）"
+        print(f"回传(pi)  第{record['turn']}轮 {pi_notify.STATE_CN.get(record['state'], record['state'])}"
+              f" → {record['target']}{note}")
         if record.get("error") or record.get("reason"):
             print(f"          {record.get('error') or record.get('reason')}")
     print(f"方式      {job.get('mode', 'headless')}" + (f"   界面{'开着' if tmux.alive(job.get('tmux')) else '已关闭'}" if job.get("tmux") else ""))
@@ -1454,8 +1469,10 @@ def cmd_run(a):
 
 def cmd_notify_retry(a):
     job = get_job(a.job)
-    state, note = notify.retry_now(a.job, a.turn or job["turn"])
-    store.info(f"{notify.STATE_CN.get(state, state)}：{note}")
+    turn = a.turn or job["turn"]
+    labels = pi_notify.STATE_CN if notify.record_and_transport(job, turn)[1] == "pi" else notify.STATE_CN
+    state, note = notify.retry_now(a.job, turn)
+    store.info(f"{labels.get(state, state)}：{note}")
     return 2 if state in ("failed", "uncertain") else 0
 
 
@@ -1646,7 +1663,7 @@ def build_parser():
     p = sub.add_parser("_run")  # 内部：后台运行器入口
     p.add_argument("job")
     p.set_defaults(func=cmd_run)
-    p = add("notify-retry", cmd_notify_retry, "重试 Codex 结果回传；已入队或投递结果不明时不重复发送")
+    p = add("notify-retry", cmd_notify_retry, "重试结果回传（Codex / pi）；已入队或投递结果不明时不重复发送")
     p.add_argument("job")
     p.add_argument("--turn", type=int, help="回合（默认当前回合）")
     p = sub.add_parser("_notify")

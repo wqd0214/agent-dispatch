@@ -243,11 +243,18 @@ def valid_thread_id(value):
         return None
 
 
+def valid_session_id(value):
+    """pi 会话 ID（PI_SESSION_ID，即 pi 里 sessionManager.getSessionId() 的值）：
+    非空且只含文件名安全字符才有效；空 / 非法 ID 不冒认 pi，也不启用回传。"""
+    return value if isinstance(value, str) and NAME_RE.match(value) else None
+
+
 def identify_dispatcher(env, ppid, load_job=None):
     """纯函数：按环境变量识别当前是谁在派工/裁决。load_job 只在执行者嵌套派工时用来查父作业的会话标识。
 
-    优先级：执行者 > 显式自设会话 > Claude Code > Codex 原会话 > 终端。Codex 只认
-    CODEX_THREAD_ID / CODEX_SESSION_ID 里的原会话 thread UUID，终端标题、PPID 一律不当 thread。
+    优先级：执行者 > 显式自设会话 > pi 原会话 > Claude Code > Codex 原会话 > 终端。
+    pi 会话里嵌套运行时还带着宿主的 Claude/Codex 变量，因此 PI_SESSION_ID 要在它们之前识别；
+    Codex 只认 CODEX_THREAD_ID / CODEX_SESSION_ID 里的原会话 thread UUID，终端标题、PPID 一律不当 thread。
     """
     def out(kind, session_id, parent_job=None):
         return {"kind": kind, "session_id": session_id, "title": None, "cwd": None, "parent_job": parent_job}
@@ -262,6 +269,9 @@ def identify_dispatcher(env, ppid, load_job=None):
         return out("执行者", session_id or f"job:{worker}", worker)
     if env.get("AGENT_DISPATCH_SESSION"):  # 任何主管工具都可以自设
         return out(env.get("AGENT_DISPATCH_SESSION_KIND") or "主管", env["AGENT_DISPATCH_SESSION"])
+    pi_session = valid_session_id(env.get("PI_SESSION_ID"))
+    if pi_session:
+        return out("pi", pi_session)
     if env.get("CLAUDE_CODE_SESSION_ID"):
         return out("Claude Code", env["CLAUDE_CODE_SESSION_ID"])
     thread = valid_thread_id(env.get("CODEX_THREAD_ID") or env.get("CODEX_SESSION_ID"))

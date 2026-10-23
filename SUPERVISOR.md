@@ -55,6 +55,11 @@ agent-dispatch escalate <作业名> "<要用户决定什么>"      # 然后停�
   再执行闸门、证据复核和裁决；已人工接手、已裁决或过时的通知不重复处理。“已入队”不是“已验收”。
   `status` 可查通知错误，明确失败可用 `notify-retry`；结果不明时先核对原会话，不盲目重发。
   Claude Code 和其它宿主继续使用原有后台 wait 方式。
+- **pi 主管自动回传**：在交互式 pi（环境里有 `PI_SESSION_ID`）中照常派工，结果事件写到本地
+  `notify/pi/<会话>/`，由 `.pi/extensions/agent-dispatch-supervisor.ts` 扩展送入原会话（仓库目录启动 pi 自动加载，
+  或 `pi -e <仓库>/.pi/extensions/agent-dispatch-supervisor.ts` 显式加载；改过扩展后 `/reload`）。
+  空闲时触发新回合，忙时排 followUp；监听不调用模型。未加载扩展时事件只写盘，`status` 显示「待扩展消费」，
+  此时手动 `wait`；`AGENT_DISPATCH_PI_NOTIFY=0` 关闭。过时/人工持有/已裁决的通知会被扩展抑制，仍需按最新 status 复核后再裁决。
 - **看到作业「排队中」是正常的**：那是相应模型的并发上限已满，排在前面的作业结束后它会自动开始，不要因此叫停或重派。
 - **作业名不可重用**。续派用 `reply`；重跑另起一个名字（如 `<场景>-r2`）。
 - **tmux 方式的作业在审完之前一直占着通道**（界面和浏览器还开着）。所以默认一个一个来：
