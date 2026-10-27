@@ -19,9 +19,23 @@ agent-dispatch ──读写──▶ ~/.agent-dispatch/jobs/…  ◀──只读
 
 需要 Python 3.9+（只用标准库）；tmux 方式需要 tmux。
 
+### 命令行工具
+
 ```bash
 ln -s "$PWD/bin/agent-dispatch" ~/.local/bin/agent-dispatch
 ```
+
+### 主管技能（让智能体读 SKILL.md 当主管）
+
+```bash
+# pi
+ln -s "$PWD" ~/.pi/agent/skills/agent-dispatch
+
+# Claude Code
+ln -s "$PWD" ~/.claude/skills/agent-dispatch
+```
+
+装好后，在 pi 里说「你当主管」或 `/agent-dispatch` 即触发；Claude Code 同理。
 
 ## 项目、工程、角色
 
