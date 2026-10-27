@@ -1,9 +1,9 @@
 # agent-dispatch
 
 纯命令行的多智能体派工：一个**主管**智能体负责派工和裁决，若干**执行者**智能体负责干活。
-主管和执行者都可以是任意命令行智能体（pi、OpenCode，后续可加 Claude Code、Codex）。
+主管和执行者都可以是任意命令行智能体（pi、OpenCode、Codex、Claude Code）。
 
-全部状态是 `~/.agent-dispatch/` 下的文件。Codex 主管的作业另外启动一个本地通知等待进程，等待期间不调用模型。
+全部状态是 `~/.agent-dispatch/` 下的文件。Codex 和 pi 主管的作业另外启动一个本地通知等待进程，等待期间不调用模型；本轮结束后自动把结果回传到原会话。
 
 ## Codex 原会话自动回传
 
