@@ -5,51 +5,6 @@
 
 全部状态是 `~/.agent-dispatch/` 下的文件。Codex 和 pi 主管的作业另外启动一个本地通知等待进程，等待期间不调用模型；本轮结束后自动把结果回传到原会话。
 
-## Codex 原会话自动回传
-
-在交互式 Codex 中照常派工即可：工具从 `CODEX_THREAD_ID`（兼容 `CODEX_SESSION_ID`）识别并绑定原会话。
-`start`、`reply` 和 `follow` 成功后自动启动本地等待器；本轮结束后，以 `codex queue` 向原会话排入结果。
-用户可以继续留在同一会话聊天，无需模型循环调用 `wait`，也不启动另一个 Codex 主管。
-执行者正常工作和主管处理结果仍消耗各自的 Token。
-
-- Claude Code、其它主管和手动 `wait` 的用法不变。执行者仍可选 headless 或 tmux。
-- 需要本机 Codex 支持 `queue`，并能连接承载原会话的服务；本次已验证 Codex 0.163.0 的本地共享服务。
-  不支持跨机器、独立 `--no-daemon` 会话或任意远程端点自动发现，不能把通知发给另一个服务里的同名会话。
-- `status <作业>` / `status <作业> --json` 可查每轮 `codex_notify` 状态、目标、错误和 `notify.log` 路径。
-  “已入队”仅表示 Codex 接受消息，不代表主管已消费，更不代表作业已验收。
-- 明确投递失败后可执行 `agent-dispatch notify-retry <作业> [--turn N]`；每轮最多 3 次投递。
-  超时或投递进程中断可能已入队，状态为“结果不明”，不自动重发；先在原会话核对。
-- 人工持有、叫停、已裁决或过时回合不发送结果。正在投递时的人工操作与外部消息接受之间存在短暂竞态，
-  主管消费通知后仍须读取最新状态，不直接重复派工或裁决。
-- 设置 `AGENT_DISPATCH_CODEX_NOTIFY=0` 可关闭自动回传。自定义安装可设置 `AGENT_DISPATCH_CODEX_BIN`。
-  等待器不是系统常驻服务；机器重启或等待器被杀后，检查作业状态，再使用 `notify-retry` 补投已结束作业。
-
-通知只传作业、回合、状态和本地结果路径，不上传完整日志。现有 Codex 认证与配置保持不变。
-
-## pi 原会话自动回传
-
-在交互式 pi 里照常派工即可：工具从 `PI_SESSION_ID`（pi 会话里嵌套运行时也带着宿主的
-Claude/Codex 变量，pi 身份在它们之前识别）识别并绑定原会话，`kind` 记为 `pi`。
-`start`、`reply` 和 `follow` 成功后自动启动本地等待器；本轮结束后，把结果事件原子写入
-`~/.agent-dispatch/notify/pi/<会话>/<事件>.json`，由仓库里 `.pi/extensions/agent-dispatch-supervisor.ts`
-扩展送入原会话。扩展统一以 followUp 方式请求投递：pi 空闲时立即触发新回合，忙时排队，
-不打断在飞回合。用户可以继续留在同一会话聊天，无需模型循环调用 `wait`；
-监听与等待只用文件系统，不调用模型。
-
-- 加载方式：在仓库目录启动 pi（工程扩展自动加载，改过扩展后 `/reload` 生效），或在任意目录用
-  `pi -e <仓库>/.pi/extensions/agent-dispatch-supervisor.ts` 显式加载。执行者进程与非交互单轮模式不监听。
-- 扩展送入前会按与 `wait`/`status` 一致的规则重查台账：过时回合、人工持有、叫停、已验收/驳回的一律抑制；
-  台账写着 running 但运行器进程已不在的，按意外中断送入（与 Python 的 effective_state 同一规则）。
-  消费结果留在同名 `.sent.json` / `.suppressed.json` 标记里，`status <作业>` 可查。
-  通知到达只代表「该去复核了」：同一事件可能因崩溃恢复被重送一次，消费时先读最新 status，
-  按最新状态处理，不要仅凭通知本身重复派工或裁决。
-- 未加载扩展时事件只写盘、不会被谎报已消费；`status <作业>` 的「待扩展消费」即提示手动
-  `agent-dispatch wait <作业>`。重载或切回原会话时会补投遗留的未消费事件；切换到别的会话不会收到旧会话的通知。
-- 设置 `AGENT_DISPATCH_PI_NOTIFY=0` 可关闭 pi 自动回传（与 `AGENT_DISPATCH_CODEX_NOTIFY` 相互独立）。
-- 明确投递失败（通知目录写不进等）可用 `agent-dispatch notify-retry <作业> [--turn N]`；每轮最多 3 次。
-  已写入通知文件的作业不重复投递；结果是否到达原会话以扩展标记为准。
-- 跨机器不可用：通知走本机文件，扩展与派工命令必须读同一个 `AGENT_DISPATCH_HOME`。
-
 ```
 主管（任意智能体会话，或你本人）
    │ 调命令
@@ -99,6 +54,85 @@ agent-dispatch roles -P c2         # 这个项目可派的角色；roles show te
 ```
 
 解析顺序：全局角色 → 项目的 `defaults` → 项目角色，后者逐项覆盖前者。同一个工程的通道由该工程的所有角色共用。
+
+## 快速开始
+
+```bash
+# 按角色派工。在项目的工程目录里执行时 --project 可省略
+agent-dispatch start sanTai-01 --project c2 --role tester --batch 回归-1002 \
+    --batch-title "出库回归" --batch-reason "上线前回归出库主流程" "跑 托盘库出库-整托三态判定"
+agent-dispatch start fix-5619 -P c2 -r backend-dev --batch 回归-1002 --follows sanTai-01 "修复：移入收货重复点击产生两条记录……"
+agent-dispatch start pda-ui -P c2 -r frontend-dev --repo pda "……"      # 角色负责多个工程时指明工程
+
+agent-dispatch wait sanTai-01            # 限时等；返回码 3 = 还在跑
+agent-dispatch status                    # 总览；--project <项目名> --repo <工程名> 筛选
+agent-dispatch status sanTai-01          # 单个作业：结论、STATUS、QUESTION、接入方式、派工者
+agent-dispatch sessions                  # 按派工会话汇总：每个会话派了几张单、各是什么状态
+agent-dispatch batches                   # 按事项汇总：每个批次的标题、原因、谁派的、各状态数量
+agent-dispatch batch 回归-1002           # 看一个事项；--title / --reason 事后补标题和原因
+agent-dispatch gate sanTai-01            # 机械闸门
+agent-dispatch accept sanTai-01 --note "核对了 report.md 的三态断言"
+```
+
+不用角色也能派（临时的活）：
+
+```bash
+agent-dispatch start demo --cwd ~/some/repo -b pi "把 README 里的错别字改掉，最后写 STATUS: PASS"
+```
+
+`start` 会自动识别是谁在派工（执行者嵌套派工、`AGENT_DISPATCH_SESSION` 自设会话、Claude Code 会话、终端），
+记进作业的 `dispatcher` 字段并登记到 `sessions/` 目录；也可以用 `--session-title "一句话说明这次会话在办什么事"` 给会话起名，
+方便用户在总览里按会话查看。裁决（reply / accept / reject / stop 等）也会记下是哪个会话做的。
+
+每个批次是一个「事项」：`--batch-title` / `--batch-reason` 说明要办什么事、为什么派这批单（登记在 `batches/<批次>.json`，
+忘了带时命令会提醒事后用 `agent-dispatch batch <批次> --title … --reason …` 补上）；`--follows <作业名>` 标明这张单
+是因为哪张单才派的（重派、按复核意见修复、接着上一步做），网页上会挂在那张单下面。
+
+## 让谁当主管
+
+在本目录打开任意智能体即可，它会读 `AGENTS.md`（Claude Code 读 `SKILL.md`），再读 `SUPERVISOR.md`。
+`SUPERVISOR.md` 是主管角色的唯一来源：职责、工作循环、裁决表（哪些能自己定、哪些必须问你、哪些禁止）。
+
+主管不要在被测工程目录里启动：那里的工具配置和执行约定是给执行者的。
+
+## 两种运行方式
+
+| | `headless`（默认） | `tmux` |
+|---|---|---|
+| 执行者是什么 | 无头进程，一轮结束就退出 | 跑在 tmux 会话里的交互界面，两轮之间不退出 |
+| 看过程 | `log -f`、`history`、网页 | 同左，外加 `attach` 直接看界面 |
+| 中途插话 | 不能，只能 `stop` 后 `reply` | `attach` 进去直接打字 |
+| 两轮之间的浏览器和页面状态 | 取决于智能体 | 保留 |
+| 通道何时释放 | 每轮结束 | `accept` / `reject` / `stop` 之后 |
+| 模型 | `--model` 指定 | `--model` 指定（OpenCode 以独立服务模式启动界面来让模型生效）；实际用的模型若与指定的不同，会在日志和总览里标出 |
+
+用 `--mode` 或角色定义里的 `mode` 切换。tmux 方式下回合是否结束，靠读智能体自己的会话存储判断，不依赖执行者自觉。
+
+## 看和介入
+
+```bash
+agent-dispatch log <作业> -f          # 实时输出（工具调用、回复）
+agent-dispatch history <作业> --full  # 逐步的工具入参与返回
+agent-dispatch attach <作业>          # tmux 方式：接进界面，可直接打字；Ctrl-b d 退出，不影响作业
+agent-dispatch hub                    # tmux 方式：接进汇总会话，每个作业一个窗口，新派的自动出现；Ctrl-b n / p 切换
+agent-dispatch web start --open       # 网页总览，后台运行并打开浏览器；web stop 停止，web status 查看
+agent-dispatch web                    # 同上，但在前台运行（Ctrl-C 关闭）
+agent-dispatch status --watch         # 终端里的总览
+agent-dispatch sessions                # 按派工会话汇总（--project <项目ID> 筛选）；配合 start --session-title 使用
+
+agent-dispatch stop <作业>            # 叫停（已结束的 tmux 作业：只关界面、释放通道）
+agent-dispatch reply <作业> "…"       # 在同一会话里续派
+agent-dispatch take <作业>            # 人工接手：主管不再往里派；用完 release
+```
+
+汇总会话是一个名为 `agent-dispatch` 的 tmux 会话：tmux 方式的作业派出时，界面窗口会自动挂进去并以作业名命名，
+首个窗口是作业总览。在任意终端（如 Zed 的 Terminal Thread）里执行一次 `agent-dispatch hub` 并保持开着，
+之后新派的作业就会自己出现在里面。关掉它不影响作业；环境变量 `AGENT_DISPATCH_HUB` 可改名，设为空串则不启用。
+
+网页的作业部分是只读的旁观者，「模型与角色」页可以修改配置；关掉网页不影响任何作业。工作台按事项（批次）分组列出
+要你处理的单子（可切回按状态），顶部有通道占用提示；「事项」页按派出顺序列出每个事项的全部单子，带 follows 的缩进挂靠；
+作业详情里有用例判定和「因 X 而派 / 后续：Y」的关联。
+没有登记进项目的目录也能派工，归类按目录推断：工程是目录名（worktree 归到主工程），项目是它的上级目录名。
 
 ## 模型、模型池与派工工具
 
@@ -235,84 +269,56 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 agent-dispatch start smoke-1 -P c2 -r tester-pallet --env 382 -f 任务.md
 ```
 
-## 快速开始
+## 主管原会话自动回传
 
-```bash
-# 按角色派工。在项目的工程目录里执行时 --project 可省略
-agent-dispatch start sanTai-01 --project c2 --role tester --batch 回归-1002 \
-    --batch-title "出库回归" --batch-reason "上线前回归出库主流程" "跑 托盘库出库-整托三态判定"
-agent-dispatch start fix-5619 -P c2 -r backend-dev --batch 回归-1002 --follows sanTai-01 "修复：移入收货重复点击产生两条记录……"
-agent-dispatch start pda-ui -P c2 -r frontend-dev --repo pda "……"      # 角色负责多个工程时指明工程
+主管在 Codex 或 pi 的交互会话里派工后，不需要反复调用 `wait` 等结果——工具会自动等待作业完成，
+然后把结果回传到派工的那个会话，主管可以继续和用户交流，结果到了自然触发复核和裁决。
 
-agent-dispatch wait sanTai-01            # 限时等；返回码 3 = 还在跑
-agent-dispatch status                    # 总览；--project <项目名> --repo <工程名> 筛选
-agent-dispatch status sanTai-01          # 单个作业：结论、STATUS、QUESTION、接入方式、派工者
-agent-dispatch sessions                  # 按派工会话汇总：每个会话派了几张单、各是什么状态
-agent-dispatch batches                   # 按事项汇总：每个批次的标题、原因、谁派的、各状态数量
-agent-dispatch batch 回归-1002           # 看一个事项；--title / --reason 事后补标题和原因
-agent-dispatch gate sanTai-01            # 机械闸门
-agent-dispatch accept sanTai-01 --note "核对了 report.md 的三态断言"
-```
+通知只传作业、回合、状态和本地结果路径，不上传完整日志。
 
-不用角色也能派（临时的活）：
+### Codex 主管
 
-```bash
-agent-dispatch start demo --cwd ~/some/repo -b pi "把 README 里的错别字改掉，最后写 STATUS: PASS"
-```
+工具从 `CODEX_THREAD_ID`（兼容 `CODEX_SESSION_ID`）识别并绑定原会话。
+`start`、`reply` 和 `follow` 成功后自动启动本地等待器；本轮结束后，以 `codex queue` 向原会话排入结果。
+用户可以继续留在同一会话聊天，无需模型循环调用 `wait`，也不启动另一个 Codex 主管。
+执行者正常工作和主管处理结果仍消耗各自的 Token。
 
-`start` 会自动识别是谁在派工（执行者嵌套派工、`AGENT_DISPATCH_SESSION` 自设会话、Claude Code 会话、终端），
-记进作业的 `dispatcher` 字段并登记到 `sessions/` 目录；也可以用 `--session-title "一句话说明这次会话在办什么事"` 给会话起名，
-方便用户在总览里按会话查看。裁决（reply / accept / reject / stop 等）也会记下是哪个会话做的。
+- Claude Code、其它主管和手动 `wait` 的用法不变。执行者仍可选 headless 或 tmux。
+- 需要本机 Codex 支持 `queue`，并能连接承载原会话的服务；本次已验证 Codex 0.163.0 的本地共享服务。
+  不支持跨机器、独立 `--no-daemon` 会话或任意远程端点自动发现，不能把通知发给另一个服务里的同名会话。
+- `status <作业>` / `status <作业> --json` 可查每轮 `codex_notify` 状态、目标、错误和 `notify.log` 路径。
+  "已入队"仅表示 Codex 接受消息，不代表主管已消费，更不代表作业已验收。
+- 明确投递失败后可执行 `agent-dispatch notify-retry <作业> [--turn N]`；每轮最多 3 次投递。
+  超时或投递进程中断可能已入队，状态为"结果不明"，不自动重发；先在原会话核对。
+- 人工持有、叫停、已裁决或过时回合不发送结果。正在投递时的人工操作与外部消息接受之间存在短暂竞态，
+  主管消费通知后仍须读取最新状态，不直接重复派工或裁决。
+- 设置 `AGENT_DISPATCH_CODEX_NOTIFY=0` 可关闭自动回传。自定义安装可设置 `AGENT_DISPATCH_CODEX_BIN`。
+  等待器不是系统常驻服务；机器重启或等待器被杀后，检查作业状态，再使用 `notify-retry` 补投已结束作业。
 
-每个批次是一个「事项」：`--batch-title` / `--batch-reason` 说明要办什么事、为什么派这批单（登记在 `batches/<批次>.json`，
-忘了带时命令会提醒事后用 `agent-dispatch batch <批次> --title … --reason …` 补上）；`--follows <作业名>` 标明这张单
-是因为哪张单才派的（重派、按复核意见修复、接着上一步做），网页上会挂在那张单下面。
+现有 Codex 认证与配置保持不变。
 
-## 让谁当主管
+### pi 主管
 
-在本目录打开任意智能体即可，它会读 `AGENTS.md`（Claude Code 读 `SKILL.md`），再读 `SUPERVISOR.md`。
-`SUPERVISOR.md` 是主管角色的唯一来源：职责、工作循环、裁决表（哪些能自己定、哪些必须问你、哪些禁止）。
+工具从 `PI_SESSION_ID`（pi 会话里嵌套运行时也带着宿主的 Claude/Codex 变量，pi 身份在它们之前识别）
+识别并绑定原会话，`kind` 记为 `pi`。`start`、`reply` 和 `follow` 成功后自动启动本地等待器；
+本轮结束后，把结果事件原子写入 `~/.agent-dispatch/notify/pi/<会话>/<事件>.json`，
+由仓库里 `.pi/extensions/agent-dispatch-supervisor.ts` 扩展送入原会话。
+扩展统一以 followUp 方式请求投递：pi 空闲时立即触发新回合，忙时排队，不打断在飞回合。
+监听与等待只用文件系统，不调用模型。
 
-主管不要在被测工程目录里启动：那里的工具配置和执行约定是给执行者的。
-
-## 两种运行方式
-
-| | `headless`（默认） | `tmux` |
-|---|---|---|
-| 执行者是什么 | 无头进程，一轮结束就退出 | 跑在 tmux 会话里的交互界面，两轮之间不退出 |
-| 看过程 | `log -f`、`history`、网页 | 同左，外加 `attach` 直接看界面 |
-| 中途插话 | 不能，只能 `stop` 后 `reply` | `attach` 进去直接打字 |
-| 两轮之间的浏览器和页面状态 | 取决于智能体 | 保留 |
-| 通道何时释放 | 每轮结束 | `accept` / `reject` / `stop` 之后 |
-| 模型 | `--model` 指定 | `--model` 指定（OpenCode 以独立服务模式启动界面来让模型生效）；实际用的模型若与指定的不同，会在日志和总览里标出 |
-
-用 `--mode` 或角色定义里的 `mode` 切换。tmux 方式下回合是否结束，靠读智能体自己的会话存储判断，不依赖执行者自觉。
-
-## 看和介入
-
-```bash
-agent-dispatch log <作业> -f          # 实时输出（工具调用、回复）
-agent-dispatch history <作业> --full  # 逐步的工具入参与返回
-agent-dispatch attach <作业>          # tmux 方式：接进界面，可直接打字；Ctrl-b d 退出，不影响作业
-agent-dispatch hub                    # tmux 方式：接进汇总会话，每个作业一个窗口，新派的自动出现；Ctrl-b n / p 切换
-agent-dispatch web start --open       # 网页总览，后台运行并打开浏览器；web stop 停止，web status 查看
-agent-dispatch web                    # 同上，但在前台运行（Ctrl-C 关闭）
-agent-dispatch status --watch         # 终端里的总览
-agent-dispatch sessions                # 按派工会话汇总（--project <项目ID> 筛选）；配合 start --session-title 使用
-
-agent-dispatch stop <作业>            # 叫停（已结束的 tmux 作业：只关界面、释放通道）
-agent-dispatch reply <作业> "…"       # 在同一会话里续派
-agent-dispatch take <作业>            # 人工接手：主管不再往里派；用完 release
-```
-
-汇总会话是一个名为 `agent-dispatch` 的 tmux 会话：tmux 方式的作业派出时，界面窗口会自动挂进去并以作业名命名，
-首个窗口是作业总览。在任意终端（如 Zed 的 Terminal Thread）里执行一次 `agent-dispatch hub` 并保持开着，
-之后新派的作业就会自己出现在里面。关掉它不影响作业；环境变量 `AGENT_DISPATCH_HUB` 可改名，设为空串则不启用。
-
-网页的作业部分是只读的旁观者，「模型与角色」页可以修改配置；关掉网页不影响任何作业。工作台按事项（批次）分组列出
-要你处理的单子（可切回按状态），顶部有通道占用提示；「事项」页按派出顺序列出每个事项的全部单子，带 follows 的缩进挂靠；
-作业详情里有用例判定和「因 X 而派 / 后续：Y」的关联。
-没有登记进项目的目录也能派工，归类按目录推断：工程是目录名（worktree 归到主工程），项目是它的上级目录名。
+- 加载方式：在仓库目录启动 pi（工程扩展自动加载，改过扩展后 `/reload` 生效），或在任意目录用
+  `pi -e <仓库>/.pi/extensions/agent-dispatch-supervisor.ts` 显式加载。执行者进程与非交互单轮模式不监听。
+- 扩展送入前会按与 `wait`/`status` 一致的规则重查台账：过时回合、人工持有、叫停、已验收/驳回的一律抑制；
+  台账写着 running 但运行器进程已不在的，按意外中断送入（与 Python 的 effective_state 同一规则）。
+  消费结果留在同名 `.sent.json` / `.suppressed.json` 标记里，`status <作业>` 可查。
+  通知到达只代表「该去复核了」：同一事件可能因崩溃恢复被重送一次，消费时先读最新 status，
+  按最新状态处理，不要仅凭通知本身重复派工或裁决。
+- 未加载扩展时事件只写盘、不会被谎报已消费；`status <作业>` 的「待扩展消费」即提示手动
+  `agent-dispatch wait <作业>`。重载或切回原会话时会补投遗留的未消费事件；切换到别的会话不会收到旧会话的通知。
+- 设置 `AGENT_DISPATCH_PI_NOTIFY=0` 可关闭 pi 自动回传（与 `AGENT_DISPATCH_CODEX_NOTIFY` 相互独立）。
+- 明确投递失败（通知目录写不进等）可用 `agent-dispatch notify-retry <作业> [--turn N]`；每轮最多 3 次。
+  已写入通知文件的作业不重复投递；结果是否到达原会话以扩展标记为准。
+- 跨机器不可用：通知走本机文件，扩展与派工命令必须读同一个 `AGENT_DISPATCH_HOME`。
 
 ## 状态目录
 
@@ -364,4 +370,3 @@ python3 -m unittest discover -s tests     # 用假智能体跑端到端流程，
 ```
 
 另有一个 Tauri 2 桌面客户端（网页外壳 + 系统通知），见 [`client/README.md`](./client/README.md)。
-
