@@ -25,20 +25,20 @@ ln -s "$PWD/bin/agent-dispatch" ~/.local/bin/agent-dispatch
 
 ## 项目、工程、角色
 
-- **项目**：一条产品线或一个工程群（如 C2）。
+- **项目**：一条产品线或一个工程群（如 my-project）。
 - **工程**：项目下的一个代码仓库目录（前端、后端、测试工程……），可以带自己的资源，如浏览器通道。
 - **角色**：项目里的一个岗位（后端开发工程师、前端开发工程师、测试工程师……）。角色定义了：负责哪些工程、
   用哪个后端和模型、运行方式、默认占哪些通道、派工单模板（岗位职责和边界）、闸门。
 
 ```bash
-agent-dispatch projects add c2 --name WMS_ZC_C2 \
-    --repo backend=~/WmsProjects/WMS_ZC_C2/WMS_V3_backend --repo test=~/WmsProjects/WMS_ZC_C2/Zc_Wms_Test_V2
-agent-dispatch projects add-repo c2 frontend=~/WmsProjects/WMS_ZC_C2/Zc_Wms_Frontend
-agent-dispatch roles add backend-dev -P c2 --repos backend      # 沿用全局的「后端开发工程师」，只指定它在本项目负责的工程
-agent-dispatch roles add dba -P c2 --title 数据库管理员 --repos backend   # 全新角色：生成定义和派工单模板，再去改模板
+agent-dispatch projects add my-project --name MyProject \
+    --repo backend=~/projects/my-project/backend --repo test=~/projects/my-project/test
+agent-dispatch projects add-repo my-project frontend=~/projects/my-project/frontend
+agent-dispatch roles add backend-dev -P my-project --repos backend      # 沿用全局的「后端开发工程师」，只指定它在本项目负责的工程
+agent-dispatch roles add dba -P my-project --title 数据库管理员 --repos backend   # 全新角色：生成定义和派工单模板，再去改模板
 
-agent-dispatch projects            # 项目列表；projects show c2 看工程和角色
-agent-dispatch roles -P c2         # 这个项目可派的角色；roles show tester -P c2 看完整定义和派工单模板
+agent-dispatch projects            # 项目列表；projects show my-project 看工程和角色
+agent-dispatch roles -P my-project # 这个项目可派的角色；roles show tester -P my-project 看完整定义和派工单模板
 ```
 
 定义都是文件，直接编辑即可：
@@ -59,19 +59,19 @@ agent-dispatch roles -P c2         # 这个项目可派的角色；roles show te
 
 ```bash
 # 按角色派工。在项目的工程目录里执行时 --project 可省略
-agent-dispatch start sanTai-01 --project c2 --role tester --batch 回归-1002 \
-    --batch-title "出库回归" --batch-reason "上线前回归出库主流程" "跑 托盘库出库-整托三态判定"
-agent-dispatch start fix-5619 -P c2 -r backend-dev --batch 回归-1002 --follows sanTai-01 "修复：移入收货重复点击产生两条记录……"
-agent-dispatch start pda-ui -P c2 -r frontend-dev --repo pda "……"      # 角色负责多个工程时指明工程
+agent-dispatch start task-01 --project my-project --role tester --batch release-1002 \
+    --batch-title "版本回归" --batch-reason "上线前回归主流程" "跑 核心流程-判定逻辑"
+agent-dispatch start fix-001 -P my-project -r backend-dev --batch release-1002 --follows task-01 "修复：某功能异常产生重复数据……"
+agent-dispatch start pda-page -P my-project -r frontend-dev --repo pda "……"      # 角色负责多个工程时指明工程
 
-agent-dispatch wait sanTai-01            # 限时等；返回码 3 = 还在跑
+agent-dispatch wait task-01              # 限时等；返回码 3 = 还在跑
 agent-dispatch status                    # 总览；--project <项目名> --repo <工程名> 筛选
-agent-dispatch status sanTai-01          # 单个作业：结论、STATUS、QUESTION、接入方式、派工者
+agent-dispatch status task-01            # 单个作业：结论、STATUS、QUESTION、接入方式、派工者
 agent-dispatch sessions                  # 按派工会话汇总：每个会话派了几张单、各是什么状态
 agent-dispatch batches                   # 按事项汇总：每个批次的标题、原因、谁派的、各状态数量
-agent-dispatch batch 回归-1002           # 看一个事项；--title / --reason 事后补标题和原因
-agent-dispatch gate sanTai-01            # 机械闸门
-agent-dispatch accept sanTai-01 --note "核对了 report.md 的三态断言"
+agent-dispatch batch release-1002        # 看一个事项；--title / --reason 事后补标题和原因
+agent-dispatch gate task-01              # 机械闸门
+agent-dispatch accept task-01 --note "核对了 report.md 的关键断言"
 ```
 
 不用角色也能派（临时的活）：
@@ -142,9 +142,9 @@ agent-dispatch take <作业>            # 人工接手：主管不再往里派�
 agent-dispatch models import --list        # 先看工具里有哪些模型、哪些已登记；按名导入：models import <模型ID …>，全量：models import [--backend pi]
 agent-dispatch models                           # 登记表：状态、并发（占用 / 上限）、用在哪些角色
 agent-dispatch models limit pi:glm-5.3 3       # 单个模型的并发上限；default 恢复默认；--default N 改全局默认值
-agent-dispatch roles pool tester -P c2 pi:glm-5.3=70 oc:glm-5=30   # 项目角色的模型池：按 7:3
+agent-dispatch roles pool tester -P my-project pi:glm-5.3=70 oc:glm-5=30   # 项目角色的模型池：按 7:3
 agent-dispatch roles pool tester --global pi:glm-5.3=1             # 全局角色的模型池：项目里没单独配置的都沿用它
-agent-dispatch roles pool tester -P c2 pi:glm-5.3=1 oc:glm-5=1 oc:glm-4=1@2   # @2 是优先级：前两个均衡着用，都不可用才用第三个
+agent-dispatch roles pool tester -P my-project pi:glm-5.3=1 oc:glm-5=1 oc:glm-4=1@2   # @2 是优先级：前两个均衡着用，都不可用才用第三个
 agent-dispatch models disable oc:glm-5          # 停用某个模型：所有模型池自动跳过它
 agent-dispatch backends disable opencode        # 停用某个派工工具：新派工不再用它
 ```
@@ -171,15 +171,15 @@ agent-dispatch backends disable opencode        # 停用某个派工工具：新
 
 MCP 服务和技能各有一张全局登记表，键是唯一的**登记 ID**；条目里的 `name` 是下发给执行者时的服务/技能名（缺省等于登记 ID）。
 同一个服务名在不同工程里内容不同是常态（pi 全局、OpenCode 全局、各工程的配置里同名不同参）：
-导入时内容相同的来源合并成一条（记下全部来源），内容不同的各自成一条，登记 ID 为 `<名>@<来源简称>`（如 `playwright@a04-test`、`playwright@pi-global`），`name` 保持原名。
+导入时内容相同的来源合并成一条（记下全部来源），内容不同的各自成一条，登记 ID 为 `<名>@<来源简称>`（如 `playwright@project-test`、`playwright@pi-global`），`name` 保持原名。
 角色的 `mcp` / `skills` 字段存登记 ID；同一个角色选中的条目里不允许两个相同的 name（执行者按名字调用）。
 登记表可以从现有的 pi / OpenCode 配置导入（只读那些文件，绝不修改）：
 
 ```bash
 agent-dispatch mcp import             # 按服务名列出候选：同名冲突的展示各变体与差异参数
 agent-dispatch mcp import --all       # 全部导入（同名不同内容的各成一条）
-agent-dispatch mcp import playwright@a04-test                          # 按登记 ID 选
-agent-dispatch mcp import playwright --source "项目 a04/test 的 .pi/mcp.json"   # 或按来源消歧
+agent-dispatch mcp import playwright@project-test                      # 按登记 ID 选
+agent-dispatch mcp import playwright --source "项目 my-project/test 的 .pi/mcp.json"   # 或按来源消歧
 agent-dispatch mcp                     # 登记表（敏感信息已遮罩）：登记 ID、name、被哪些角色用、全部来源
 agent-dispatch mcp add mydb --command npx --args "-y,@bytebase/dbhub" --env DSN=mysql://...   # 手动登记（--name 可改下发名）
 agent-dispatch mcp add mydb2 --command npx --args "-y,@bytebase/dbhub" --exposure direct   # pi：工具直接声明给模型
@@ -226,8 +226,8 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 **环境**：项目登记有哪些环境，派工时用 `--env` 选一个。
 
 ```json
-// ~/.agent-dispatch/projects/c2/project.json
-{ "envs": {"382": {"name": "C2-382"}, "225": {"name": "C2-225"}},
+// ~/.agent-dispatch/projects/my-project/project.json
+{ "envs": {"382": {"name": "env-382"}, "225": {"name": "env-225"}},
   "limit_groups": {"test": 4} }
 ```
 
@@ -236,13 +236,13 @@ agent-dispatch skills add my-skill ~/skills/my-skill
   已派出的作业照常续派和裁决；`roles enable` 恢复。停用不随 `extends` 继承。某个环境暂时不测时，把它的角色停掉即可。
 - 角色写 `"env": "382"`：这个角色固定在 382 环境，派工不用带 `--env`（带了别的环境会被拒绝），其余和带了
   `--env 382` 完全一样。配合 `extends` 给每个环境建一个角色，选角色就定了环境：
-  `{"extends": "tester-pallet", "title": "托盘主测试工程师（382）", "env": "382"}`。
-- 角色写 `"repo_by_env": {"382": "t382-pallet", "225": "t225-pallet"}`：不同环境在不同工程（工作树）里干活，
+  `{"extends": "tester-main", "title": "主测试工程师（env-382）", "env": "382"}`。
+- 角色写 `"repo_by_env": {"382": "t382-main", "225": "t225-main"}`：不同环境在不同工程（工作树）里干活，
   不用再靠 `--repo` 记哪个目录对应哪个环境。
-- 角色 `mcp` 里的登记 ID 可以写 `{{env}}`，派工时换成所选环境：`"mcp": ["wms-db@{{env}}", "pw-pc", "pw-pda"]`。
+- 角色 `mcp` 里的登记 ID 可以写 `{{env}}`，派工时换成所选环境：`"mcp": ["mydb@{{env}}", "pw-pc", "pw-pda"]`。
   登记时每个环境各登记一条、`--name` 取同一个服务名，执行者看到的名字就不随环境变。
   派工没带 `--env` 时这类条目不下发（不针对某个环境的任务就不挂环境的服务）；要强制带环境用 `needs_env`。
-- 环境可以带 `vars`：`"envs": {"281": {"name": "A04-281", "vars": {"AT_ENV": "test281"}}}`，
+- 环境可以带 `vars`：`"envs": {"281": {"name": "env-281", "vars": {"AT_ENV": "test281"}}}`，
   选中这个环境时这些变量一并传给执行者，用来对接工程自己认的环境名。
 - 登记条目的 `command` / `args` / `env` / `url` / `headers` 里可以写占位符
   `{{env}}` `{{job}}` `{{role}}` `{{project}}` `{{repo}}` `{{cwd}}`，下发时按这张单填。例如浏览器目录写成
@@ -266,7 +266,7 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 浏览器里的页面状态不保留。不写则维持原先的行为：界面留到验收、驳回或叫停。
 
 ```bash
-agent-dispatch start smoke-1 -P c2 -r tester-pallet --env 382 -f 任务.md
+agent-dispatch start smoke-1 -P my-project -r tester-main --env 382 -f 任务.md
 ```
 
 ## 主管原会话自动回传
@@ -352,7 +352,7 @@ agent-dispatch start smoke-1 -P c2 -r tester-pallet --env 382 -f 任务.md
 闸门类型：`exit_ok`、`status_reported`、`run_dir`、`file`、`verdicts`。每项可设 `"level": "warn"` 降为提示；
 设 `"when": "run_dir"` 则只在任务产生了 run 目录时才检查（同一个角色既跑测试又写用例时用）。
 
-早先的 `profiles/*.json`（`-p wms-test`）仍然可用，但已被项目和角色取代。
+早先的 `profiles/*.json`（`-p my-profile`）仍然可用，但已被项目和角色取代。
 
 ## 已知限制
 
