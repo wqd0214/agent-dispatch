@@ -14,11 +14,10 @@ import time
 import unicodedata
 import webbrowser
 
-from . import backends, definitions, gates, inject, limits, models, runner, store, tmux
+from . import backends, definitions, gates, inject, limits, models, notify, pi_notify, runner, store, tmux
 from .store import DispatchError, identify_dispatcher, touch_session, who_dispatches
 
-STATE_LABEL = {"running": "运行中", "queued": "排队中", "done": "待审查", "failed": "运行失败", "stopped": "已叫停",
-               "interrupted": "意外中断", "held": "人工持有", "accepted": "已验收", "rejected": "已驳回"}
+STATE_LABEL = store.STATE_LABEL
 REPLYABLE = {"done", "failed", "stopped", "interrupted", "rejected"}
 EXIT_TIMEOUT = 3
 
@@ -228,7 +227,11 @@ def cmd_start(a):
     if store.exists(a.job):
         raise DispatchError(f"作业 {a.job} 已存在：续派用 reply，重新开始请换个作业名")
     profile = select_config(a)
-    env = a.env or None
+    if profile.get("enabled") is False:
+        raise DispatchError(f"角色 {profile.get('title') or profile.get('role')} 已停用，不接新单。"
+                            f"要用它先启用：agent-dispatch roles enable {profile.get('role')}"
+                            + (f" --project {profile['project_id']}" if profile.get("project_id") else " --global"))
+    env = a.env or profile.get("env") or None  # 角色固定了环境时不用带 --env
     if profile.get("needs_env") and not env:
         envs = (definitions.load_project(profile["project_id"])["envs"] if profile.get("project_id") else {})
         raise DispatchError(f"角色 {profile.get('title') or profile.get('role')} 派工时必须用 --env 指明环境"
@@ -385,6 +388,12 @@ def cmd_start(a):
     store.info(f"等结果：agent-dispatch wait {a.job}    看输出：agent-dispatch log {a.job} -f"
                + (f"    接进界面：agent-dispatch attach {a.job}" if mode == "tmux" else "")
                + ("    全部界面：agent-dispatch hub" if mode == "tmux" and tmux.hub_name() else ""))
+    notify.ensure_waiter(a.job)
+    if notify.supervisor_thread(job):
+        store.info("Codex 结果自动回传已登记；等待由本地进程执行，无需模型循环 wait（status 可查通知状态）")
+    elif pi_notify.supervisor_session(job):
+        store.info("pi 结果自动回传已登记：主管会话需加载 agent-dispatch-supervisor 扩展；"
+                   "未加载扩展时请手动 agent-dispatch wait（status 可查通知状态）")
     return 0
 
 
@@ -430,6 +439,7 @@ def cmd_reply(a):
                 store.save(job)
     if queued:
         store.info(f"已续派 {a.job} 第 {job['turn']} 轮，但并发已满，排队中：等 {waiting_text(job)}。空出来会自动开始")
+        notify.ensure_waiter(a.job)
         return 0
     if not backends.enabled(job["backend"]):
         store.info(f"注意：派工工具 {job['backend']} 已停用。续派仍在原会话里进行；新派工不会再用它")
@@ -439,6 +449,7 @@ def cmd_reply(a):
         store.update(a.job, state=state, turn=job["turn"] - 1, runner_pid=None, reason=f"续派未发出：{exc}")
         raise
     store.info(f"已续派 {a.job} 第 {job['turn']} 轮")
+    notify.ensure_waiter(a.job)
     return 0
 
 
@@ -456,6 +467,7 @@ def cmd_follow(a):
         decide(job, "follow", a.note)
         store.save(job)
     launch(job, "（重新跟进仍在运行的界面，未发送新内容）")
+    notify.ensure_waiter(a.job)
     store.info(f"已重新跟进 {a.job}：界面里的回合结束时会正常落定")
     return 0
 
@@ -625,6 +637,23 @@ def print_job_detail(job):
     dispatcher = job.get("dispatcher")
     if dispatcher:
         print(f"派工者    {dispatcher['kind']}  {dispatcher.get('title') or dispatcher.get('session_id') or ''}")
+    for record in job.get("codex_notify", []):
+        print(f"回传      第{record['turn']}轮 {notify.STATE_CN.get(record['state'], record['state'])}"
+              f" → {record['target']}（入队不等于已消费）")
+        if record.get("error") or record.get("reason"):
+            print(f"          {record.get('error') or record.get('reason')}")
+    for record in job.get("pi_notify", []):
+        consumed = pi_notify.consumption(record)
+        if consumed and consumed.get("action") == "sent":
+            note = f"（已送入会话：{consumed.get('deliverAs') or 'sendMessage'}）"
+        elif consumed:
+            note = f"（扩展已抑制：{consumed.get('reason') or '状态已变化'}）"
+        else:
+            note = "（待扩展消费，未确认已消费；未加载扩展时手动 wait）"
+        print(f"回传(pi)  第{record['turn']}轮 {pi_notify.STATE_CN.get(record['state'], record['state'])}"
+              f" → {record['target']}{note}")
+        if record.get("error") or record.get("reason"):
+            print(f"          {record.get('error') or record.get('reason')}")
     print(f"方式      {job.get('mode', 'headless')}" + (f"   界面{'开着' if tmux.alive(job.get('tmux')) else '已关闭'}" if job.get("tmux") else ""))
     if job.get("inject"):
         print("下发      " + "\n          ".join(inject.render(inject.describe_job(job))))
@@ -924,11 +953,12 @@ def current_project(a):
 
 
 def role_table(project):
-    rows = [("角色ID", "称呼", "工程", "模型·方式", "来源", "说明")]
+    rows = [("角色ID", "称呼", "状态", "环境", "工程", "模型·方式", "来源", "说明")]
     for role in definitions.list_roles(project):
         repos = "、".join(role["repos"]) or ("（派工时指定）" if project else "-")
         pool = " ".join(pool_pair(e) for e in role.get("model_pool") or [])
-        rows.append((role["role"], role["title"], repos, f"{pool or role.get('backend') or '-'}·{role.get('mode') or 'headless'}",
+        env = role.get("env") or ("--env 指定" if role.get("needs_env") else "-")
+        rows.append((role["role"], role["title"], "已停用" if role.get("enabled") is False else "可用", env, repos, f"{pool or role.get('backend') or '-'}·{role.get('mode') or 'headless'}",
                      role["scope"], runner.clip(role.get("description") or "", 44)))
     return rows
 
@@ -1350,6 +1380,12 @@ def cmd_roles(a):
         if role["_brief_path"]:
             print("\n" + (store.read_text(role["_brief_path"]) or ""))
         return 0
+    if action in ("enable", "disable"):
+        role_id = definitions.find_role_id(project, a.name)
+        path = definitions.set_role_fields(project, role_id, {"enabled": action == "enable"})
+        store.info(f"已{'启用' if action == 'enable' else '停用'}角色 {role_id}：{path}"
+                   + ("" if action == "enable" else "（不再接新单；已派出的作业不受影响）"))
+        return 0
     if action == "pool":
         path = definitions.set_pool(project, a.name, None if a.clear else parse_pool(a.pool))
         if project is None:
@@ -1431,6 +1467,15 @@ def cmd_run(a):
     return 0
 
 
+def cmd_notify_retry(a):
+    job = get_job(a.job)
+    turn = a.turn or job["turn"]
+    labels = pi_notify.STATE_CN if notify.record_and_transport(job, turn)[1] == "pi" else notify.STATE_CN
+    state, note = notify.retry_now(a.job, turn)
+    store.info(f"{labels.get(state, state)}：{note}")
+    return 2 if state in ("failed", "uncertain") else 0
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog="agent-dispatch", description="纯命令行的多智能体派工")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="命令")
@@ -1447,7 +1492,7 @@ def build_parser():
     p.add_argument("--role", "-r", help="角色 ID 或称呼，如 tester / 测试工程师（见 agent-dispatch roles）")
     p.add_argument("--repo", help="工程 ID：角色负责多个工程时用它指明")
     p.add_argument("--env", "-e", help="环境 ID（项目 envs 里登记的）：决定下发哪套环境的 MCP 服务、在哪个工程里干活，"
-                                       "并以 AGENT_DISPATCH_ENV 传给执行者")
+                                       "并以 AGENT_DISPATCH_ENV 传给执行者。角色自己固定了环境（角色的 env 字段）时不用带")
     p.add_argument("--profile", "-p", help="早先的 profile 名（已被 --project/--role 取代）")
     p.add_argument("--backend", "-b", help="后端：pi / opencode …（默认取角色定义）")
     p.add_argument("--model", "-m", help="模型（默认取角色定义或后端默认）")
@@ -1595,8 +1640,8 @@ def build_parser():
     p.add_argument("--name", help="add：技能名（缺省取目录名）")
     p.add_argument("--project", help="按项目看 / 导入 / 登记 / 启用：只看该项目的工程来源 + 全局来源，登记归属该项目")
 
-    p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID> / pool <角色> <模型短名>=<比例>[@<优先级>] …")
-    p.add_argument("action", nargs="?", choices=["list", "show", "add", "pool"])
+    p = add("roles", cmd_roles, "角色定义：列表 / show <角色> / add <角色ID> / enable|disable <角色> / pool <角色> <模型短名>=<比例>[@<优先级>] …")
+    p.add_argument("action", nargs="?", choices=["list", "show", "add", "enable", "disable", "pool"])
     p.add_argument("name", nargs="?")
     p.add_argument("pool", nargs="*", help="pool：模型池，如 pi:glm-5.3-flash=70 oc:glm-5=30；后面加 @<优先级> 分档（1 最优先，缺省为 1），"
                         "如 oc:glm-4=1@2 表示前一档都不可用时才用它")
@@ -1618,6 +1663,13 @@ def build_parser():
     p = sub.add_parser("_run")  # 内部：后台运行器入口
     p.add_argument("job")
     p.set_defaults(func=cmd_run)
+    p = add("notify-retry", cmd_notify_retry, "重试结果回传（Codex / pi）；已入队或投递结果不明时不重复发送")
+    p.add_argument("job")
+    p.add_argument("--turn", type=int, help="回合（默认当前回合）")
+    p = sub.add_parser("_notify")
+    p.add_argument("job")
+    p.add_argument("turn", type=int)
+    p.set_defaults(func=lambda a: notify.watch(a.job, a.turn))
     return ap
 
 

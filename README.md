@@ -3,7 +3,52 @@
 纯命令行的多智能体派工：一个**主管**智能体负责派工和裁决，若干**执行者**智能体负责干活。
 主管和执行者都可以是任意命令行智能体（pi、OpenCode，后续可加 Claude Code、Codex）。
 
-没有客户端，没有常驻服务。全部状态是 `~/.agent-dispatch/` 下的文件。
+全部状态是 `~/.agent-dispatch/` 下的文件。Codex 主管的作业另外启动一个本地通知等待进程，等待期间不调用模型。
+
+## Codex 原会话自动回传
+
+在交互式 Codex 中照常派工即可：工具从 `CODEX_THREAD_ID`（兼容 `CODEX_SESSION_ID`）识别并绑定原会话。
+`start`、`reply` 和 `follow` 成功后自动启动本地等待器；本轮结束后，以 `codex queue` 向原会话排入结果。
+用户可以继续留在同一会话聊天，无需模型循环调用 `wait`，也不启动另一个 Codex 主管。
+执行者正常工作和主管处理结果仍消耗各自的 Token。
+
+- Claude Code、其它主管和手动 `wait` 的用法不变。执行者仍可选 headless 或 tmux。
+- 需要本机 Codex 支持 `queue`，并能连接承载原会话的服务；本次已验证 Codex 0.163.0 的本地共享服务。
+  不支持跨机器、独立 `--no-daemon` 会话或任意远程端点自动发现，不能把通知发给另一个服务里的同名会话。
+- `status <作业>` / `status <作业> --json` 可查每轮 `codex_notify` 状态、目标、错误和 `notify.log` 路径。
+  “已入队”仅表示 Codex 接受消息，不代表主管已消费，更不代表作业已验收。
+- 明确投递失败后可执行 `agent-dispatch notify-retry <作业> [--turn N]`；每轮最多 3 次投递。
+  超时或投递进程中断可能已入队，状态为“结果不明”，不自动重发；先在原会话核对。
+- 人工持有、叫停、已裁决或过时回合不发送结果。正在投递时的人工操作与外部消息接受之间存在短暂竞态，
+  主管消费通知后仍须读取最新状态，不直接重复派工或裁决。
+- 设置 `AGENT_DISPATCH_CODEX_NOTIFY=0` 可关闭自动回传。自定义安装可设置 `AGENT_DISPATCH_CODEX_BIN`。
+  等待器不是系统常驻服务；机器重启或等待器被杀后，检查作业状态，再使用 `notify-retry` 补投已结束作业。
+
+通知只传作业、回合、状态和本地结果路径，不上传完整日志。现有 Codex 认证与配置保持不变。
+
+## pi 原会话自动回传
+
+在交互式 pi 里照常派工即可：工具从 `PI_SESSION_ID`（pi 会话里嵌套运行时也带着宿主的
+Claude/Codex 变量，pi 身份在它们之前识别）识别并绑定原会话，`kind` 记为 `pi`。
+`start`、`reply` 和 `follow` 成功后自动启动本地等待器；本轮结束后，把结果事件原子写入
+`~/.agent-dispatch/notify/pi/<会话>/<事件>.json`，由仓库里 `.pi/extensions/agent-dispatch-supervisor.ts`
+扩展送入原会话。扩展统一以 followUp 方式请求投递：pi 空闲时立即触发新回合，忙时排队，
+不打断在飞回合。用户可以继续留在同一会话聊天，无需模型循环调用 `wait`；
+监听与等待只用文件系统，不调用模型。
+
+- 加载方式：在仓库目录启动 pi（工程扩展自动加载，改过扩展后 `/reload` 生效），或在任意目录用
+  `pi -e <仓库>/.pi/extensions/agent-dispatch-supervisor.ts` 显式加载。执行者进程与非交互单轮模式不监听。
+- 扩展送入前会按与 `wait`/`status` 一致的规则重查台账：过时回合、人工持有、叫停、已验收/驳回的一律抑制；
+  台账写着 running 但运行器进程已不在的，按意外中断送入（与 Python 的 effective_state 同一规则）。
+  消费结果留在同名 `.sent.json` / `.suppressed.json` 标记里，`status <作业>` 可查。
+  通知到达只代表「该去复核了」：同一事件可能因崩溃恢复被重送一次，消费时先读最新 status，
+  按最新状态处理，不要仅凭通知本身重复派工或裁决。
+- 未加载扩展时事件只写盘、不会被谎报已消费；`status <作业>` 的「待扩展消费」即提示手动
+  `agent-dispatch wait <作业>`。重载或切回原会话时会补投遗留的未消费事件；切换到别的会话不会收到旧会话的通知。
+- 设置 `AGENT_DISPATCH_PI_NOTIFY=0` 可关闭 pi 自动回传（与 `AGENT_DISPATCH_CODEX_NOTIFY` 相互独立）。
+- 明确投递失败（通知目录写不进等）可用 `agent-dispatch notify-retry <作业> [--turn N]`；每轮最多 3 次。
+  已写入通知文件的作业不重复投递；结果是否到达原会话以扩展标记为准。
+- 跨机器不可用：通知走本机文件，扩展与派工命令必须读同一个 `AGENT_DISPATCH_HOME`。
 
 ```
 主管（任意智能体会话，或你本人）
@@ -153,6 +198,11 @@ agent-dispatch skills add my-skill ~/skills/my-skill
 ```
 
 - 角色写 `"needs_env": true`：派工不带 `--env` 就拒绝。
+- 角色可以停用：`agent-dispatch roles disable <角色> -P <项目>`（定义里写成 `"enabled": false`），停用后不接新单，
+  已派出的作业照常续派和裁决；`roles enable` 恢复。停用不随 `extends` 继承。某个环境暂时不测时，把它的角色停掉即可。
+- 角色写 `"env": "382"`：这个角色固定在 382 环境，派工不用带 `--env`（带了别的环境会被拒绝），其余和带了
+  `--env 382` 完全一样。配合 `extends` 给每个环境建一个角色，选角色就定了环境：
+  `{"extends": "tester-pallet", "title": "托盘主测试工程师（382）", "env": "382"}`。
 - 角色写 `"repo_by_env": {"382": "t382-pallet", "225": "t225-pallet"}`：不同环境在不同工程（工作树）里干活，
   不用再靠 `--repo` 记哪个目录对应哪个环境。
 - 角色 `mcp` 里的登记 ID 可以写 `{{env}}`，派工时换成所选环境：`"mcp": ["wms-db@{{env}}", "pw-pc", "pw-pda"]`。

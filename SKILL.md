@@ -36,4 +36,6 @@ agent-dispatch status <作业名> && agent-dispatch gate <作业名>
 ## 提示
 
 - 状态在 `~/.agent-dispatch/`，不在你的上下文里。会话重开或被压缩后，用 `status` 恢复现场。
-- 等待时间长时，如果你的环境支持后台运行命令并在结束时通知你，就用它跑 `agent-dispatch wait <作业名> --timeout 3600`；否则反复前台 `wait`。
+- Codex 交互主管：新版工具会自动绑定 `CODEX_THREAD_ID` / `CODEX_SESSION_ID`，在本地等待并用 `codex queue` 向原会话回传；派工后不再用模型循环 wait。结果通知到达后读取最新 status、gate 和证据，再裁决。通知错误用 status 查看，明确失败可 notify-retry。Claude Code 原流程不变。
+- pi 交互主管：派工时带 `PI_SESSION_ID` 会被识别为 pi 主管并绑定原会话；结果（含运行器意外中断）由 `.pi/extensions/agent-dispatch-supervisor.ts` 扩展统一以 followUp 请求送入（仓库目录启动 pi 即加载，或 `pi -e <仓库>/.pi/extensions/agent-dispatch-supervisor.ts`）。未加载扩展时 status 显示「待扩展消费」，手动 `wait` 兼底；`AGENT_DISPATCH_PI_NOTIFY=0` 关闭。通知可能因崩溃恢复重送，到达后同样先读最新 status、gate 和证据再裁决，不凭通知重复处理。
+- Claude Code 和其它宿主：等待时间长时，如果环境支持后台运行命令并在结束时通知你，就用它跑 `agent-dispatch wait <作业名> --timeout 3600`；否则反复前台 `wait`。

@@ -3,15 +3,50 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["AGENT_DISPATCH_HUB"] = ""  # 默认不启用汇总会话，免得用例把窗口挂进本机真实的那个；cli() 里再换成用例自己的
+# 测试进程不继承宿主的真实主管，也不默认发回传；通知专项会显式提供假目标和假 codex。
+# pi 身份同样要清掉：本机真实 pi 会话的 PI_SESSION_ID 不能漏进测试与它派生的子进程。
+os.environ.pop("CODEX_THREAD_ID", None)
+os.environ.pop("CODEX_SESSION_ID", None)
+os.environ.pop("PI_SESSION_ID", None)
+os.environ["AGENT_DISPATCH_CODEX_NOTIFY"] = "0"
+os.environ["AGENT_DISPATCH_PI_NOTIFY"] = "0"
 FAKE = os.path.join(ROOT, "tests", "fake_agent.py")
 FAKE_TUI = os.path.join(ROOT, "tests", "fake_tui.py")
+EXTENSION = os.path.join(ROOT, ".pi", "extensions", "agent-dispatch-supervisor.ts")
+HARNESS = os.path.join(ROOT, "tests", "extension_harness.mjs")
+
+
+def run_extension_harness(boundary_home=None, boundary_session=None, boundary_event=None):
+    """用 Node 直接执行真实 TS 扩展（harness）；宿主身份与通知变量不得泄漏进子进程。
+
+    boundary_home/boundary_session/boundary_event 给出时，额外跑 boundary 场景：
+    扩展消费 Python 真实流程产出的事件文件（Python↔TypeScript 边界）。
+    """
+    cmd = [shutil.which("node"), HARNESS, EXTENSION]
+    if boundary_home:
+        cmd += ["--boundary-home", boundary_home, "--boundary-session", boundary_session,
+                "--boundary-event", boundary_event]
+    env = dict(os.environ)
+    for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
+                "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "PI_SESSION_ID",
+                "AGENT_DISPATCH_CODEX_NOTIFY", "AGENT_DISPATCH_PI_NOTIFY", "AGENT_DISPATCH_HOME",
+                "AGENT_DISPATCH_NOTIFY_POLL", "AGENT_DISPATCH_CODEX_QUEUE_TIMEOUT"):
+        env.pop(key, None)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=ROOT, env=env)
+    results = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT "):
+            results.append(json.loads(line[len("RESULT "):]))
+    return proc, results
 
 
 class DispatchBase(unittest.TestCase):
@@ -25,6 +60,14 @@ class DispatchBase(unittest.TestCase):
         self.hub = "adhub-" + os.path.basename(self.tmp)
         os.makedirs(os.path.join(self.home, "profiles"))
         os.makedirs(os.path.join(self.work, "runs"))
+        self.test_bin = os.path.join(self.tmp, "test-bin")
+        os.makedirs(self.test_bin)
+        # 模型发现也必须隔离：网页用例不调用宿主 pi/opencode，codex 则默认拒绝外发。
+        for tool in ("pi", "opencode", "codex"):
+            path = os.path.join(self.test_bin, tool)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\nexit " + ("91" if tool == "codex" else "0") + "\n")
+            os.chmod(path, 0o755)
         backends = {
             "fakepi": {"format": "pi", "session": "named", "default_model": "m",
                        "argv": [sys.executable, FAKE, "pi", "{session}", "{task}", "{model}"],
@@ -60,15 +103,19 @@ class DispatchBase(unittest.TestCase):
         subprocess.run(["tmux", "kill-session", "-t", "=" + self.hub], capture_output=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def cli(self, *args, stdin=None, cwd=None, env_extra=None):
+    def child_env(self, env_extra=None):
         env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT,
-                   AGENT_DISPATCH_HUB=self.hub)  # 汇总会话用测试自己的名字，不碰本机真实的那个
+                   AGENT_DISPATCH_HUB=self.hub, PATH=self.test_bin + os.pathsep + os.environ["PATH"])
         # 跑测试的进程可能带着派工者相关的环境变量，识别不能被它们污染
         for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
-                    "CLAUDE_CODE_SESSION_ID", "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
+                    "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "PI_SESSION_ID",
+                    "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
             env.pop(key, None)
         env.update(env_extra or {})
-        return subprocess.run([sys.executable, "-m", "agent_dispatch", *args], env=env, cwd=cwd,
+        return env
+
+    def cli(self, *args, stdin=None, cwd=None, env_extra=None):
+        return subprocess.run([sys.executable, "-m", "agent_dispatch", *args], env=self.child_env(env_extra), cwd=cwd,
                               capture_output=True, text=True, input=stdin, timeout=60)
 
     def ok(self, *args, **kw):
@@ -1548,7 +1595,7 @@ class RegistryFixtureBase(DispatchBase):
             ROOT, textwrap.dedent(statements))
         env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends,
                    AGENT_DISPATCH_IMPORT_HOME=self.fakehome, PYTHONPATH=ROOT)
-        for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "TMUX_PANE"):
+        for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "TMUX_PANE", "PI_SESSION_ID"):
             env.pop(key, None)
         proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -2184,12 +2231,21 @@ class ModelLimitTest(DispatchBase):
 
     def start_async(self, *args):
         """并发派工用：不等命令结束，返回子进程。"""
-        env = dict(os.environ, AGENT_DISPATCH_HOME=self.home, AGENT_DISPATCH_BACKENDS=self.backends, PYTHONPATH=ROOT)
-        for key in ("AGENT_DISPATCH_WORKER", "AGENT_DISPATCH_SESSION", "AGENT_DISPATCH_SESSION_KIND",
-                    "CLAUDE_CODE_SESSION_ID", "TMUX_PANE", "TERM_SESSION_ID", "TMUX"):
-            env.pop(key, None)
-        return subprocess.Popen([sys.executable, "-m", "agent_dispatch", *args], env=env,
+        return subprocess.Popen([sys.executable, "-m", "agent_dispatch", *args], env=self.child_env(),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def test_async_start_does_not_inherit_codex_supervisor(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "00000000-0000-4000-8000-000000000099",
+                                     "CODEX_SESSION_ID": "00000000-0000-4000-8000-000000000099",
+                                     "AGENT_DISPATCH_CODEX_NOTIFY": "0"}):
+            proc = self.start_async("start", "async-isolated", "-p", "t", "STATUS: PASS")
+            stdout, stderr = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, stdout + stderr)
+        self.ok("wait", "async-isolated", "--timeout", "20")
+        job = self.job("async-isolated")
+        self.assertNotEqual(job["dispatcher"]["kind"], "Codex")
+        self.assertFalse(job.get("codex_notify"))
 
     def test_default_limit_queues_and_auto_starts(self):
         self.ok("models", "limit", "--default", "1")
@@ -2255,7 +2311,8 @@ class ModelLimitTest(DispatchBase):
         self.ok("models", "limit", "--default", "2")
         procs = [self.start_async("start", f"c{i}", "-p", "t", "--channels", "none", "SLEEP 4\nSTATUS: PASS") for i in range(6)]
         for proc in procs:
-            proc.wait(timeout=60)
+            stdout, stderr = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, stdout + stderr)
         jobs = {j["name"]: j for j in json.loads(self.ok("status", "--json").stdout)}
         running = [j for j in jobs.values() if j["state"] == "running"]
         queued = [j for j in jobs.values() if j["state"] == "queued"]
@@ -2484,6 +2541,48 @@ class RoleEnvLimitTest(DispatchBase):
         self.ok("wait", "x0", "--timeout", "20")
         self.assertEqual(self.job("x0")["report"]["AD_ENV"], "-")
 
+    def test_role_fixed_env_needs_no_env_flag(self):
+        self.role("t-line", extends="qa", title="线测试", needs_env=True, max_parallel=1,
+                  repo_by_env={"e1": "app", "e2": "app2"}, channels="none")
+        self.role("t-line-e2", extends="t-line", title="线测试（环境二）", env="e2")
+        # 选角色就定了环境：不带 --env，效果和带了 --env e2 一样
+        self.ok("start", "x1", "-P", "p1", "-r", "t-line-e2", "INJECTDUMP\nSTATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        job = self.job("x1")
+        self.assertEqual((job["env"], job["cwd"], job["repo"], job["role"]), ("e2", self.env2_dir, "app2", "t-line-e2"))
+        self.assertEqual(job["report"]["AD_ENV"], "e2")
+        self.assertEqual(job["report"]["AT_ENV"], "test-e2")
+        # 带同一个环境可以，带别的环境拒绝
+        self.ok("start", "x2", "-P", "p1", "-r", "t-line-e2", "--env", "e2", "STATUS: PASS")
+        self.ok("wait", "x2", "--timeout", "20")
+        wrong = self.cli("start", "x3", "-P", "p1", "-r", "t-line-e2", "--env", "e1", "STATUS: PASS")
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("固定在环境 e2", wrong.stderr)
+        # 角色写了项目里没有的环境：派工时报出来
+        self.role("t-line-e9", extends="t-line", title="线测试（不存在的环境）", env="e9")
+        unknown = self.cli("start", "x4", "-P", "p1", "-r", "t-line-e9", "STATUS: PASS")
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("没有环境", unknown.stderr)
+
+    def test_role_disable_blocks_new_jobs_only(self):
+        self.role("t-line", extends="qa", title="线测试", repos=["app"], channels="none")
+        self.role("t-sub", extends="t-line", title="线测试（子）")
+        self.ok("start", "x1", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        self.assertIn("停用", self.ok("roles", "disable", "线测试", "-P", "p1").stderr)
+        blocked = self.cli("start", "x2", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("已停用", blocked.stderr)
+        self.assertIn("roles enable t-line", blocked.stderr)
+        self.assertIn("已停用", self.ok("roles", "-P", "p1").stdout)
+        # 停用不随 extends 继承；已派出的作业照常续派
+        self.ok("start", "x3", "-P", "p1", "-r", "t-sub", "STATUS: PASS")
+        self.ok("wait", "x3", "--timeout", "20")
+        self.ok("reply", "x1", "STATUS: PASS")
+        self.ok("wait", "x1", "--timeout", "20")
+        self.ok("roles", "enable", "t-line", "-P", "p1")
+        self.ok("start", "x4", "-P", "p1", "-r", "t-line", "STATUS: PASS")
+
     def test_max_parallel_counts_per_role_and_env(self):
         self.role("t-line", extends="qa", title="线测试", needs_env=True, max_parallel=1,
                   repo_by_env={"e1": "app", "e2": "app2"}, channels="none")
@@ -2658,3 +2757,495 @@ class WebVersionTest(DispatchBase):
         finally:
             os.utime(target, ns=(saved.st_atime_ns, saved.st_mtime_ns))
             self.ok("web", "stop")
+
+
+CODEX_THREAD = "00000000-0000-4000-8000-000000000001"
+
+FAKE_CODEX_SOURCE = '''#!/usr/bin/env python3
+"""测试用的假 codex：把收到的 argv 记进 FAKE_CODEX_LOG（JSON 行），按 FAKE_CODEX_RC 退出。"""
+import json
+import os
+import sys
+import time
+
+entry = {"argv": sys.argv[1:], "cwd": os.getcwd()}
+log = os.environ.get("FAKE_CODEX_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\\n")
+sleep = os.environ.get("FAKE_CODEX_SLEEP")
+if sleep:
+    time.sleep(float(sleep))
+sys.exit(int(os.environ.get("FAKE_CODEX_RC", "0") or 0))
+'''
+
+
+class CodexNotifyTest(DispatchBase):
+    """Codex 交互主管的结果自动回传：身份识别、后台等待器、投递、去重与抑制。"""
+
+    def setUp(self):
+        super().setUp()
+        self.codex_log = os.path.join(self.tmp, "codex-queue.log")
+        self.fake_codex = os.path.join(self.tmp, "fake-codex")
+        with open(self.fake_codex, "w", encoding="utf-8") as f:
+            f.write(FAKE_CODEX_SOURCE)
+        os.chmod(self.fake_codex, 0o755)
+        self.notify_env = {"CODEX_THREAD_ID": CODEX_THREAD, "AGENT_DISPATCH_CODEX_NOTIFY": "1",
+                           "AGENT_DISPATCH_CODEX_BIN": self.fake_codex,
+                           "FAKE_CODEX_LOG": self.codex_log, "AGENT_DISPATCH_NOTIFY_POLL": "0.1"}
+
+    def codex_cli(self, *args, **kw):
+        extra = dict(self.notify_env)
+        extra.update(kw.pop("env_extra", {}) or {})
+        return self.cli(*args, env_extra=extra, **kw)
+
+    def codex_ok(self, *args, **kw):
+        result = self.codex_cli(*args, **kw)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return result
+
+    def queued(self):
+        if not os.path.exists(self.codex_log):
+            return []
+        with open(self.codex_log, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def settled_notify(self, name, turn=None, timeout=20):
+        """等通知记录走出 waiting / delivering；返回最后一条记录。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            records = [r for r in self.job(name).get("codex_notify") or [] if turn is None or r["turn"] == turn]
+            if records and records[-1].get("state") not in ("waiting", "delivering"):
+                return records[-1]
+            time.sleep(0.2)
+        self.fail(f"作业 {name} 的通知迟迟没有落定")
+
+    # ---------- 身份 ----------
+
+    def test_codex_identity_and_priority(self):
+        sys.path.insert(0, ROOT)
+        from agent_dispatch import store
+        # 执行者 / 显式自设 / Claude Code 的既有优先级都不退化，即使 CODEX 变量也在场
+        who = store.identify_dispatcher({"AGENT_DISPATCH_WORKER": "j-x", "CODEX_THREAD_ID": CODEX_THREAD}, 1,
+                                        lambda n: {"session_id": "ses-1"})
+        self.assertEqual((who["kind"], who["session_id"]), ("执行者", "ses-1"))
+        who = store.identify_dispatcher({"AGENT_DISPATCH_SESSION": "s-sup", "CODEX_THREAD_ID": CODEX_THREAD}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("主管", "s-sup"))
+        who = store.identify_dispatcher({"CLAUDE_CODE_SESSION_ID": "cc-9", "CODEX_THREAD_ID": CODEX_THREAD}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("Claude Code", "cc-9"))
+        # Codex：优先 CODEX_THREAD_ID，兼容 CODEX_SESSION_ID；是单独的明确记录
+        who = store.identify_dispatcher({"CODEX_THREAD_ID": CODEX_THREAD, "CODEX_SESSION_ID": "ses-old"}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("Codex", CODEX_THREAD))
+        who = store.identify_dispatcher({"CODEX_SESSION_ID": CODEX_THREAD}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("Codex", CODEX_THREAD))
+        # 都没有时不冒认：落到终端/ppid，绝不把执行者或终端当作 Codex thread
+        who = store.identify_dispatcher({"TERM_SESSION_ID": "w0t0p1"}, 1)
+        self.assertEqual(who["kind"], "终端")
+        who = store.identify_dispatcher({}, 4242)
+        self.assertEqual((who["kind"], who["session_id"]), ("终端", "ppid-4242"))
+
+    def test_codex_dispatcher_recorded_on_job(self):
+        self.codex_ok("start", "c0", "-p", "t", "STATUS: PASS")
+        self.codex_ok("wait", "c0", "--timeout", "20")
+        dispatcher = self.job("c0")["dispatcher"]
+        self.assertEqual((dispatcher["kind"], dispatcher["session_id"]), ("Codex", CODEX_THREAD))
+
+    # ---------- 自动回传 ----------
+
+    def test_codex_headless_start_auto_delivers_once(self):
+        self.codex_ok("start", "c1", "-p", "t", "MKRUN r1\nSTATUS: PASS\nRUN_DIR: runs/r1")
+        self.codex_ok("wait", "c1", "--timeout", "20")
+        record = self.settled_notify("c1", 1)
+        # 记录：状态、目标 thread、稳定事件 ID、结果与日志路径
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(record["target"], CODEX_THREAD)
+        self.assertEqual(record["event_id"], "codex-c1-t1")
+        self.assertIn("notify.log", record["log"])
+        # 投递：argv 数组调用假 codex（queue --thread <UUID> --message <摘要>），一条、不多投
+        entries = self.queued()
+        self.assertEqual(len(entries), 1)
+        argv = entries[0]["argv"]
+        self.assertEqual(argv[0], "queue")
+        self.assertEqual(argv[argv.index("--thread") + 1], CODEX_THREAD)
+        message = argv[argv.index("--message") + 1]
+        self.assertIn("作业 c1", message)
+        self.assertIn("第 1 轮", message)
+        self.assertIn("待审查", message)          # 状态是「待审查」，不宣称验收通过
+        self.assertIn("STATUS=PASS", message)
+        self.assertIn("codex-c1-t1", message)     # 稳定事件 ID
+        self.assertIn("result.md", message)       # 结论路径
+        self.assertNotIn("run.log 的全部内容", message)
+        # 执行者结果不受影响
+        job = self.job("c1")
+        self.assertEqual((job["state"], job["status"]), ("done", "PASS"))
+        # status --json 能查到通知状态与目标
+        self.assertEqual(self.job("c1")["codex_notify"][0]["target"], CODEX_THREAD)
+        # 详情里能看到投递结果
+        self.assertIn("已入队", self.codex_ok("status", "c1").stdout)
+
+    def test_fast_job_does_not_miss_delivery(self):
+        # 假智能体立即结束：等待器还没启动作业就已落定，第一条轮询要能补上投递
+        self.codex_ok("start", "c-fast", "-p", "t", "STATUS: PASS")
+        record = self.settled_notify("c-fast", 1)
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(len(self.queued()), 1)
+
+    def test_non_codex_and_disabled_jobs_do_not_notify(self):
+        # 普通会话（无 CODEX 变量）与 Claude 会话：不登记、不投递
+        self.ok("start", "n1", "-p", "t", "STATUS: PASS")
+        self.ok("wait", "n1", "--timeout", "20")
+        # Claude Code 主管：保持原有流程（自带后台 wait），agent-dispatch 不替它投递
+        self.ok("start", "n2", "-p", "t", "STATUS: PASS", env_extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
+        self.ok("wait", "n2", "--timeout", "20")
+        # Codex 主管但关闭自动回传：身份照常识别，只是不回传
+        self.codex_ok("start", "n3", "-p", "t", "STATUS: PASS", env_extra={"AGENT_DISPATCH_CODEX_NOTIFY": "0"})
+        self.codex_ok("wait", "n3", "--timeout", "20")
+        self.assertEqual(self.job("n3")["dispatcher"]["kind"], "Codex")
+        import time as time_mod
+        time_mod.sleep(1.5)  # 给可能存在的错误等待器留出投递时间
+        for name in ("n1", "n2", "n3"):
+            self.assertIsNone(self.job(name).get("codex_notify"))
+        self.assertEqual(self.queued(), [])
+
+    def test_reply_notifies_each_turn_on_original_thread(self):
+        self.codex_ok("start", "reply-c", "-p", "t", "STATUS: NEEDS_DECISION")
+        self.assertEqual(self.settled_notify("reply-c", 1)["state"], "queued")
+        self.codex_ok("reply", "reply-c", "STATUS: PASS")
+        self.assertEqual(self.settled_notify("reply-c", 2)["state"], "queued")
+        messages = [e["argv"][e["argv"].index("--message") + 1] for e in self.queued()]
+        self.assertEqual(len(messages), 2)
+        self.assertIn("codex-reply-c-t1", messages[0])
+        self.assertIn("codex-reply-c-t2", messages[1])
+
+    def test_failed_delivery_is_visible_and_retry_is_idempotent(self):
+        self.codex_ok("start", "fail-c", "-p", "t", "STATUS: PASS",
+                      env_extra={"FAKE_CODEX_RC": "7"})
+        record = self.settled_notify("fail-c", 1)
+        self.assertEqual(record["state"], "failed")
+        self.assertIn("退出码 7", record["error"])
+        self.assertEqual(self.job("fail-c")["status"], "PASS")
+        self.codex_ok("notify-retry", "fail-c")
+        self.codex_ok("notify-retry", "fail-c")
+        self.assertEqual(len(self.queued()), 2)  # 初次失败 + 一次重试
+        self.assertEqual(self.job("fail-c")["codex_notify"][0]["attempts"], 2)
+
+    def test_timeout_is_uncertain_and_not_resent(self):
+        self.codex_ok("start", "timeout-c", "-p", "t", "STATUS: PASS",
+                      env_extra={"FAKE_CODEX_SLEEP": "2", "AGENT_DISPATCH_CODEX_QUEUE_TIMEOUT": "0.2"})
+        self.assertEqual(self.settled_notify("timeout-c", 1)["state"], "uncertain")
+        result = self.codex_cli("notify-retry", "timeout-c")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("不自动重发", result.stderr)
+        self.assertEqual(len(self.queued()), 1)
+
+    def test_concurrent_waiters_do_not_duplicate_queue(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.codex_ok("start", "dup-c", "-p", "t", "SLEEP 1\nSTATUS: PASS")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.codex_cli, "_notify", "dup-c", "1") for _ in range(2)]
+            self.assertTrue(all(f.result().returncode == 0 for f in futures))
+        self.assertEqual(self.settled_notify("dup-c", 1)["state"], "queued")
+        self.assertEqual(len(self.queued()), 1)
+
+    def test_stale_held_and_cancelled_results_are_suppressed(self):
+        from agent_dispatch import notify, store
+        job = {"name": "j", "turn": 2, "state": "done"}
+        self.assertEqual(notify.turn_action(job, 1)[0], "suppress")
+        for state in ["held", "stopped", "accepted", "rejected"]:
+            self.assertEqual(notify.turn_action(dict(job, state=state), 2)[0], "suppress")
+        for value in ["window-title", "thread; command", "", None]:
+            self.assertIsNone(store.valid_thread_id(value))
+
+    @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
+    def test_tmux_finished_turn_notifies(self):
+        self.codex_ok("start", "tmux-c", "-p", "t", "--mode", "tmux", "STATUS: PASS")
+        record = self.settled_notify("tmux-c", 1, timeout=30)
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(self.job("tmux-c")["mode"], "tmux")
+        self.assertEqual(len(self.queued()), 1)
+
+
+PI_SESSION_A = "a0000000-0000-4000-8000-0000000000a1"
+PI_SESSION_B = "b0000000-0000-4000-8000-0000000000b2"
+
+
+class PiNotifyTest(DispatchBase):
+    """pi 交互主管的结果自动回传：身份识别、本地文件传输、抑制与跨会话隔离。"""
+
+    def setUp(self):
+        super().setUp()
+        self.pi_env = {"PI_SESSION_ID": PI_SESSION_A, "AGENT_DISPATCH_PI_NOTIFY": "1",
+                       "AGENT_DISPATCH_NOTIFY_POLL": "0.1"}
+
+    def pi_cli(self, *args, session=None, **kw):
+        extra = dict(self.pi_env)
+        if session is not None:
+            extra["PI_SESSION_ID"] = session
+        extra.update(kw.pop("env_extra", {}) or {})
+        return self.cli(*args, env_extra=extra, **kw)
+
+    def pi_ok(self, *args, **kw):
+        result = self.pi_cli(*args, **kw)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return result
+
+    def session_dir(self, session=PI_SESSION_A):
+        return os.path.join(self.home, "notify", "pi", session)
+
+    def pending_events(self, session=PI_SESSION_A):
+        directory = self.session_dir(session)
+        if not os.path.isdir(directory):
+            return []
+        return sorted(name for name in os.listdir(directory)
+                      if name.endswith(".json") and not name.endswith((".sent.json", ".suppressed.json")))
+
+    def markers(self, session=PI_SESSION_A):
+        directory = self.session_dir(session)
+        if not os.path.isdir(directory):
+            return []
+        return sorted(name for name in os.listdir(directory)
+                      if name.endswith(".sent.json") or name.endswith(".suppressed.json"))
+
+    def settled_notify(self, name, turn=None, timeout=20):
+        """等 pi 通知记录走出 waiting / delivering；返回最后一条记录。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            records = [r for r in self.job(name).get("pi_notify") or [] if turn is None or r["turn"] == turn]
+            if records and records[-1].get("state") not in ("waiting", "delivering"):
+                return records[-1]
+            time.sleep(0.2)
+        self.fail(f"作业 {name} 的 pi 通知迟迟没有落定")
+
+    # ---------- 身份 ----------
+
+    def test_pi_identity_and_priority(self):
+        sys.path.insert(0, ROOT)
+        from agent_dispatch import store
+        # 真实 pi 的会话标识：在继承来的 Claude / Codex 身份之前（pi 嵌套运行时两个都在）
+        who = store.identify_dispatcher({"PI_SESSION_ID": PI_SESSION_A, "CLAUDE_CODE_SESSION_ID": "cc-9",
+                                         "CODEX_THREAD_ID": CODEX_THREAD, "TMUX_PANE": "%1"}, 1)
+        self.assertEqual((who["kind"], who["session_id"]), ("pi", PI_SESSION_A))
+        # 执行者与显式自设会话仍保持最高优先级
+        who = store.identify_dispatcher({"AGENT_DISPATCH_WORKER": "j-x", "PI_SESSION_ID": PI_SESSION_A}, 1,
+                                        lambda n: {"session_id": "ses-1"})
+        self.assertEqual(who["kind"], "执行者")
+        who = store.identify_dispatcher({"AGENT_DISPATCH_SESSION": "s-sup", "PI_SESSION_ID": PI_SESSION_A}, 1)
+        self.assertEqual(who["kind"], "主管")
+        # 空 / 非法 ID 不冒认 pi，也不启用回传：落到继承身份或终端
+        for bad in ("", "   ", "/etc/passwd", "has space", None):
+            who = store.identify_dispatcher({"PI_SESSION_ID": bad, "CLAUDE_CODE_SESSION_ID": "cc-9"}, 1)
+            self.assertEqual((who["kind"], who["session_id"]), ("Claude Code", "cc-9"))
+        who = store.identify_dispatcher({"PI_SESSION_ID": "bad id"}, 1)
+        self.assertEqual(who["kind"], "终端")
+
+    # ---------- 自动回传 ----------
+
+    def test_pi_start_delivers_event_file(self):
+        result = self.pi_ok("start", "p1", "-p", "t", "MKRUN r1\nSTATUS: PASS\nRUN_DIR: runs/r1")
+        self.assertIn("回传", result.stderr)
+        self.assertIn("wait", result.stderr)
+        self.pi_ok("wait", "p1", "--timeout", "20")
+        record = self.settled_notify("p1", 1)
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(record["target"], PI_SESSION_A)
+        self.assertEqual(record["event_id"], "pi-p1-t1")
+        self.assertEqual(self.job("p1")["dispatcher"]["kind"], "pi")
+        # 事件文件：只写在主监会话自己的目录，内容可独立复核
+        self.assertEqual(self.pending_events(), ["pi-p1-t1.json"])
+        self.assertEqual(self.markers(), [])
+        with open(os.path.join(self.session_dir(), "pi-p1-t1.json"), encoding="utf-8") as f:
+            event = json.load(f)
+        self.assertEqual((event["event_id"], event["job"], event["turn"], event["session_id"]),
+                         ("pi-p1-t1", "p1", 1, PI_SESSION_A))
+        self.assertEqual((event["state"], event["status"]), ("done", "PASS"))
+        self.assertTrue(os.path.isfile(event["job_file"]))
+        for text in ("作业 p1", "第 1 轮", "待审查", "STATUS=PASS", "pi-p1-t1", "result.md", "gate p1"):
+            self.assertIn(text, event["message"])
+        # status 可诊断：记录、目标与未消费提示
+        detail = self.pi_ok("status", "p1").stdout
+        self.assertIn("回传", detail)
+        self.assertIn(PI_SESSION_A, detail)
+        self.assertIn("待扩展消费", detail)
+        self.assertIn("手动 wait", detail)
+        self.assertEqual(self.job("p1")["pi_notify"][0]["target"], PI_SESSION_A)
+
+    def test_pi_reply_notifies_each_turn_on_original_session(self):
+        # 每轮各一条事件；续派时换了操作者也不改绑定（首次派出即绑定主管会话）
+        self.pi_ok("start", "pr", "-p", "t", "STATUS: NEEDS_DECISION")
+        self.assertEqual(self.settled_notify("pr", 1)["state"], "queued")
+        self.pi_ok("reply", "pr", "STATUS: PASS", session=PI_SESSION_B)
+        self.assertEqual(self.settled_notify("pr", 2)["state"], "queued")
+        self.assertEqual(self.pending_events(), ["pi-pr-t1.json", "pi-pr-t2.json"])
+        self.assertEqual(self.pending_events(PI_SESSION_B), [])
+        for record in self.job("pr")["pi_notify"]:
+            self.assertEqual(record["target"], PI_SESSION_A)
+
+    def test_pi_fast_job_does_not_miss_delivery(self):
+        self.pi_ok("start", "p-fast", "-p", "t", "STATUS: PASS")
+        self.assertEqual(self.settled_notify("p-fast", 1)["state"], "queued")
+        self.assertEqual(self.pending_events(), ["pi-p-fast-t1.json"])
+
+    def test_pi_switch_off_disables_notify(self):
+        # 身份照常识别，只是不登记、不投递；AGENT_DISPATCH_CODEX_NOTIFY=0（默认）不影响 pi 回传
+        self.pi_ok("start", "p-off", "-p", "t", "STATUS: PASS", env_extra={"AGENT_DISPATCH_PI_NOTIFY": "0"})
+        self.pi_ok("wait", "p-off", "--timeout", "20")
+        self.assertEqual(self.job("p-off")["dispatcher"]["kind"], "pi")
+        time.sleep(1.0)  # 给可能误启动的等待器留出投递时间
+        self.assertIsNone(self.job("p-off").get("pi_notify"))
+        self.assertFalse(os.path.isdir(os.path.join(self.home, "notify")))
+
+    def test_pi_failed_delivery_is_visible_and_retryable(self):
+        # 通知目录被同名文件占住：失败要可见、可诊断；恢复后能补投且受尝试上限约束
+        os.makedirs(os.path.join(self.home, "notify"))
+        with open(os.path.join(self.home, "notify", "pi"), "w") as f:
+            f.write("not a dir")
+        self.pi_ok("start", "p-fail", "-p", "t", "STATUS: PASS")
+        record = self.settled_notify("p-fail", 1)
+        self.assertEqual(record["state"], "failed")
+        self.assertIn("pi 通知文件", record["error"])
+        self.assertEqual(self.job("p-fail")["status"], "PASS")
+        # CLI 可诊断：失败提示用 pi 自己的状态标签，不再是 Codex 的「已入队」
+        retry_hint = self.pi_cli("notify-retry", "p-fail")
+        self.assertIn("投递失败", retry_hint.stderr + retry_hint.stdout)
+        os.remove(os.path.join(self.home, "notify", "pi"))
+        self.pi_ok("notify-retry", "p-fail")
+        self.assertEqual(self.settled_notify("p-fail", 1)["state"], "queued")
+        self.assertEqual(self.pending_events(), ["pi-p-fail-t1.json"])
+        self.assertEqual(self.job("p-fail")["pi_notify"][0]["attempts"], 3)
+
+    def test_pi_concurrent_waiters_do_not_duplicate_event(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.pi_ok("start", "p-dup", "-p", "t", "SLEEP 1\nSTATUS: PASS")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.pi_cli, "_notify", "p-dup", "1") for _ in range(2)]
+            self.assertTrue(all(f.result().returncode == 0 for f in futures))
+        self.assertEqual(self.settled_notify("p-dup", 1)["state"], "queued")
+        self.assertEqual(self.pending_events(), ["pi-p-dup-t1.json"])
+
+    def test_pi_suppress_after_stop_and_accept(self):
+        # 叫停后等待器要抑制，不再写事件；已投递的作业 notify-retry 不重复投递，
+        # 投递后裁决的抑制由扩展消费前重查台账负责（extension_harness 的 suppressed 场景）
+        self.pi_ok("start", "p-stop", "-p", "t", "SLEEP 30")
+        self.pi_ok("stop", "p-stop", "--reason", "测试")
+        record = self.settled_notify("p-stop", 1)
+        self.assertEqual(record["state"], "suppressed")
+        self.assertIn("叫停", record.get("reason") or "")
+        self.assertEqual(self.pending_events(), [])
+        self.pi_ok("start", "p-acc", "-p", "t", "MKRUN r1\nSTATUS: PASS\nRUN_DIR: runs/r1")
+        self.pi_ok("wait", "p-acc", "--timeout", "20")
+        self.assertEqual(self.settled_notify("p-acc", 1)["state"], "queued")
+        self.pi_ok("gate", "p-acc")
+        self.pi_ok("accept", "p-acc")
+        self.pi_ok("notify-retry", "p-acc")
+        record = self.job("p-acc")["pi_notify"][0]
+        self.assertEqual(record["state"], "queued")  # 已入队不重复投递
+        self.assertEqual(record["attempts"], 1)
+        self.assertEqual(self.pending_events(), ["pi-p-acc-t1.json"])  # 只剩裁决前的那条
+
+    def test_pi_sessions_are_isolated(self):
+        self.pi_ok("start", "iso1", "-p", "t", "STATUS: PASS")
+        self.pi_ok("start", "iso2", "-p", "t", "--channels", "none", "STATUS: PASS", session=PI_SESSION_B)
+        self.pi_ok("wait", "iso1", "--timeout", "20")
+        self.pi_ok("wait", "iso2", "--timeout", "20")
+        self.assertEqual(self.settled_notify("iso1", 1)["target"], PI_SESSION_A)
+        self.assertEqual(self.settled_notify("iso2", 1)["target"], PI_SESSION_B)
+        self.assertEqual(self.pending_events(), ["pi-iso1-t1.json"])
+        self.assertEqual(self.pending_events(PI_SESSION_B), ["pi-iso2-t1.json"])
+        with open(os.path.join(self.session_dir(), "pi-iso1-t1.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["session_id"], PI_SESSION_A)
+
+    def test_pi_consumption_marker_is_visible_in_status(self):
+        self.pi_ok("start", "p-mark", "-p", "t", "STATUS: PASS")
+        self.assertEqual(self.settled_notify("p-mark", 1)["state"], "queued")
+        detail = self.pi_ok("status", "p-mark").stdout
+        self.assertIn("待扩展消费", detail)
+        self.assertIn("手动 wait", detail)
+        # 模拟扩展消费：把事件文件改名为已送入标记
+        base = os.path.join(self.session_dir(), "pi-p-mark-t1")
+        with open(base + ".sent.json", "w", encoding="utf-8") as f:
+            json.dump({"consumed": {"action": "sent", "deliverAs": "triggerTurn"}}, f, ensure_ascii=False)
+        os.remove(base + ".json")
+        detail = self.pi_ok("status", "p-mark").stdout
+        self.assertIn("已送入会话", detail)
+        self.assertIn("triggerTurn", detail)
+
+    def test_pi_effective_state_matches_extension_contract(self):
+        # 跨语言等价回归的 Python 侧基准：与 extension_harness 的 effective_state_equivalence
+        # 场景用同一组输入；两边结论必须一致（修改任一侧前先同步另一侧）
+        sys.path.insert(0, ROOT)
+        from agent_dispatch import store
+        dead = self._spawn_then_kill_pid()
+        # raw running + runner 已死/缺失 => interrupted；runner 存活（EPERM/信号 0 成功）=> running
+        self.assertEqual(store.effective_state({"state": "running", "runner_pid": dead}), "interrupted")
+        self.assertEqual(store.effective_state({"state": "running"}), "interrupted")
+        self.assertEqual(store.effective_state({"state": "running", "runner_pid": os.getpid()}), "running")
+        self.assertEqual(store.effective_state({"state": "done", "runner_pid": dead}), "done")
+
+    def _spawn_then_kill_pid(self):
+        """产一个确定已退出的 pid（SIGKILL 后收尸），供存活检查断言用。"""
+        proc = subprocess.Popen(["/bin/sleep", "30"])
+        proc.kill()
+        proc.wait()
+        return proc.pid
+
+    def test_pi_interrupted_reaches_extension_without_reconcile(self):
+        # 运行器被 SIGKILL（关机/OOM/误杀）：台账停在 raw running + runner_pid，
+        # 等待器按 effective_state 写出 interrupted 事件；扩展消费时按同一规则读 raw 台账送入。
+        # 全程不调 status/wait/reconcile，避免把问题掩在消费之前。
+        self.pi_ok("start", "p-int", "-p", "t", "SLEEP 60\nSTATUS: PASS")
+        job_path = os.path.join(self.home, "jobs", "p-int", "job.json")
+        with open(job_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        runner_pid, child_pid = raw["runner_pid"], raw.get("child_pid")
+        os.kill(runner_pid, signal.SIGKILL)
+        killed_child = child_pid is None
+        if not killed_child:
+            os.kill(child_pid, signal.SIGKILL)  # 测试卫生：不留孤儿假智能体
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            with open(job_path, encoding="utf-8") as f:  # 直接读文件，不经 status/reconcile
+                raw = json.load(f)
+            if not killed_child and raw.get("child_pid"):
+                try:
+                    os.kill(raw["child_pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                killed_child = True  # child_pid 由运行器稍后写入，读到就补刀
+            records = raw.get("pi_notify") or []
+            if records and records[-1]["state"] not in ("waiting", "delivering"):
+                break
+            time.sleep(0.2)
+        else:
+            self.fail("作业 p-int 的 pi 通知迟迟没有落定")
+        record = records[-1]
+        self.assertEqual(record["state"], "queued")
+        # 事件 state=interrupted，而台账仍是 raw running + 原 runner_pid（通知路径不改台账）
+        self.assertEqual(raw["state"], "running")
+        self.assertEqual(raw["runner_pid"], runner_pid)
+        with open(os.path.join(self.session_dir(), "pi-p-int-t1.json"), encoding="utf-8") as f:
+            event = json.load(f)
+        self.assertEqual(event["state"], "interrupted")
+        self.assertIn("意外中断", event["message"])
+        # 真实扩展消费：interrupted 事件必须送入，而不是被 raw running 抑制
+        proc, results = run_extension_harness(boundary_home=self.home, boundary_session=PI_SESSION_A,
+                                              boundary_event="pi-p-int-t1")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        boundary = next(r for r in results if r["scenario"] == "boundary_real_event")
+        self.assertTrue(boundary["ok"], json.dumps(boundary, ensure_ascii=False))
+        marker = os.path.join(self.session_dir(), "pi-p-int-t1.sent.json")
+        with open(marker, encoding="utf-8") as f:
+            consumed = json.load(f)["consumed"]
+        self.assertEqual(consumed["action"], "sent")
+        self.assertEqual(consumed["deliverAs"], "followUp")
+        # 扩展不改台账：仍是 raw running + 原 runner_pid，资源清理仍归 CLI reconcile
+        with open(job_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        self.assertEqual((raw["state"], raw["runner_pid"]), ("running", runner_pid))
+
+    @unittest.skipUnless(shutil.which("tmux"), "需要 tmux")
+    def test_pi_tmux_finished_turn_notifies(self):
+        self.pi_ok("start", "p-tmux", "-p", "t", "--mode", "tmux", "STATUS: PASS")
+        record = self.settled_notify("p-tmux", 1, timeout=30)
+        self.assertEqual(record["state"], "queued")
+        self.assertEqual(self.job("p-tmux")["mode"], "tmux")
+        self.assertEqual(self.pending_events(), ["pi-p-tmux-t1.json"])
